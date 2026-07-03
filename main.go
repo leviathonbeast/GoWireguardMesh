@@ -4,9 +4,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -111,11 +114,13 @@ func configureWireGuard(
 	iface string,
 	privateKey wgtypes.Key,
 	listenPort int,
+	peers []wgtypes.PeerConfig,
 ) error {
 	cfg := wgtypes.Config{
 		PrivateKey:   &privateKey,
 		ListenPort:   &listenPort,
 		ReplacePeers: true,
+		Peers:        peers,
 	}
 
 	if err := client.ConfigureDevice(iface, cfg); err != nil {
@@ -158,8 +163,83 @@ func waitForShutdown() {
 	fmt.Printf("\nReceived signal: %s\n", sig)
 }
 
+func buildPeerConfig(
+	pubkey,
+	endpoint,
+	allowedCIDR string,
+) (wgtypes.PeerConfig, error) {
+	publicKey, err := wgtypes.ParseKey(pubkey)
+	if err != nil {
+		return wgtypes.PeerConfig{},
+			fmt.Errorf("parse public key %q: %w", pubkey, err)
+	}
+
+	var udpAddr *net.UDPAddr
+
+	if endpoint != "" {
+		udpAddr, err = net.ResolveUDPAddr("udp", endpoint)
+		if err != nil {
+			return wgtypes.PeerConfig{},
+				fmt.Errorf("resolve endpoint %q: %w", endpoint, err)
+		}
+	}
+
+	_, allowedNet, err := net.ParseCIDR(allowedCIDR)
+	if err != nil {
+		return wgtypes.PeerConfig{},
+			fmt.Errorf("parse allowed CIDR %q: %w", allowedCIDR, err)
+	}
+
+	keepalive := 25 * time.Second
+
+	cfg := wgtypes.PeerConfig{
+		PublicKey: publicKey,
+		Endpoint:  udpAddr,
+		AllowedIPs: []net.IPNet{
+			*allowedNet,
+		},
+		PersistentKeepaliveInterval: &keepalive,
+	}
+
+	return cfg, nil
+}
+
+func loadOrGenerateKey(path string) (wgtypes.Key, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Generate a new private key
+			key, err := wgtypes.GeneratePrivateKey()
+			if err != nil {
+				return wgtypes.Key{}, fmt.Errorf("generate private key: %w", err)
+			}
+
+			// Save it to disk with secure permissions
+			err = os.WriteFile(path, []byte(key.String()+"\n"), 0600)
+			if err != nil {
+				return wgtypes.Key{}, fmt.Errorf("write key file %q: %w", path, err)
+			}
+
+			return key, nil
+		}
+
+		return wgtypes.Key{}, fmt.Errorf("read key file %q: %w", path, err)
+	}
+
+	// Parse existing key
+	keyStr := strings.TrimSpace(string(data))
+
+	key, err := wgtypes.ParseKey(keyStr)
+	if err != nil {
+		return wgtypes.Key{}, fmt.Errorf("parse key file %q: %w", path, err)
+	}
+
+	return key, nil
+}
+
 func run() error {
 	flag.Parse()
+
 	if os.Geteuid() != 0 {
 		return errors.New("must run as root")
 	}
@@ -169,7 +249,7 @@ func run() error {
 		return err
 	}
 
-	privateKey, err := generatePrivateKey()
+	privateKey, err := loadOrGenerateKey("wgkey.key")
 	if err != nil {
 		return err
 	}
@@ -200,7 +280,32 @@ func run() error {
 	}
 	defer client.Close()
 
-	if err := configureWireGuard(client, ifaceName, privateKey, listenPort); err != nil {
+	var peers []wgtypes.PeerConfig
+
+	if *peerKeyFlag != "" {
+		if *peerAddrFlag == "" {
+			return errors.New("peer-addr is required when peer-key is set")
+		}
+
+		peerCfg, err := buildPeerConfig(
+			*peerKeyFlag,
+			*peerEndpointFlag,
+			*peerAddrFlag,
+		)
+		if err != nil {
+			return err
+		}
+
+		peers = append(peers, peerCfg)
+	}
+
+	if err := configureWireGuard(
+		client,
+		ifaceName,
+		privateKey,
+		listenPort,
+		peers,
+	); err != nil {
 		return err
 	}
 
