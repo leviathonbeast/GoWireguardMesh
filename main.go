@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,8 +15,14 @@ import (
 
 const (
 	ifaceName  = "wg-int"
-	address    = "100.64.0.1/16"
 	listenPort = 51820
+)
+
+var (
+	addrFlag         = flag.String("addr", "100.64.0.1/16", "overlay address (CIDR)")
+	peerKeyFlag      = flag.String("peer-key", "", "peer public key (base64)")
+	peerEndpointFlag = flag.String("peer-endpoint", "", "peer endpoint host:port (optional)")
+	peerAddrFlag     = flag.String("peer-addr", "", "peer overlay address, e.g. 100.64.0.2/32")
 )
 
 func generatePrivateKey() (wgtypes.Key, error) {
@@ -152,6 +159,7 @@ func waitForShutdown() {
 }
 
 func run() error {
+	flag.Parse()
 	if os.Geteuid() != 0 {
 		return errors.New("must run as root")
 	}
@@ -178,7 +186,7 @@ func run() error {
 		return err
 	}
 
-	if err := assignIPAddress(ifaceName, address); err != nil {
+	if err := assignIPAddress(ifaceName, *addrFlag); err != nil {
 		return err
 	}
 
