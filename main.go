@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -16,15 +18,13 @@ const (
 	listenPort = 51820
 )
 
-func generateKeyPair() (wgtypes.Key, wgtypes.Key, error) {
+func generatePrivateKey() (wgtypes.Key, error) {
 	privateKey, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
-		return wgtypes.Key{}, wgtypes.Key{}, fmt.Errorf("generate private key: %w", err)
+		return wgtypes.Key{}, fmt.Errorf("generate private key: %w", err)
 	}
 
-	publicKey := privateKey.PublicKey()
-
-	return privateKey, publicKey, nil
+	return privateKey, nil
 }
 
 func createInterface(name string) error {
@@ -135,6 +135,22 @@ func printDeviceState(client *wgctrl.Client, iface string) error {
 	return nil
 }
 
+func waitForShutdown() {
+	sigCh := make(chan os.Signal, 1)
+
+	signal.Notify(
+		sigCh,
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+
+	fmt.Println("\nWaiting for shutdown signal (Ctrl+C)...")
+
+	sig := <-sigCh
+
+	fmt.Printf("\nReceived signal: %s\n", sig)
+}
+
 func run() error {
 	if os.Geteuid() != 0 {
 		return errors.New("must run as root")
@@ -145,10 +161,12 @@ func run() error {
 		return err
 	}
 
-	privateKey, _, err := generateKeyPair()
+	privateKey, err := generatePrivateKey()
 	if err != nil {
 		return err
 	}
+
+	fmt.Printf("Public Key: %s\n", privateKey.PublicKey())
 
 	defer func() {
 		if err := deleteInterface(ifaceName); err != nil {
@@ -183,6 +201,9 @@ func run() error {
 	}
 
 	fmt.Println("\nWireGuard interface setup complete")
+
+	// Block until terminated.
+	waitForShutdown()
 
 	return nil
 }
