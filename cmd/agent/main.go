@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -28,14 +31,16 @@ const (
 )
 
 var (
-	addrFlag         = flag.String("addr", "100.64.0.1/16", "overlay address (CIDR)")
-	peerKeyFlag      = flag.String("peer-key", "", "peer public key (base64)")
-	peerEndpointFlag = flag.String("peer-endpoint", "", "peer endpoint host:port (optional)")
-	peerAddrFlag     = flag.String("peer-addr", "", "peer overlay address, e.g. 100.64.0.2/32")
-	peerPSKFlag      = flag.String("peer-psk", "", "preshared key (base64, optional)")
-	serverFlag       = flag.String("server", "", "control plane URL (e.g. http://host:8080); enables enrollment mode")
-	setupKeyFlag     = flag.String("setup-key", "", "setup key for enrollment (required with --server)")
-	keyFileFlag      = flag.String("key-file", "wgkey.key", "path to private key file")
+	addrFlag           = flag.String("addr", "100.64.0.1/16", "overlay address (CIDR)")
+	peerKeyFlag        = flag.String("peer-key", "", "peer public key (base64)")
+	peerEndpointFlag   = flag.String("peer-endpoint", "", "peer endpoint host:port (optional)")
+	peerAddrFlag       = flag.String("peer-addr", "", "peer overlay address, e.g. 100.64.0.2/32")
+	peerPSKFlag        = flag.String("peer-psk", "", "preshared key (base64, optional)")
+	serverFlag         = flag.String("server", "", "control plane URL (e.g. https://host:8080); enables enrollment mode")
+	setupKeyFlag       = flag.String("setup-key", "", "setup key for enrollment (required with --server)")
+	serverCAFlag       = flag.String("server-ca", "", "PEM certificate to trust for the control plane (pin its self-signed cert.pem)")
+	reportIntervalFlag = flag.Duration("report-interval", 30*time.Second, "telemetry reporting interval")
+	keyFileFlag        = flag.String("key-file", "wgkey.key", "path to private key file")
 )
 
 func generatePrivateKey() (wgtypes.Key, error) {
@@ -261,9 +266,37 @@ func loadOrGenerateKey(path string) (wgtypes.Key, error) {
 	return key, nil
 }
 
+// newHTTPClient returns a client trusting caFile (a PEM certificate,
+// typically the control plane's self-signed cert) in addition to
+// nothing else — pinning replaces the system pool rather than adding
+// to it. An empty caFile means the system pool.
+func newHTTPClient(caFile string) (*http.Client, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	if caFile == "" {
+		return client, nil
+	}
+
+	pemData, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read server CA file %q: %w", caFile, err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("server CA file %q contains no valid PEM certificates", caFile)
+	}
+
+	client.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool},
+	}
+
+	return client, nil
+}
+
 // enroll registers this node with the control plane and returns the
 // mesh configuration. Never sends the private key.
-func enroll(serverURL, setupKey string, publicKey wgtypes.Key, hostname string, listenPort int) (*proto.EnrollResponse, error) {
+func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostname string, listenPort int) (*proto.EnrollResponse, error) {
 	reqBody, err := json.Marshal(proto.EnrollRequest{
 		SetupKey:   setupKey,
 		PublicKey:  publicKey.String(),
@@ -274,7 +307,10 @@ func enroll(serverURL, setupKey string, publicKey wgtypes.Key, hostname string, 
 		return nil, fmt.Errorf("encode enroll request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client, err := newHTTPClient(serverCA)
+	if err != nil {
+		return nil, err
+	}
 
 	resp, err := client.Post(serverURL+"/enroll", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -377,7 +413,11 @@ func run() error {
 	// and peer list; the manual --peer-* flags are the standalone path.
 	overlayAddr := *addrFlag
 
-	var enrolledPeers []wgtypes.PeerConfig
+	var (
+		enrolledPeers []wgtypes.PeerConfig
+		authToken     string
+		meshNetwork   netip.Prefix
+	)
 
 	if *serverFlag != "" {
 		if *setupKeyFlag == "" {
@@ -386,18 +426,19 @@ func run() error {
 
 		hostname, _ := os.Hostname()
 
-		resp, err := enroll(*serverFlag, *setupKeyFlag, privateKey.PublicKey(), hostname, listenPort)
+		resp, err := enroll(*serverFlag, *setupKeyFlag, *serverCAFlag, privateKey.PublicKey(), hostname, listenPort)
 		if err != nil {
 			return err
 		}
 
-		_, network, err := net.ParseCIDR(resp.NetworkCIDR)
+		authToken = resp.AuthToken
+
+		meshNetwork, err = netip.ParsePrefix(resp.NetworkCIDR)
 		if err != nil {
 			return fmt.Errorf("parse network CIDR %q from server: %w", resp.NetworkCIDR, err)
 		}
 
-		bits, _ := network.Mask.Size()
-		overlayAddr = fmt.Sprintf("%s/%d", resp.AssignedIP, bits)
+		overlayAddr = fmt.Sprintf("%s/%d", resp.AssignedIP, meshNetwork.Bits())
 
 		for _, p := range resp.Peers {
 			cfg, err := peerConfigFromProto(p)
@@ -471,6 +512,38 @@ func run() error {
 	}
 
 	fmt.Println("\nWireGuard interface setup complete")
+
+	// Telemetry runs only in enrollment mode: without a control plane
+	// there is nowhere to report.
+	if authToken != "" {
+		reporter, err := newTelemetryReporter(
+			client,
+			*serverFlag,
+			authToken,
+			*serverCAFlag,
+			ifaceName,
+			meshNetwork,
+			*reportIntervalFlag,
+		)
+		if err != nil {
+			return err
+		}
+
+		stop := make(chan struct{})
+		done := make(chan struct{})
+
+		go func() {
+			defer close(done)
+			reporter.run(stop)
+		}()
+
+		defer func() {
+			close(stop)
+			<-done
+		}()
+
+		fmt.Printf("Telemetry reporting every %s\n", *reportIntervalFlag)
+	}
 
 	// Block until terminated.
 	waitForShutdown()

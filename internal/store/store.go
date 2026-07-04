@@ -4,8 +4,10 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -41,6 +43,28 @@ type EnrollResult struct {
 	Peer    PeerRow
 	Others  []PeerRow
 	Created bool // false on idempotent re-enroll
+
+	// AuthToken authenticates the peer's subsequent reports. Fresh on
+	// every enrollment (re-enrolls rotate it); only the hash persists.
+	AuthToken string
+}
+
+// newAuthToken mints a peer auth token and the hash stored in its place.
+func newAuthToken() (token, hash string, err error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", fmt.Errorf("generate auth token: %w", err)
+	}
+
+	token = base64.RawURLEncoding.EncodeToString(raw)
+
+	return token, HashToken(token), nil
+}
+
+// HashToken maps a peer auth token to its stored form.
+func HashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // Open opens (creating if needed) the SQLite database at path and
@@ -71,22 +95,94 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// schemaVersion is the current PRAGMA user_version. schema.sql is the
+// v1 baseline; later versions are applied as migrations on top.
+const schemaVersion = 2
+
+var migrations = map[int]string{
+	2: migrationV2,
+}
+
+// migrationV2 adds telemetry: per-peer auth tokens (issued at
+// enrollment, hash only), accumulated per-link WireGuard counters,
+// and conntrack flow logs.
+const migrationV2 = `
+ALTER TABLE peers ADD COLUMN auth_token_hash TEXT;
+
+CREATE INDEX idx_peers_auth_token_hash ON peers(auth_token_hash);
+
+CREATE TABLE link_stats (
+    peer_id           INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    remote_peer_id    INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    rx_bytes          INTEGER NOT NULL DEFAULT 0,
+    tx_bytes          INTEGER NOT NULL DEFAULT 0,
+    last_handshake_at TEXT,
+    updated_at        TEXT NOT NULL,
+    PRIMARY KEY (peer_id, remote_peer_id)
+);
+
+CREATE TABLE flows (
+    id          INTEGER PRIMARY KEY,
+    peer_id     INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    protocol    INTEGER NOT NULL,
+    src_ip      TEXT NOT NULL,
+    src_port    INTEGER NOT NULL,
+    dst_ip      TEXT NOT NULL,
+    dst_port    INTEGER NOT NULL,
+    tx_bytes    INTEGER NOT NULL,
+    rx_bytes    INTEGER NOT NULL,
+    tx_packets  INTEGER NOT NULL,
+    rx_packets  INTEGER NOT NULL,
+    reported_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_flows_reported_at ON flows(reported_at);
+CREATE INDEX idx_flows_peer_id ON flows(peer_id);
+`
+
 func ensureSchema(db *sql.DB, schemaSQL string) error {
-	var n int
-
-	err := db.QueryRow(
-		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'peers'`,
-	).Scan(&n)
-	if err != nil {
-		return fmt.Errorf("check schema: %w", err)
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
 	}
 
-	if n > 0 {
-		return nil
+	if version == 0 {
+		var n int
+
+		err := db.QueryRow(
+			`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'peers'`,
+		).Scan(&n)
+		if err != nil {
+			return fmt.Errorf("check schema: %w", err)
+		}
+
+		if n == 0 {
+			if _, err := db.Exec(schemaSQL); err != nil {
+				return fmt.Errorf("apply base schema: %w", err)
+			}
+		}
+
+		// Databases from before versioning are the v1 baseline.
+		version = 1
+
+		if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+			return fmt.Errorf("set schema version: %w", err)
+		}
 	}
 
-	if _, err := db.Exec(schemaSQL); err != nil {
-		return fmt.Errorf("apply schema: %w", err)
+	for v := version + 1; v <= schemaVersion; v++ {
+		sql, ok := migrations[v]
+		if !ok {
+			return fmt.Errorf("missing migration for schema version %d", v)
+		}
+
+		if _, err := db.Exec(sql); err != nil {
+			return fmt.Errorf("apply migration v%d: %w", v, err)
+		}
+
+		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v)); err != nil {
+			return fmt.Errorf("set schema version %d: %w", v, err)
+		}
 	}
 
 	return nil
@@ -207,10 +303,15 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 		port = sql.NullInt64{Int64: int64(listenPort), Valid: true}
 	}
 
+	token, tokenHash, err := newAuthToken()
+	if err != nil {
+		return nil, err
+	}
+
 	insert, err := tx.ExecContext(ctx,
-		`INSERT INTO peers (public_key, assigned_ip, hostname, listen_port, setup_key_id)
-		 VALUES (?, ?, ?, ?, ?)`,
-		publicKey, ip, host, port, keyID,
+		`INSERT INTO peers (public_key, assigned_ip, hostname, listen_port, setup_key_id, auth_token_hash)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		publicKey, ip, host, port, keyID, tokenHash,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert peer: %w", err)
@@ -231,9 +332,10 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 	}
 
 	return &EnrollResult{
-		Peer:    PeerRow{ID: peerID, PublicKey: publicKey, AssignedIP: ip},
-		Others:  others,
-		Created: true,
+		Peer:      PeerRow{ID: peerID, PublicKey: publicKey, AssignedIP: ip},
+		Others:    others,
+		Created:   true,
+		AuthToken: token,
 	}, nil
 }
 
@@ -260,6 +362,19 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 		return nil, fmt.Errorf("%w: re-enroll setup key does not match original enrollment", ErrUnauthorized)
 	}
 
+	// Rotate the auth token: the original was only ever stored as a
+	// hash, so a retrying agent needs a fresh one to keep reporting.
+	token, tokenHash, err := newAuthToken()
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE peers SET auth_token_hash = ? WHERE id = ?`, tokenHash, existing.ID,
+	); err != nil {
+		return nil, fmt.Errorf("rotate auth token: %w", err)
+	}
+
 	others, err := listOthers(ctx, tx, publicKey)
 	if err != nil {
 		return nil, err
@@ -271,7 +386,7 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 
 	existing.PublicKey = publicKey
 
-	return &EnrollResult{Peer: existing, Others: others, Created: false}, nil
+	return &EnrollResult{Peer: existing, Others: others, Created: false, AuthToken: token}, nil
 }
 
 // allocateIP returns the lowest free host address in the overlay

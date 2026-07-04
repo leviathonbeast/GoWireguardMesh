@@ -16,9 +16,19 @@ Working today:
 - **Agent** — creates the WireGuard interface, assigns the overlay address,
   configures peers, tears down cleanly on SIGINT/SIGTERM. Verified end-to-end
   between two VMs (pings both ways, endpoint roaming observed).
-- **Control plane** — HTTP enrollment with setup keys (expiry, max uses,
+- **Control plane** — HTTPS enrollment with setup keys (expiry, max uses,
   revocation), atomic IP allocation, idempotent re-enroll, network-wide
   preshared key distribution. Backed by SQLite.
+- **Web UI** — React + TypeScript admin interface (embedded in the server
+  binary): list/revoke peers and setup keys, mint new setup keys. Protected
+  by a bearer token.
+- **TLS** — built-in self-signed certificates for standalone use (agents pin
+  the cert), or plain HTTP behind a TLS-terminating reverse proxy (Traefik).
+- **Telemetry** — agents report per-peer WireGuard transfer counters and
+  conntrack-based overlay flow logs (5-tuple, bytes, packets — headers only,
+  never payloads) every 30s. The server accumulates link stats, tracks peer
+  liveness (`last_seen_at`), stores flows with configurable retention, and
+  shows both in the web UI.
 
 Not built yet (roadmap, in order): config sync (new peers pushed to existing
 ones), STUN + UDP hole punching, relay fallback, DNS, ACLs.
@@ -27,11 +37,13 @@ ones), STUN + UDP hole punching, relay fallback, DNS, ACLs.
 
 ```
 cmd/agent/       node agent (runs on every machine in the mesh, needs root)
-cmd/server/      control plane (enrollment API + setup key management)
+cmd/server/      control plane (enrollment API + admin API + web UI)
 cmd/relay/       relay server (not yet implemented)
 internal/proto/  JSON wire structs shared by agent and server
 internal/store/  all SQLite access (schema, setup keys, atomic enrollment)
 internal/psk/    network-wide preshared key load-or-generate
+internal/tlsutil/ self-signed certificate load-or-generate
+web/             admin web UI (React + TypeScript, Vite)
 schema.sql       canonical database schema (embedded into the server binary)
 ```
 
@@ -44,24 +56,40 @@ schema.sql       canonical database schema (embedded into the server binary)
 
 ## Build
 
+The web UI is prebuilt into `web/dist` and embedded by `go:embed`, so a
+plain Go build works without a Node toolchain:
+
 ```sh
 go build -o bin/server ./cmd/server
 go build -o bin/agent  ./cmd/agent
 ```
 
-## Setting up the control plane
-
-Start the server (creates `mesh.db` and the schema on first run):
+After changing the UI source, rebuild the bundle first:
 
 ```sh
-./bin/server --listen 0.0.0.0:8080 --db mesh.db --network 100.64.0.0/16
+cd web && npm install && npm run build
 ```
 
-On first start it also generates `mesh-psk.key` — the network-wide WireGuard
-preshared key handed to every peer. Keep it 0600 and back it up alongside the
-database; losing it strands enrolled peers on a different PSK than new ones.
+## Setting up the control plane
 
-Mint a setup key (prints the token to stdout):
+Start the server (creates `mesh.db`, the schema, a self-signed TLS
+certificate, the network PSK, and the admin token on first run):
+
+```sh
+./bin/server --listen 0.0.0.0:8443 --tls-hosts "localhost,127.0.0.1,192.168.1.10"
+```
+
+Include every address agents will dial in `--tls-hosts` — SANs are baked in
+at generation time (delete `cert.pem`/`key.pem` to re-issue).
+
+Generated secrets, all 0600, all worth backing up alongside `mesh.db`:
+
+- `mesh-psk.key` — network-wide WireGuard preshared key handed to every
+  peer; losing it strands enrolled peers on a different PSK than new ones
+- `admin-token` — bearer token for the web UI and admin API
+- `key.pem` — TLS private key (`cert.pem` is the public half agents pin)
+
+Mint a setup key from the CLI (or use the web UI):
 
 ```sh
 ./bin/server newkey --db mesh.db                    # unlimited uses, never expires
@@ -73,21 +101,100 @@ Flags for `server`:
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--listen` | `127.0.0.1:8080` | HTTP listen address |
+| `--listen` | `127.0.0.1:8080` | listen address |
 | `--db` | `mesh.db` | SQLite database path |
 | `--network` | `100.64.0.0/16` | overlay network; peers get the lowest free IP |
 | `--psk-file` | `mesh-psk.key` | network preshared key file |
+| `--no-tls` | off | plain HTTP: behind a TLS-terminating proxy, or dev |
+| `--tls-cert` / `--tls-key` | `cert.pem` / `key.pem` | TLS cert/key; self-signed pair generated if missing |
+| `--tls-hosts` | `localhost,127.0.0.1` | SANs for a generated certificate |
+| `--admin-token-file` | `admin-token` | admin bearer token file |
+| `--flow-retention` | `168h` | how long flow log rows are kept (pruned hourly) |
 
-> **Security note:** enrollment currently runs over plain HTTP. That is
-> acceptable on a trusted LAN during development only — setup keys and the
-> PSK cross the wire in cleartext. TLS is planned before any public exposure.
+### Deploying behind Traefik (or another TLS-terminating proxy)
+
+If a reverse proxy handles your certificates, run the control plane on
+plain HTTP bound to a non-public address and let the proxy terminate TLS:
+
+```sh
+./bin/server --listen 127.0.0.1:8080 --no-tls
+```
+
+Traefik router (file provider sketch):
+
+```yaml
+http:
+  routers:
+    wgmesh:
+      rule: Host(`mesh.example.com`)
+      entryPoints: [websecure]
+      tls: { certResolver: letsencrypt }
+      service: wgmesh
+  services:
+    wgmesh:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:8080
+```
+
+Agents then talk to `https://mesh.example.com` with a real certificate, so
+no `--server-ca` pinning is needed. Never expose the `--no-tls` port
+directly — setup keys, the PSK, and the admin token cross that hop in
+cleartext.
+
+## Web UI
+
+The server serves the admin interface at `/` (same port as the API). Open
+it, paste the contents of `admin-token`, and you can list peers, mint setup
+keys with max-uses/expiry, and revoke peers or keys. The UI lives in `web/`
+(React + TypeScript); `npm run dev` starts a Vite dev server that proxies
+API calls to a locally running control plane on `127.0.0.1:8080`.
+
+The admin API behind it (all require `Authorization: Bearer <admin-token>`):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/peers` | list all peers, including revoked |
+| `POST /api/peers/{id}/revoke` | revoke a peer (kept out of future enrollment responses; IP stays reserved) |
+| `GET /api/setup-keys` | list all setup keys |
+| `POST /api/setup-keys` | create a key: `{"max_uses": 0, "expires_in": "24h"}` |
+| `POST /api/setup-keys/{id}/revoke` | revoke a key (also blocks re-enroll with it) |
+| `GET /api/link-stats` | accumulated per-link transfer totals + last handshake |
+| `GET /api/flows?limit=100` | recent overlay flow log entries |
+
+## Telemetry
+
+Enrollment returns a per-peer `auth_token` (only its SHA-256 hash is stored;
+re-enrolling rotates it, which also revokes the old one). The agent then
+POSTs to `/report` every `--report-interval` (default 30s) with:
+
+- **Link counters** — per-remote-peer rx/tx deltas from the WireGuard kernel
+  counters, plus the last handshake time. Deltas survive agent restarts
+  (kernel counters reset when the interface is recreated) and failed reports
+  (pending data is kept until the server accepts it). Every report — even an
+  empty one — bumps the peer's `last_seen_at`, so it doubles as a heartbeat.
+- **Flow logs** — overlay-only flows read from conntrack: protocol, src/dst
+  address and port, byte/packet deltas in both directions. Src is the flow
+  initiator. Header data only; payloads are never captured.
+
+Flow collection requires conntrack accounting; the agent enables
+`net.netfilter.nf_conntrack_acct` itself (it runs as root). If conntrack is
+unavailable, flow logs are disabled with a warning and counters still work.
+
+Revoking a peer also cuts off its reporting (the token check excludes
+revoked peers).
 
 ## Joining a node to the mesh
 
 On each machine (root required — the agent creates network interfaces):
 
 ```sh
-sudo ./bin/agent --server http://<control-plane>:8080 --setup-key <token>
+# behind Traefik (real certificate):
+sudo ./bin/agent --server https://mesh.example.com --setup-key <token>
+
+# standalone server with a self-signed certificate — pin it:
+sudo ./bin/agent --server https://192.168.1.10:8443 --setup-key <token> \
+  --server-ca cert.pem
 ```
 
 The agent will:

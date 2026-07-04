@@ -14,6 +14,11 @@ type EnrollResponse struct {
 	AssignedIP  string               `json:"assigned_ip"`
 	NetworkCIDR string               `json:"network_cidr"`
 	Peers       []PeerConfigResponse `json:"peers"`
+
+	// AuthToken authenticates subsequent agent requests (telemetry
+	// reports). Rotated on every enrollment, including idempotent
+	// re-enrolls; only its hash is stored server-side.
+	AuthToken string `json:"auth_token"`
 }
 
 // PeerConfigResponse is a JSON-safe representation of the peer

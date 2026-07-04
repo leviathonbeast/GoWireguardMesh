@@ -1,7 +1,13 @@
 /agent
 /server
 /relay
+/bin/
 *.db
 *.db-wal
 *.db-shm
 wgkey.key
+mesh-psk.key
+admin-token
+cert.pem
+key.pem
+node_modules/
