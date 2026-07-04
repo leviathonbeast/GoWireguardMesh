@@ -31,6 +31,11 @@ const timeFormat = "2006-01-02T15:04:05.000Z"
 type Store struct {
 	db      *sql.DB
 	network netip.Prefix
+
+	// DefaultAllow is the ACL default policy: true means every peer
+	// sees every peer unless the operator adds rules; false means
+	// only rule-connected pairs see each other. Set once at startup.
+	DefaultAllow bool
 }
 
 type PeerRow struct {
@@ -108,11 +113,12 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 3
+const schemaVersion = 4
 
 var migrations = map[int]string{
 	2: migrationV2,
 	3: migrationV3,
+	4: migrationV4,
 }
 
 // migrationV2 adds telemetry: per-peer auth tokens (issued at
@@ -160,6 +166,19 @@ CREATE INDEX idx_flows_peer_id ON flows(peer_id);
 const migrationV3 = `
 ALTER TABLE peers ADD COLUMN observed_ip TEXT;
 ALTER TABLE peers ADD COLUMN public_endpoint TEXT;
+`
+
+// migrationV4 adds ACL rules. Rules are ALLOW rules, matched
+// bidirectionally, with NULL meaning "any peer"; they only take
+// effect under --default-policy deny. Enforcement is visibility:
+// a peer never even receives config for peers it may not reach.
+const migrationV4 = `
+CREATE TABLE acl_rules (
+    id          INTEGER PRIMARY KEY,
+    src_peer_id INTEGER REFERENCES peers(id) ON DELETE CASCADE,
+    dst_peer_id INTEGER REFERENCES peers(id) ON DELETE CASCADE,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 `
 
 func ensureSchema(db *sql.DB, schemaSQL string) error {
@@ -345,7 +364,7 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 		return nil, fmt.Errorf("insert peer: %w", err)
 	}
 
-	others, err := listOthers(ctx, tx, publicKey)
+	others, err := listVisible(ctx, tx, peerID, s.DefaultAllow)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +421,7 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 		return nil, fmt.Errorf("rotate auth token: %w", err)
 	}
 
-	others, err := listOthers(ctx, tx, publicKey)
+	others, err := listVisible(ctx, tx, existing.ID, s.DefaultAllow)
 	if err != nil {
 		return nil, err
 	}
@@ -462,16 +481,28 @@ func (s *Store) allocateIP(ctx context.Context, tx *sql.Tx) (string, error) {
 // querier lets peer-list queries run inside or outside a transaction.
 type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-func listOthers(ctx context.Context, q querier, publicKey string) ([]PeerRow, error) {
+// listVisible returns the active peers selfID is allowed to reach.
+// Under default-allow that is everyone else; under default-deny a
+// peer is visible only when an ACL rule connects the pair. A rule
+// matches bidirectionally, with NULL as a wildcard for "any peer".
+// Filtering here IS the enforcement: an unauthorized peer never
+// learns the other's key, overlay IP, or endpoint.
+func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool) ([]PeerRow, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, public_key, assigned_ip,
-		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0)
-		 FROM peers
-		 WHERE revoked_at IS NULL AND public_key != ?
-		 ORDER BY id`,
-		publicKey,
+		`SELECT p.id, p.public_key, p.assigned_ip,
+		        COALESCE(p.public_endpoint, ''), COALESCE(p.observed_ip, ''), COALESCE(p.listen_port, 0)
+		 FROM peers p
+		 WHERE p.revoked_at IS NULL AND p.id != ?
+		   AND (? OR EXISTS (
+		       SELECT 1 FROM acl_rules r
+		       WHERE (r.src_peer_id IS NULL OR r.src_peer_id IN (?, p.id))
+		         AND (r.dst_peer_id IS NULL OR r.dst_peer_id IN (?, p.id))
+		   ))
+		 ORDER BY p.id`,
+		selfID, defaultAllow, selfID, selfID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list peers: %w", err)
@@ -497,19 +528,24 @@ func listOthers(ctx context.Context, q querier, publicKey string) ([]PeerRow, er
 	return out, nil
 }
 
-// PeersForID returns every active peer except id itself — the sync
-// payload for a reporting agent.
-func (s *Store) PeersForID(ctx context.Context, id int64) ([]PeerRow, error) {
+// PeersForID returns the reporting agent's public key and the peers
+// visible to it — the sync payload.
+func (s *Store) PeersForID(ctx context.Context, id int64) (string, []PeerRow, error) {
 	var publicKey string
 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT public_key FROM peers WHERE id = ?`, id,
 	).Scan(&publicKey)
 	if err != nil {
-		return nil, fmt.Errorf("look up peer %d: %w", id, err)
+		return "", nil, fmt.Errorf("look up peer %d: %w", id, err)
 	}
 
-	return listOthers(ctx, s.db, publicKey)
+	others, err := listVisible(ctx, s.db, id, s.DefaultAllow)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return publicKey, others, nil
 }
 
 // diagnoseKey explains (for logs only) why the consumption UPDATE

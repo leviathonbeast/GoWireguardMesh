@@ -101,6 +101,7 @@ h2 {
 }
 
 input,
+select,
 button {
   font: inherit;
   color: var(--text);

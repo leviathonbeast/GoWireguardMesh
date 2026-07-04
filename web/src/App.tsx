@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import type { Flow, LinkStat, Peer, SetupKey } from "./types";
+import type { AclResponse, Flow, LinkStat, Peer, SetupKey } from "./types";
 
 function formatTime(iso?: string): string {
   return iso ? iso.replace("T", " ").replace(/\.\d+Z$/, "Z") : "";
@@ -112,24 +112,29 @@ export default function App() {
   const [keys, setKeys] = useState<SetupKey[]>([]);
   const [links, setLinks] = useState<LinkStat[]>([]);
   const [flows, setFlows] = useState<Flow[]>([]);
+  const [acl, setAcl] = useState<AclResponse>({ default_policy: "allow", rules: [] });
   const [error, setError] = useState("");
   const [maxUses, setMaxUses] = useState(0);
   const [expiresIn, setExpiresIn] = useState("");
+  const [aclSrc, setAclSrc] = useState("any");
+  const [aclDst, setAclDst] = useState("any");
 
   const refresh = useCallback(async () => {
     if (!token) return;
     setError("");
     try {
-      const [p, k, l, f] = await Promise.all([
+      const [p, k, l, f, a] = await Promise.all([
         api<Peer[]>("/api/peers", token),
         api<SetupKey[]>("/api/setup-keys", token),
         api<LinkStat[]>("/api/link-stats", token),
         api<Flow[]>("/api/flows?limit=100", token),
+        api<AclResponse>("/api/acl", token),
       ]);
       setPeers(p);
       setKeys(k);
       setLinks(l);
       setFlows(f);
+      setAcl(a);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -164,6 +169,23 @@ export default function App() {
     setError("");
     try {
       await api(path, token, { method: "POST" });
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const createAclRule = async () => {
+    setError("");
+    try {
+      await api("/api/acl", token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          src_peer_id: aclSrc === "any" ? null : parseInt(aclSrc, 10),
+          dst_peer_id: aclDst === "any" ? null : parseInt(aclDst, 10),
+        }),
+      });
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -384,6 +406,85 @@ export default function App() {
 
       {tab === "access" && (
         <>
+          <h2>ACL rules</h2>
+          <div className="panel">
+            <p className="muted" style={{ marginTop: 0 }}>
+              default policy: <strong>{acl.default_policy}</strong>
+              {acl.default_policy === "allow"
+                ? " — every peer sees every peer; rules below have no effect until the server runs with --default-policy deny"
+                : " — peers only see each other when a rule below connects them (bidirectional; \"any\" is a wildcard)"}
+            </p>
+            <div className="row">
+              <select value={aclSrc} onChange={(e) => setAclSrc(e.target.value)}>
+                <option value="any">any</option>
+                {peers
+                  .filter((p) => !p.revoked_at)
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {peerLabel(p.hostname, p.assigned_ip)}
+                    </option>
+                  ))}
+              </select>
+              <span className="muted">↔</span>
+              <select value={aclDst} onChange={(e) => setAclDst(e.target.value)}>
+                <option value="any">any</option>
+                {peers
+                  .filter((p) => !p.revoked_at)
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {peerLabel(p.hostname, p.assigned_ip)}
+                    </option>
+                  ))}
+              </select>
+              <button className="primary" onClick={() => void createAclRule()}>
+                add rule
+              </button>
+            </div>
+            <div className="tablewrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>id</th>
+                    <th>src</th>
+                    <th>dst</th>
+                    <th>created</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {acl.rules.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="muted">
+                        no rules
+                      </td>
+                    </tr>
+                  )}
+                  {acl.rules.map((r) => (
+                    <tr key={r.id}>
+                      <td>{r.id}</td>
+                      <td>{r.src_label}</td>
+                      <td>{r.dst_label}</td>
+                      <td className="muted">{formatTime(r.created_at)}</td>
+                      <td>
+                        <button
+                          className="danger"
+                          onClick={() =>
+                            void revoke(
+                              `/api/acl/${r.id}/delete`,
+                              `delete ACL rule ${r.id} (${r.src_label} ↔ ${r.dst_label})?`,
+                            )
+                          }
+                        >
+                          delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <h2>Setup keys</h2>
           <div className="panel">
             <div className="row">

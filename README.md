@@ -38,7 +38,17 @@ Working today:
   fallback (dumb UDP forwarder, sees only WireGuard ciphertext) that agents
   switch to automatically when a direct path never produces a handshake.
 
-Not built yet (roadmap, in order): DNS, ACLs.
+- **Per-pair preshared keys** — every peer pair gets a unique PSK, derived
+  server-side with HKDF from a master secret keyed on the pair's public
+  keys. No O(n²) key storage; compromising one pair reveals nothing about
+  another. Agents pick up their pair keys automatically via config sync.
+- **ACLs** — with `--default-policy deny`, peers only see the peers an ACL
+  rule connects them to. Enforcement is visibility: an unauthorized peer
+  never receives the other's key, overlay IP, or endpoint. Rules (with
+  "any" wildcards) are managed in the web UI and propagate within one
+  report interval.
+
+Not built yet (roadmap): DNS.
 
 ## Layout
 
@@ -122,6 +132,7 @@ Flags for `server`:
 | `--relay-host` | — | public address of the relay data plane (enables relay fallback) |
 | `--relay-control` | `http://127.0.0.1:8081` | relay control API URL |
 | `--relay-secret-file` | `relay-secret` | shared secret for the relay control API |
+| `--default-policy` | `allow` | ACL default: `allow` (open mesh) or `deny` (rule-connected pairs only) |
 
 ### Deploying behind Traefik (or another TLS-terminating proxy)
 
@@ -243,11 +254,42 @@ server with `--relay-host <public-ip>`.
 ### Honest production status
 
 Suitable today: trusted-LAN and public-endpoint meshes, homelab scale.
-Known limits: one network-wide PSK (not per-pair), no ACLs (every peer can
-reach every peer), no DNS, single-writer SQLite control plane (fine for
+Known limits: no DNS, single-writer SQLite control plane (fine for
 hundreds of peers, not thousands), relay pairs are per-peer-pair UDP
-forwarding sessions with no bandwidth accounting, and symmetric-NAT-to-
-symmetric-NAT traffic always relays.
+forwarding sessions with no bandwidth accounting, symmetric-NAT-to-
+symmetric-NAT traffic always relays, and the Windows agent has not been
+exercised on real hardware.
+
+## ACLs
+
+Run the server with `--default-policy deny` and the mesh starts fully
+segmented: no peer sees any other until a rule connects them. Rules are
+ALLOW rules, matched in both directions, with "any" as a wildcard on
+either side; manage them in the web UI's Access tab or via
+`GET/POST /api/acl` and `POST /api/acl/{id}/delete`. Changes — including
+deletions — propagate within one report interval: agents remove peers
+that vanish from their sync payload, tearing down the tunnel.
+
+Under the default `allow` policy rules exist but have no effect, so you
+can stage rules before flipping the policy.
+
+## Windows agent (experimental, untested on real hardware)
+
+The agent cross-compiles for Windows (`GOOS=windows go build ./cmd/agent`)
+with these differences:
+
+- There is no kernel WireGuard to drive, so the agent embeds
+  wireguard-go as a library: it creates a Wintun adapter in-process,
+  runs the userspace WireGuard device, and exposes the standard UAPI
+  pipe that wgctrl speaks. No external binaries needed — just download
+  `wintun.dll` (amd64) from [wintun.net](https://www.wintun.net) and
+  place it next to `agent.exe`.
+- Addressing uses `netsh`; run from an elevated (Administrator) prompt.
+- Flow telemetry is Linux-only (no conntrack); link counters, config
+  sync, STUN, and relay fallback all work.
+
+Treat it as a starting point: it compiles and follows documented Wintun
+behavior, but has not been validated on a real Windows host.
 
 ## Joining a node to the mesh
 
@@ -349,6 +391,7 @@ so the wire leaks nothing about which keys exist or their state.
 - **IP reuse.** Revoked peers keep their rows, so their IPs stay reserved;
   an address is only reused after a hard `DELETE`. Cryptokey routing means a
   reused IP can't impersonate the old peer anyway.
-- **Network-wide PSK.** One preshared key for the whole mesh, not per
-  peer-pair — per-pair would need an O(n²) key table. A deliberate tradeoff;
-  revisit if per-pair secrecy matters later.
+- **Per-pair PSKs without storage.** `mesh-psk.key` is a master secret
+  that never leaves the server; each pair's PSK is
+  `HKDF(master, sort(pubA, pubB))` — symmetric by construction, unique
+  per pair, zero rows of key storage.

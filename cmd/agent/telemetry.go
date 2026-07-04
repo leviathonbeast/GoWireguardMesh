@@ -10,12 +10,29 @@ import (
 	"os"
 	"time"
 
-	"github.com/ti-mo/conntrack"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"gowireguard/internal/proto"
 )
+
+// ctFlow is one connection-tracking entry in platform-neutral form.
+// Src is the flow initiator; counters are cumulative.
+type ctFlow struct {
+	protocol         uint8
+	src, dst         netip.Addr
+	srcPort, dstPort uint16
+
+	txBytes, txPackets uint64 // initiator -> responder
+	rxBytes, rxPackets uint64 // responder -> initiator
+}
+
+// flowDumper abstracts the platform flow source (conntrack on Linux;
+// none on Windows). A nil dumper disables flow telemetry.
+type flowDumper interface {
+	Dump() ([]ctFlow, error)
+	Close() error
+}
 
 // linkCounters is a snapshot of one peer's kernel transfer counters.
 type linkCounters struct {
@@ -50,7 +67,7 @@ type telemetryReporter struct {
 	network   netip.Prefix
 	interval  time.Duration
 
-	ct *conntrack.Conn // nil when conntrack is unavailable
+	ct flowDumper // nil when the platform has no flow source
 
 	prevLink map[wgtypes.Key]linkCounters
 	prevFlow map[flowKey]flowCounters
@@ -91,20 +108,13 @@ func newTelemetryReporter(
 		relayed:         make(map[wgtypes.Key]bool),
 	}
 
-	// Flow visibility needs conntrack byte/packet accounting, which is
-	// off by default on most kernels.
-	if err := os.WriteFile("/proc/sys/net/netfilter/nf_conntrack_acct", []byte("1\n"), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: cannot enable conntrack accounting (%v); flow logs disabled\n", err)
-		return t, nil
-	}
-
-	ct, err := conntrack.Dial(nil)
+	dumper, err := newFlowDumper()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: conntrack unavailable (%v); flow logs disabled\n", err)
+		fmt.Fprintf(os.Stderr, "telemetry: %v; flow logs disabled\n", err)
 		return t, nil
 	}
 
-	t.ct = ct
+	t.ct = dumper
 
 	return t, nil
 }
@@ -194,37 +204,34 @@ func (t *telemetryReporter) collectFlows() {
 		return
 	}
 
-	flows, err := t.ct.Dump(nil)
+	flows, err := t.ct.Dump()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: conntrack dump: %v\n", err)
+		fmt.Fprintf(os.Stderr, "telemetry: flow dump: %v\n", err)
 		return
 	}
 
 	seen := make(map[flowKey]bool, len(flows))
 
 	for _, f := range flows {
-		src := f.TupleOrig.IP.SourceAddress
-		dst := f.TupleOrig.IP.DestinationAddress
-
 		// Overlay traffic only: everything else on the box is none of
 		// the mesh's business.
-		if !t.network.Contains(src) && !t.network.Contains(dst) {
+		if !t.network.Contains(f.src) && !t.network.Contains(f.dst) {
 			continue
 		}
 
 		key := flowKey{
-			protocol: f.TupleOrig.Proto.Protocol,
-			src:      src,
-			srcPort:  f.TupleOrig.Proto.SourcePort,
-			dst:      dst,
-			dstPort:  f.TupleOrig.Proto.DestinationPort,
+			protocol: f.protocol,
+			src:      f.src,
+			srcPort:  f.srcPort,
+			dst:      f.dst,
+			dstPort:  f.dstPort,
 		}
 
 		cur := flowCounters{
-			txBytes:   f.CountersOrig.Bytes,
-			txPackets: f.CountersOrig.Packets,
-			rxBytes:   f.CountersReply.Bytes,
-			rxPackets: f.CountersReply.Packets,
+			txBytes:   f.txBytes,
+			txPackets: f.txPackets,
+			rxBytes:   f.rxBytes,
+			rxPackets: f.rxPackets,
 		}
 
 		seen[key] = true

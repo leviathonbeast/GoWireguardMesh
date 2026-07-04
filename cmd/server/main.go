@@ -39,7 +39,7 @@ const keepaliveSeconds = 25
 type server struct {
 	store       *store.Store
 	networkCIDR string
-	psk         string
+	pskMaster   wgtypes.Key // never distributed; per-pair PSKs derive from it
 	adminToken  string
 	trustProxy  bool
 	relay       *relayClient // nil when no relay is configured
@@ -128,6 +128,7 @@ func runServe(args []string) error {
 	relayHost := fs.String("relay-host", "", "public address of the relay's data plane (enables relay fallback)")
 	relayControl := fs.String("relay-control", "http://127.0.0.1:8081", "relay control API URL")
 	relaySecretFile := fs.String("relay-secret-file", "relay-secret", "path to the relay control shared secret")
+	defaultPolicy := fs.String("default-policy", "allow", "ACL default: \"allow\" (open mesh) or \"deny\" (only rule-connected pairs see each other)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -144,6 +145,15 @@ func runServe(args []string) error {
 	}
 	defer st.Close()
 
+	switch *defaultPolicy {
+	case "allow":
+		st.DefaultAllow = true
+	case "deny":
+		st.DefaultAllow = false
+	default:
+		return fmt.Errorf("default-policy must be \"allow\" or \"deny\", got %q", *defaultPolicy)
+	}
+
 	networkPSK, err := psk.LoadOrGenerate(*pskFile)
 	if err != nil {
 		return err
@@ -157,7 +167,7 @@ func runServe(args []string) error {
 	srv := &server{
 		store:       st,
 		networkCIDR: prefix.Masked().String(),
-		psk:         networkPSK.String(),
+		pskMaster:   networkPSK,
 		adminToken:  adminToken,
 		trustProxy:  *trustProxy,
 	}
@@ -188,6 +198,9 @@ func runServe(args []string) error {
 	mux.HandleFunc("POST /api/setup-keys/{id}/revoke", srv.requireAdmin(srv.handleRevokeSetupKey))
 	mux.HandleFunc("GET /api/link-stats", srv.requireAdmin(srv.handleListLinkStats))
 	mux.HandleFunc("GET /api/flows", srv.requireAdmin(srv.handleListFlows))
+	mux.HandleFunc("GET /api/acl", srv.requireAdmin(srv.handleListACL))
+	mux.HandleFunc("POST /api/acl", srv.requireAdmin(srv.handleCreateACL))
+	mux.HandleFunc("POST /api/acl/{id}/delete", srv.requireAdmin(srv.handleDeleteACL))
 
 	pruneCtx, cancelPrune := context.WithCancel(context.Background())
 	defer cancelPrune()
@@ -270,7 +283,15 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		log.Printf("idempotent re-enroll of peer %d (%s)", res.Peer.ID, req.PublicKey)
 	}
 
-	writeJSON(w, http.StatusOK, s.buildResponse(res))
+	out, err := s.buildResponse(res)
+	if err != nil {
+		log.Printf("build enroll response for %s: %v", req.PublicKey, err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, out)
 }
 
 // endpointHint picks the best-known underlay endpoint for a peer:
@@ -291,32 +312,44 @@ func endpointHint(p store.PeerRow) *string {
 	return nil
 }
 
-func (s *server) buildPeerEntries(others []store.PeerRow) []proto.PeerConfigResponse {
+func (s *server) buildPeerEntries(selfKey string, others []store.PeerRow) ([]proto.PeerConfigResponse, error) {
 	keepalive := keepaliveSeconds
 
 	peers := make([]proto.PeerConfigResponse, 0, len(others))
 
 	for _, o := range others {
+		pairKey, err := psk.DerivePairKey(s.pskMaster, selfKey, o.PublicKey)
+		if err != nil {
+			return nil, err
+		}
+
+		pairPSK := pairKey.String()
+
 		peers = append(peers, proto.PeerConfigResponse{
 			PublicKey:                   o.PublicKey,
-			PresharedKey:                &s.psk,
+			PresharedKey:                &pairPSK,
 			Endpoint:                    endpointHint(o),
 			PersistentKeepaliveInterval: &keepalive,
 			AllowedIPs:                  []string{o.AssignedIP + "/32"},
 		})
 	}
 
-	return peers
+	return peers, nil
 }
 
-func (s *server) buildResponse(res *store.EnrollResult) proto.EnrollResponse {
+func (s *server) buildResponse(res *store.EnrollResult) (proto.EnrollResponse, error) {
+	peers, err := s.buildPeerEntries(res.Peer.PublicKey, res.Others)
+	if err != nil {
+		return proto.EnrollResponse{}, err
+	}
+
 	return proto.EnrollResponse{
 		PeerID:      int(res.Peer.ID),
 		AssignedIP:  res.Peer.AssignedIP,
 		NetworkCIDR: s.networkCIDR,
-		Peers:       s.buildPeerEntries(res.Others),
+		Peers:       peers,
 		AuthToken:   res.AuthToken,
-	}
+	}, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

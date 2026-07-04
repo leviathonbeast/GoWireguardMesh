@@ -18,7 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -43,87 +42,6 @@ var (
 	stunServerFlag     = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables)")
 	keyFileFlag        = flag.String("key-file", "wgkey.key", "path to private key file")
 )
-
-func generatePrivateKey() (wgtypes.Key, error) {
-	privateKey, err := wgtypes.GeneratePrivateKey()
-	if err != nil {
-		return wgtypes.Key{}, fmt.Errorf("generate private key: %w", err)
-	}
-
-	return privateKey, nil
-}
-
-func createInterface(name string) error {
-	link := &netlink.GenericLink{
-		LinkAttrs: netlink.LinkAttrs{
-			Name: name,
-		},
-		LinkType: "wireguard",
-	}
-
-	if err := netlink.LinkAdd(link); err != nil {
-		return fmt.Errorf("create interface %q: %w", name, err)
-	}
-
-	fmt.Printf("Created interface %s\n", name)
-
-	return nil
-}
-
-func assignIPAddress(ifaceName, cidr string) error {
-	link, err := netlink.LinkByName(ifaceName)
-	if err != nil {
-		return fmt.Errorf("lookup interface %q: %w", ifaceName, err)
-	}
-
-	addr, err := netlink.ParseAddr(cidr)
-	if err != nil {
-		return fmt.Errorf("parse CIDR %q: %w", cidr, err)
-	}
-
-	if err := netlink.AddrAdd(link, addr); err != nil {
-		return fmt.Errorf("assign address %q: %w", cidr, err)
-	}
-
-	fmt.Printf("Assigned %s to %s\n", cidr, ifaceName)
-
-	return nil
-}
-
-func bringInterfaceUp(ifaceName string) error {
-	link, err := netlink.LinkByName(ifaceName)
-	if err != nil {
-		return fmt.Errorf("lookup interface %q: %w", ifaceName, err)
-	}
-
-	if err := netlink.LinkSetUp(link); err != nil {
-		return fmt.Errorf("bring interface up: %w", err)
-	}
-
-	fmt.Printf("Interface %s is UP\n", ifaceName)
-
-	return nil
-}
-
-func deleteInterface(ifaceName string) error {
-	link, err := netlink.LinkByName(ifaceName)
-	if err != nil {
-		var notFound netlink.LinkNotFoundError
-		if errors.As(err, &notFound) {
-			return nil
-		}
-
-		return fmt.Errorf("lookup interface %q: %w", ifaceName, err)
-	}
-
-	if err := netlink.LinkDel(link); err != nil {
-		return fmt.Errorf("delete interface %q: %w", ifaceName, err)
-	}
-
-	fmt.Printf("Deleted interface %s\n", ifaceName)
-
-	return nil
-}
 
 func configureWireGuard(
 	client *wgctrl.Client,
@@ -395,8 +313,8 @@ func peerConfigFromProto(p proto.PeerConfigResponse) (wgtypes.PeerConfig, error)
 func run() error {
 	flag.Parse()
 
-	if os.Geteuid() != 0 {
-		return errors.New("must run as root")
+	if err := ensurePrivileged(); err != nil {
+		return err
 	}
 
 	// Cleanup stale interface if present.

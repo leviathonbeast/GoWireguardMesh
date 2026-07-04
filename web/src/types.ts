@@ -36,6 +36,20 @@ export interface LinkStat {
   updated_at: string;
 }
 
+export interface AclRule {
+  id: number;
+  src_peer_id: number | null;
+  src_label: string;
+  dst_peer_id: number | null;
+  dst_label: string;
+  created_at: string;
+}
+
+export interface AclResponse {
+  default_policy: "allow" | "deny";
+  rules: AclRule[];
+}
+
 export interface Flow {
   id: number;
   peer_id: number;
