@@ -26,6 +26,7 @@ var (
 	peerKeyFlag      = flag.String("peer-key", "", "peer public key (base64)")
 	peerEndpointFlag = flag.String("peer-endpoint", "", "peer endpoint host:port (optional)")
 	peerAddrFlag     = flag.String("peer-addr", "", "peer overlay address, e.g. 100.64.0.2/32")
+	peerPSKFlag      = flag.String("peer-psk", "", "preshared key (base64, optional)")
 )
 
 func generatePrivateKey() (wgtypes.Key, error) {
@@ -166,7 +167,8 @@ func waitForShutdown() {
 func buildPeerConfig(
 	pubkey,
 	endpoint,
-	allowedCIDR string,
+	allowedCIDR,
+	presharedKey string,
 ) (wgtypes.PeerConfig, error) {
 	publicKey, err := wgtypes.ParseKey(pubkey)
 	if err != nil {
@@ -190,11 +192,24 @@ func buildPeerConfig(
 			fmt.Errorf("parse allowed CIDR %q: %w", allowedCIDR, err)
 	}
 
+	var psk *wgtypes.Key
+
+	if presharedKey != "" {
+		key, err := wgtypes.ParseKey(presharedKey)
+		if err != nil {
+			return wgtypes.PeerConfig{},
+				fmt.Errorf("parse preshared key: %w", err)
+		}
+
+		psk = &key
+	}
+
 	keepalive := 25 * time.Second
 
 	cfg := wgtypes.PeerConfig{
-		PublicKey: publicKey,
-		Endpoint:  udpAddr,
+		PublicKey:    publicKey,
+		Endpoint:     udpAddr,
+		PresharedKey: psk,
 		AllowedIPs: []net.IPNet{
 			*allowedNet,
 		},
@@ -291,6 +306,7 @@ func run() error {
 			*peerKeyFlag,
 			*peerEndpointFlag,
 			*peerAddrFlag,
+			*peerPSKFlag,
 		)
 		if err != nil {
 			return err

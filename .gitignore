@@ -1,0 +1,7 @@
+/agent
+/server
+/relay
+*.db
+*.db-wal
+*.db-shm
+wgkey.key
