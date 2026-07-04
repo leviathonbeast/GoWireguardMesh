@@ -1,0 +1,27 @@
+# wgmesh node agent. Needs root: it creates network interfaces.
+#
+#   sudo cp bin/agent /usr/local/bin/wgmesh-agent
+#   sudo cp deploy/wgmesh-agent.service /etc/systemd/system/
+#   edit ExecStart below with your server URL and setup key
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wgmesh-agent
+#
+# The private key persists in /var/lib/wgmesh-agent/wgkey.key — it is
+# the node's identity; re-enrollment on every start is idempotent.
+
+[Unit]
+Description=wgmesh node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wgmesh-agent \
+  --server https://mesh.example.com \
+  --setup-key CHANGE_ME
+WorkingDirectory=/var/lib/wgmesh-agent
+StateDirectory=wgmesh-agent
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

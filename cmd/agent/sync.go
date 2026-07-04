@@ -1,0 +1,129 @@
+package main
+
+import (
+	"fmt"
+	"net"
+	"sort"
+	"strings"
+
+	"golang.zx2c4.com/wireguard/wgctrl"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+)
+
+// syncPeers reconciles the device's peer set with the control plane's
+// desired list, applying an incremental diff:
+//
+//   - unknown peers are added (with the server's endpoint hint)
+//   - vanished peers are removed
+//   - changed peers (allowed IPs, PSK, keepalive) are updated in place
+//
+// Existing peers' endpoints are NEVER touched: WireGuard roaming owns
+// them once traffic flows, and re-applying a stale server hint every
+// interval would break a connection that roaming already fixed.
+func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig) error {
+	device, err := client.Device(iface)
+	if err != nil {
+		return fmt.Errorf("read device %q: %w", iface, err)
+	}
+
+	current := make(map[wgtypes.Key]wgtypes.Peer, len(device.Peers))
+	for _, p := range device.Peers {
+		current[p.PublicKey] = p
+	}
+
+	desiredByKey := make(map[wgtypes.Key]wgtypes.PeerConfig, len(desired))
+	for _, p := range desired {
+		desiredByKey[p.PublicKey] = p
+	}
+
+	var changes []wgtypes.PeerConfig
+
+	for key := range current {
+		if _, ok := desiredByKey[key]; !ok {
+			changes = append(changes, wgtypes.PeerConfig{
+				PublicKey: key,
+				Remove:    true,
+			})
+
+			fmt.Printf("sync: removing peer %s\n", key)
+		}
+	}
+
+	for key, want := range desiredByKey {
+		cur, exists := current[key]
+
+		if !exists {
+			changes = append(changes, want)
+
+			fmt.Printf("sync: adding peer %s\n", key)
+
+			continue
+		}
+
+		if peerNeedsUpdate(cur, want) {
+			update := want
+			update.UpdateOnly = true
+			update.ReplaceAllowedIPs = true
+			update.Endpoint = nil // roaming owns established endpoints
+
+			changes = append(changes, update)
+
+			fmt.Printf("sync: updating peer %s\n", key)
+		}
+	}
+
+	if len(changes) == 0 {
+		return nil
+	}
+
+	if err := client.ConfigureDevice(iface, wgtypes.Config{Peers: changes}); err != nil {
+		return fmt.Errorf("apply peer sync to %q: %w", iface, err)
+	}
+
+	return nil
+}
+
+// peerNeedsUpdate compares the fields the control plane owns —
+// deliberately not the endpoint.
+func peerNeedsUpdate(cur wgtypes.Peer, want wgtypes.PeerConfig) bool {
+	if !sameAllowedIPs(cur.AllowedIPs, want.AllowedIPs) {
+		return true
+	}
+
+	var wantPSK wgtypes.Key
+	if want.PresharedKey != nil {
+		wantPSK = *want.PresharedKey
+	}
+
+	if cur.PresharedKey != wantPSK {
+		return true
+	}
+
+	if want.PersistentKeepaliveInterval != nil &&
+		cur.PersistentKeepaliveInterval != *want.PersistentKeepaliveInterval {
+		return true
+	}
+
+	return false
+}
+
+func sameAllowedIPs(a, b []net.IPNet) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	as := make([]string, 0, len(a))
+	for _, n := range a {
+		as = append(as, n.String())
+	}
+
+	bs := make([]string, 0, len(b))
+	for _, n := range b {
+		bs = append(bs, n.String())
+	}
+
+	sort.Strings(as)
+	sort.Strings(bs)
+
+	return strings.Join(as, ",") == strings.Join(bs, ",")
+}

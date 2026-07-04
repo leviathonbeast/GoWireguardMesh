@@ -1,0 +1,30 @@
+# wgmesh relay: NAT-traversal fallback (UDP forwarder).
+# Run on a host with a public IP. The control API must be reachable by
+# the control plane only — firewall it or bind it to a private address.
+#
+#   sudo cp bin/relay /usr/local/bin/wgmesh-relay
+#   sudo cp deploy/wgmesh-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wgmesh-relay
+#   copy /var/lib/wgmesh-relay/relay-secret to the control plane host
+
+[Unit]
+Description=wgmesh relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wgmesh-relay --control 127.0.0.1:8081
+WorkingDirectory=/var/lib/wgmesh-relay
+Restart=on-failure
+RestartSec=5
+
+DynamicUser=yes
+StateDirectory=wgmesh-relay
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/wgmesh-relay
+
+[Install]
+WantedBy=multi-user.target

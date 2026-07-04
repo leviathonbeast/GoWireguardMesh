@@ -6,6 +6,8 @@ export interface Peer {
   assigned_ip: string;
   hostname?: string;
   listen_port?: number;
+  observed_ip?: string;
+  public_endpoint?: string;
   created_at: string;
   last_seen_at?: string;
   revoked_at?: string;

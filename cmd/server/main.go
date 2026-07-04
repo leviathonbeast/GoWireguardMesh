@@ -15,9 +15,11 @@ import (
 	"fmt"
 	iofs "io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +41,28 @@ type server struct {
 	networkCIDR string
 	psk         string
 	adminToken  string
+	trustProxy  bool
+	relay       *relayClient // nil when no relay is configured
+}
+
+// clientIP is the peer's underlay address as seen by the control
+// plane. Behind a TLS-terminating proxy (Traefik) every request comes
+// from the proxy, so --trust-proxy switches to X-Forwarded-For —
+// trusting that header from direct clients would let them spoof it.
+func (s *server) clientIP(r *http.Request) string {
+	if s.trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			first, _, _ := strings.Cut(xff, ",")
+			return strings.TrimSpace(first)
+		}
+	}
+
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+
+	return host
 }
 
 func main() {
@@ -100,6 +124,10 @@ func runServe(args []string) error {
 	tlsHosts := fs.String("tls-hosts", "localhost,127.0.0.1", "comma-separated SANs for a generated certificate; include the address agents will dial")
 	adminTokenFile := fs.String("admin-token-file", "admin-token", "path to admin API token file (generated if missing)")
 	flowRetention := fs.Duration("flow-retention", 7*24*time.Hour, "how long to keep flow log rows")
+	trustProxy := fs.Bool("trust-proxy", false, "trust X-Forwarded-For for client addresses (only behind a reverse proxy)")
+	relayHost := fs.String("relay-host", "", "public address of the relay's data plane (enables relay fallback)")
+	relayControl := fs.String("relay-control", "http://127.0.0.1:8081", "relay control API URL")
+	relaySecretFile := fs.String("relay-secret-file", "relay-secret", "path to the relay control shared secret")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -131,6 +159,16 @@ func runServe(args []string) error {
 		networkCIDR: prefix.Masked().String(),
 		psk:         networkPSK.String(),
 		adminToken:  adminToken,
+		trustProxy:  *trustProxy,
+	}
+
+	if *relayHost != "" {
+		srv.relay, err = newRelayClient(*relayHost, *relayControl, *relaySecretFile)
+		if err != nil {
+			return err
+		}
+
+		log.Printf("relay fallback enabled via %s (control %s)", *relayHost, *relayControl)
 	}
 
 	ui, err := iofs.Sub(gowireguard.WebUI, "web/dist")
@@ -141,6 +179,7 @@ func runServe(args []string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /enroll", srv.handleEnroll)
 	mux.HandleFunc("POST /report", srv.handleReport)
+	mux.HandleFunc("POST /relay-pair", srv.handleRelayPair)
 	mux.Handle("GET /", http.FileServerFS(ui))
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))
@@ -209,7 +248,7 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.store.Enroll(r.Context(), req.SetupKey, req.PublicKey, req.Hostname, req.ListenPort)
+	res, err := s.store.Enroll(r.Context(), req.SetupKey, req.PublicKey, req.Hostname, req.ListenPort, s.clientIP(r), req.PublicEndpoint)
 
 	switch {
 	case errors.Is(err, store.ErrUnauthorized):
@@ -234,29 +273,48 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.buildResponse(res))
 }
 
-func (s *server) buildResponse(res *store.EnrollResult) proto.EnrollResponse {
+// endpointHint picks the best-known underlay endpoint for a peer:
+// its own STUN discovery wins, then the address the control plane
+// observed it at combined with its listen port. Hints are exactly
+// that — WireGuard roaming overrides them the moment real traffic
+// arrives from somewhere else.
+func endpointHint(p store.PeerRow) *string {
+	if p.PublicEndpoint != "" {
+		return &p.PublicEndpoint
+	}
+
+	if p.ObservedIP != "" && p.ListenPort > 0 {
+		ep := net.JoinHostPort(p.ObservedIP, strconv.Itoa(p.ListenPort))
+		return &ep
+	}
+
+	return nil
+}
+
+func (s *server) buildPeerEntries(others []store.PeerRow) []proto.PeerConfigResponse {
 	keepalive := keepaliveSeconds
 
-	peers := make([]proto.PeerConfigResponse, 0, len(res.Others))
+	peers := make([]proto.PeerConfigResponse, 0, len(others))
 
-	for _, o := range res.Others {
+	for _, o := range others {
 		peers = append(peers, proto.PeerConfigResponse{
 			PublicKey:                   o.PublicKey,
 			PresharedKey:                &s.psk,
+			Endpoint:                    endpointHint(o),
 			PersistentKeepaliveInterval: &keepalive,
 			AllowedIPs:                  []string{o.AssignedIP + "/32"},
-			// Endpoint stays null: the control plane does not yet
-			// track peer underlay addresses. Config sync + STUN fill
-			// this in later; until then roaming does the work once
-			// any packet gets through.
 		})
 	}
 
+	return peers
+}
+
+func (s *server) buildResponse(res *store.EnrollResult) proto.EnrollResponse {
 	return proto.EnrollResponse{
 		PeerID:      int(res.Peer.ID),
 		AssignedIP:  res.Peer.AssignedIP,
 		NetworkCIDR: s.networkCIDR,
-		Peers:       peers,
+		Peers:       s.buildPeerEntries(res.Others),
 		AuthToken:   res.AuthToken,
 	}
 }

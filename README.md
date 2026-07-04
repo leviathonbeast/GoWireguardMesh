@@ -30,20 +30,28 @@ Working today:
   liveness (`last_seen_at`), stores flows with configurable retention, and
   shows both in the web UI.
 
-Not built yet (roadmap, in order): config sync (new peers pushed to existing
-ones), STUN + UDP hole punching, relay fallback, DNS, ACLs.
+- **Config sync** — every telemetry report returns the current peer list;
+  agents apply it as an incremental diff. New peers propagate to the whole
+  mesh within one report interval, no restarts.
+- **NAT traversal** — STUN discovery of each peer's public endpoint,
+  endpoint hints distributed at enrollment and via sync, and a relay
+  fallback (dumb UDP forwarder, sees only WireGuard ciphertext) that agents
+  switch to automatically when a direct path never produces a handshake.
+
+Not built yet (roadmap, in order): DNS, ACLs.
 
 ## Layout
 
 ```
 cmd/agent/       node agent (runs on every machine in the mesh, needs root)
 cmd/server/      control plane (enrollment API + admin API + web UI)
-cmd/relay/       relay server (not yet implemented)
+cmd/relay/       NAT-traversal fallback: UDP pair forwarder + control API
 internal/proto/  JSON wire structs shared by agent and server
 internal/store/  all SQLite access (schema, setup keys, atomic enrollment)
 internal/psk/    network-wide preshared key load-or-generate
 internal/tlsutil/ self-signed certificate load-or-generate
 web/             admin web UI (React + TypeScript, Vite)
+deploy/          systemd units for server, agent, and relay
 schema.sql       canonical database schema (embedded into the server binary)
 ```
 
@@ -110,6 +118,10 @@ Flags for `server`:
 | `--tls-hosts` | `localhost,127.0.0.1` | SANs for a generated certificate |
 | `--admin-token-file` | `admin-token` | admin bearer token file |
 | `--flow-retention` | `168h` | how long flow log rows are kept (pruned hourly) |
+| `--trust-proxy` | off | trust `X-Forwarded-For` (only behind a reverse proxy) |
+| `--relay-host` | — | public address of the relay data plane (enables relay fallback) |
+| `--relay-control` | `http://127.0.0.1:8081` | relay control API URL |
+| `--relay-secret-file` | `relay-secret` | shared secret for the relay control API |
 
 ### Deploying behind Traefik (or another TLS-terminating proxy)
 
@@ -183,6 +195,59 @@ unavailable, flow logs are disabled with a warning and counters still work.
 
 Revoking a peer also cuts off its reporting (the token check excludes
 revoked peers).
+
+## NAT traversal
+
+Connectivity is attempted in this order, all automatic:
+
+1. **STUN.** Before creating the interface, the agent binds the WireGuard
+   port, asks a STUN server (`--stun-server`, default Google's) how that
+   port appears from the internet, and sends the result with its
+   enrollment. Probing from the *same port* WireGuard will use is what
+   makes the discovered mapping valid for tunnel traffic — on
+   endpoint-independent NATs, at least. Symmetric NATs defeat this and
+   fall through to the relay.
+2. **Endpoint hints.** The server distributes each peer's best-known
+   endpoint: its STUN result if it has one, otherwise the address the
+   control plane observed it at plus its listen port (which is what makes
+   same-LAN meshes work with zero configuration). Hints are only hints —
+   WireGuard roaming overrides them as soon as real traffic arrives, and
+   config sync never rewrites the endpoint of an already-known peer, so a
+   roamed connection is never dragged back to a stale hint.
+3. **Relay fallback.** If a peer has produced no handshake for 60s, the
+   agent asks the control plane for a relay path. The relay
+   (`cmd/relay`) is a deliberately dumb UDP forwarder: the control plane
+   allocates a port pair per peer pair over a shared-secret control API,
+   each side points its WireGuard endpoint at its own port, and the relay
+   cross-forwards between them. It never parses what it carries — all
+   traffic is WireGuard ciphertext, so the relay can drop packets but not
+   read or forge them. This replaces TURN, which kernel WireGuard cannot
+   speak (the kernel owns the UDP socket).
+
+Relay setup: run `relay` on a host with a public IP, open its UDP port
+range, keep the control port (8081) reachable from the control plane only,
+and copy its generated `relay-secret` to the server host. Then start the
+server with `--relay-host <public-ip>`.
+
+## Deployment
+
+- **systemd**: units for all three binaries in [deploy/](deploy/), with
+  install steps in each file's header comment.
+- **Docker**: `docker-compose.yml` runs server + relay (`RELAY_PUBLIC_IP`
+  required; relay uses host networking because its forwarding ports are
+  allocated dynamically). The Dockerfile has separate `server`, `relay`,
+  and `agent` targets; agents usually run directly on hosts instead.
+- Back up the server's state directory: `mesh.db`, `mesh-psk.key`,
+  `admin-token`, and (standalone TLS) `key.pem`.
+
+### Honest production status
+
+Suitable today: trusted-LAN and public-endpoint meshes, homelab scale.
+Known limits: one network-wide PSK (not per-pair), no ACLs (every peer can
+reach every peer), no DNS, single-writer SQLite control plane (fine for
+hundreds of peers, not thousands), relay pairs are per-peer-pair UDP
+forwarding sessions with no bandwidth accounting, and symmetric-NAT-to-
+symmetric-NAT traffic always relays.
 
 ## Joining a node to the mesh
 

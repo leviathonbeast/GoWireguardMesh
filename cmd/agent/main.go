@@ -40,6 +40,7 @@ var (
 	setupKeyFlag       = flag.String("setup-key", "", "setup key for enrollment (required with --server)")
 	serverCAFlag       = flag.String("server-ca", "", "PEM certificate to trust for the control plane (pin its self-signed cert.pem)")
 	reportIntervalFlag = flag.Duration("report-interval", 30*time.Second, "telemetry reporting interval")
+	stunServerFlag     = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables)")
 	keyFileFlag        = flag.String("key-file", "wgkey.key", "path to private key file")
 )
 
@@ -296,12 +297,13 @@ func newHTTPClient(caFile string) (*http.Client, error) {
 
 // enroll registers this node with the control plane and returns the
 // mesh configuration. Never sends the private key.
-func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostname string, listenPort int) (*proto.EnrollResponse, error) {
+func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostname string, listenPort int, publicEndpoint string) (*proto.EnrollResponse, error) {
 	reqBody, err := json.Marshal(proto.EnrollRequest{
-		SetupKey:   setupKey,
-		PublicKey:  publicKey.String(),
-		Hostname:   hostname,
-		ListenPort: listenPort,
+		SetupKey:       setupKey,
+		PublicKey:      publicKey.String(),
+		Hostname:       hostname,
+		ListenPort:     listenPort,
+		PublicEndpoint: publicEndpoint,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode enroll request: %w", err)
@@ -426,7 +428,20 @@ func run() error {
 
 		hostname, _ := os.Hostname()
 
-		resp, err := enroll(*serverFlag, *setupKeyFlag, *serverCAFlag, privateKey.PublicKey(), hostname, listenPort)
+		// STUN must run before the interface exists so the probe can
+		// bind the WireGuard port and discover its public mapping.
+		var publicEndpoint string
+
+		if *stunServerFlag != "" {
+			publicEndpoint, err = discoverPublicEndpoint(*stunServerFlag, listenPort)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "stun: %v (continuing without public endpoint)\n", err)
+			} else {
+				fmt.Printf("STUN public endpoint: %s\n", publicEndpoint)
+			}
+		}
+
+		resp, err := enroll(*serverFlag, *setupKeyFlag, *serverCAFlag, privateKey.PublicKey(), hostname, listenPort, publicEndpoint)
 		if err != nil {
 			return err
 		}

@@ -3,6 +3,10 @@ package proto
 // ReportRequest is sent periodically by agents to the control plane.
 // It is authenticated by the enrollment auth token, never a setup key.
 type ReportRequest struct {
+	// PublicEndpoint is the agent's STUN-discovered public ip:port,
+	// "" when discovery failed or was disabled.
+	PublicEndpoint string `json:"public_endpoint,omitempty"`
+
 	// Counters carries per-remote-peer WireGuard transfer deltas since
 	// the previous successful report.
 	Counters []PeerCounter `json:"counters,omitempty"`
@@ -10,6 +14,13 @@ type ReportRequest struct {
 	// Flows carries overlay flow deltas observed via conntrack since
 	// the previous successful report.
 	Flows []FlowRecord `json:"flows,omitempty"`
+}
+
+// ReportResponse doubles as the config-sync channel: every accepted
+// report returns the current peer list, so membership and endpoint
+// changes propagate within one report interval without restarts.
+type ReportResponse struct {
+	Peers []PeerConfigResponse `json:"peers"`
 }
 
 // PeerCounter is the reporting agent's view of one WireGuard link.

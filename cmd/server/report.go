@@ -43,13 +43,23 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.ApplyReport(r.Context(), peerID, &report); err != nil {
+	if err := s.store.ApplyReport(r.Context(), peerID, s.clientIP(r), &report); err != nil {
 		log.Printf("apply report from peer %d: %v", peerID, err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// The response doubles as config sync: the agent applies this
+	// peer list, so membership and endpoint changes propagate within
+	// one report interval.
+	others, err := s.store.PeersForID(r.Context(), peerID)
+	if err != nil {
+		log.Printf("build sync payload for peer %d: %v", peerID, err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, proto.ReportResponse{Peers: s.buildPeerEntries(others)})
 }
 
 type linkStatJSON struct {

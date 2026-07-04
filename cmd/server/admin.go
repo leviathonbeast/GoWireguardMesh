@@ -64,14 +64,16 @@ func (s *server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 }
 
 type peerJSON struct {
-	ID         int64  `json:"id"`
-	PublicKey  string `json:"public_key"`
-	AssignedIP string `json:"assigned_ip"`
-	Hostname   string `json:"hostname,omitempty"`
-	ListenPort int    `json:"listen_port,omitempty"`
-	CreatedAt  string `json:"created_at"`
-	LastSeenAt string `json:"last_seen_at,omitempty"`
-	RevokedAt  string `json:"revoked_at,omitempty"`
+	ID             int64  `json:"id"`
+	PublicKey      string `json:"public_key"`
+	AssignedIP     string `json:"assigned_ip"`
+	Hostname       string `json:"hostname,omitempty"`
+	ListenPort     int    `json:"listen_port,omitempty"`
+	ObservedIP     string `json:"observed_ip,omitempty"`
+	PublicEndpoint string `json:"public_endpoint,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	LastSeenAt     string `json:"last_seen_at,omitempty"`
+	RevokedAt      string `json:"revoked_at,omitempty"`
 }
 
 type setupKeyJSON struct {

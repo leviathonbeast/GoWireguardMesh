@@ -1,0 +1,14 @@
+.git
+web/node_modules
+*.db
+*.db-wal
+*.db-shm
+wgkey.key
+mesh-psk.key
+admin-token
+cert.pem
+key.pem
+bin/
+agent
+server
+relay

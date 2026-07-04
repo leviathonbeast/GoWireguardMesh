@@ -57,6 +57,11 @@ type telemetryReporter struct {
 
 	pendingCounters map[wgtypes.Key]*proto.PeerCounter
 	pendingFlows    map[flowKey]*proto.FlowRecord
+
+	// Relay fallback state.
+	firstSeen   map[wgtypes.Key]time.Time
+	relayed     map[wgtypes.Key]bool
+	relayBroken bool // control plane said no relay; stop asking
 }
 
 func newTelemetryReporter(
@@ -82,6 +87,8 @@ func newTelemetryReporter(
 		prevFlow:        make(map[flowKey]flowCounters),
 		pendingCounters: make(map[wgtypes.Key]*proto.PeerCounter),
 		pendingFlows:    make(map[flowKey]*proto.FlowRecord),
+		firstSeen:       make(map[wgtypes.Key]time.Time),
+		relayed:         make(map[wgtypes.Key]bool),
 	}
 
 	// Flow visibility needs conntrack byte/packet accounting, which is
@@ -122,6 +129,7 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 		case <-ticker.C:
 			t.collect()
 			t.send()
+			t.checkHandshakes()
 		}
 	}
 }
@@ -299,7 +307,8 @@ func (t *telemetryReporter) send() {
 	}
 }
 
-// post sends one report; false means keep the pending data for retry.
+// post sends one report and applies the config-sync payload from the
+// response; false means keep the pending data for retry.
 func (t *telemetryReporter) post(report *proto.ReportRequest) bool {
 	body, err := json.Marshal(report)
 	if err != nil {
@@ -323,12 +332,40 @@ func (t *telemetryReporter) post(report *proto.ReportRequest) bool {
 	}
 	defer resp.Body.Close()
 
-	io.Copy(io.Discard, resp.Body)
-
 	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
 		fmt.Fprintf(os.Stderr, "telemetry: report rejected: %s\n", resp.Status)
+
 		return false
 	}
 
+	var sync proto.ReportResponse
+
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&sync); err != nil {
+		fmt.Fprintf(os.Stderr, "telemetry: decode sync payload: %v\n", err)
+		return true // report was accepted; only the sync failed
+	}
+
+	t.applySync(sync.Peers)
+
 	return true
+}
+
+// applySync converts the server's peer list and reconciles the device.
+func (t *telemetryReporter) applySync(entries []proto.PeerConfigResponse) {
+	desired := make([]wgtypes.PeerConfig, 0, len(entries))
+
+	for _, e := range entries {
+		cfg, err := peerConfigFromProto(e)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "telemetry: bad peer in sync payload: %v\n", err)
+			return // don't apply a partial view
+		}
+
+		desired = append(desired, cfg)
+	}
+
+	if err := syncPeers(t.wg, t.iface, desired); err != nil {
+		fmt.Fprintf(os.Stderr, "telemetry: %v\n", err)
+	}
 }

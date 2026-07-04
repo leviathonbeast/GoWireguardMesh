@@ -28,18 +28,50 @@ function peerLabel(hostname: string | undefined, ip: string): string {
   return hostname ? `${hostname} (${ip})` : ip;
 }
 
+// copyToClipboard works in secure contexts via the Clipboard API and
+// falls back to the legacy execCommand path on plain-HTTP origins,
+// where navigator.clipboard does not exist at all.
+async function copyToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // fall through to the legacy path
+    }
+  }
+
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+
+  ta.remove();
+  return ok;
+}
+
 function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
 
   const copy = async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1200);
+    const ok = await copyToClipboard(text);
+    setState(ok ? "copied" : "failed");
+    setTimeout(() => setState("idle"), 1500);
   };
 
   return (
-    <button className="copy" onClick={copy}>
-      {copied ? "copied" : "copy"}
+    <button className="copy" onClick={() => void copy()}>
+      {state === "idle" ? "copy" : state}
     </button>
   );
 }
@@ -61,11 +93,21 @@ function KeyBadge({ k }: { k: SetupKey }) {
   return <span className="badge ok">active</span>;
 }
 
+function endpointOf(p: Peer): string {
+  if (p.public_endpoint) return p.public_endpoint;
+  if (p.observed_ip && p.listen_port) return `${p.observed_ip}:${p.listen_port}`;
+  return "";
+}
+
+const TABS = ["peers", "traffic", "access"] as const;
+type Tab = (typeof TABS)[number];
+
 export default function App() {
   const [token, setToken] = useState(
     () => sessionStorage.getItem("wgmesh-token") ?? "",
   );
   const [tokenInput, setTokenInput] = useState(token);
+  const [tab, setTab] = useState<Tab>("peers");
   const [peers, setPeers] = useState<Peer[]>([]);
   const [keys, setKeys] = useState<SetupKey[]>([]);
   const [links, setLinks] = useState<LinkStat[]>([]);
@@ -130,250 +172,303 @@ export default function App() {
 
   return (
     <div className="wrap">
-      <h1>
-        wgmesh <span>control plane</span>
-      </h1>
-      <p className="sub">peers &amp; setup keys</p>
+      <header className="topbar">
+        <h1>
+          wgmesh <span>control plane</span>
+        </h1>
+        <div className="auth row">
+          <input
+            id="token"
+            type="password"
+            placeholder="admin token"
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && connect()}
+          />
+          <button className="primary" onClick={connect}>
+            connect
+          </button>
+          <button onClick={() => void refresh()}>refresh</button>
+        </div>
+      </header>
 
-      <div className="panel row">
-        <label htmlFor="token">admin token</label>
-        <input
-          id="token"
-          type="password"
-          size={40}
-          placeholder="contents of admin-token file"
-          value={tokenInput}
-          onChange={(e) => setTokenInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && connect()}
-        />
-        <button className="primary" onClick={connect}>
-          connect
-        </button>
-        <button onClick={() => void refresh()}>refresh</button>
-      </div>
+      <nav className="tabs">
+        {TABS.map((t) => (
+          <button
+            key={t}
+            className={tab === t ? "tab active" : "tab"}
+            onClick={() => setTab(t)}
+          >
+            {t}
+          </button>
+        ))}
+      </nav>
 
       <div className="error">{error}</div>
 
-      <h2>Peers</h2>
-      <div className="panel tablewrap">
-        <table>
-          <thead>
-            <tr>
-              <th>id</th>
-              <th>status</th>
-              <th>overlay ip</th>
-              <th>hostname</th>
-              <th>public key</th>
-              <th>port</th>
-              <th>last seen</th>
-              <th>created</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {peers.length === 0 && (
-              <tr>
-                <td colSpan={9} className="muted">
-                  no peers enrolled
-                </td>
-              </tr>
-            )}
-            {peers.map((p) => (
-              <tr key={p.id}>
-                <td>{p.id}</td>
-                <td>
-                  <PeerBadge peer={p} />
-                </td>
-                <td>{p.assigned_ip}</td>
-                <td>{p.hostname ?? ""}</td>
-                <td className="key" title={p.public_key}>
-                  {p.public_key} <CopyButton text={p.public_key} />
-                </td>
-                <td>{p.listen_port ?? <span className="muted">—</span>}</td>
-                <td className="muted">
-                  {formatTime(p.last_seen_at) || "never"}
-                </td>
-                <td className="muted">{formatTime(p.created_at)}</td>
-                <td>
-                  {!p.revoked_at && (
-                    <button
-                      className="danger"
-                      onClick={() =>
-                        void revoke(
-                          `/api/peers/${p.id}/revoke`,
-                          `revoke peer ${p.id} (${p.hostname || p.assigned_ip})?`,
-                        )
-                      }
-                    >
-                      revoke
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <h2>Traffic — links</h2>
-      <div className="panel tablewrap">
-        <table>
-          <thead>
-            <tr>
-              <th>reporter</th>
-              <th>remote</th>
-              <th>rx</th>
-              <th>tx</th>
-              <th>last handshake</th>
-              <th>updated</th>
-            </tr>
-          </thead>
-          <tbody>
-            {links.length === 0 && (
-              <tr>
-                <td colSpan={6} className="muted">
-                  no reports yet
-                </td>
-              </tr>
-            )}
-            {links.map((l) => (
-              <tr key={`${l.peer_id}-${l.remote_peer_id}`}>
-                <td>{peerLabel(l.peer_hostname, l.peer_ip)}</td>
-                <td>{peerLabel(l.remote_hostname, l.remote_ip)}</td>
-                <td>{humanBytes(l.rx_bytes)}</td>
-                <td>{humanBytes(l.tx_bytes)}</td>
-                <td className="muted">
-                  {formatTime(l.last_handshake_at) || "never"}
-                </td>
-                <td className="muted">{formatTime(l.updated_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <h2>Traffic — recent flows</h2>
-      <div className="panel tablewrap">
-        <table>
-          <thead>
-            <tr>
-              <th>reported</th>
-              <th>reporter</th>
-              <th>proto</th>
-              <th>flow</th>
-              <th>tx</th>
-              <th>rx</th>
-              <th>pkts</th>
-            </tr>
-          </thead>
-          <tbody>
-            {flows.length === 0 && (
-              <tr>
-                <td colSpan={7} className="muted">
-                  no flows recorded
-                </td>
-              </tr>
-            )}
-            {flows.map((f) => (
-              <tr key={f.id}>
-                <td className="muted">{formatTime(f.reported_at)}</td>
-                <td>{f.peer_hostname || f.peer_id}</td>
-                <td>{protocolName(f.protocol)}</td>
-                <td>
-                  {f.src_ip}:{f.src_port} → {f.dst_ip}:{f.dst_port}
-                </td>
-                <td>{humanBytes(f.tx_bytes)}</td>
-                <td>{humanBytes(f.rx_bytes)}</td>
-                <td className="muted">
-                  {f.tx_packets}/{f.rx_packets}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <h2>Setup keys</h2>
-      <div className="panel">
-        <div className="row">
-          <label htmlFor="maxUses">max uses (0 = unlimited)</label>
-          <input
-            id="maxUses"
-            type="number"
-            min={0}
-            style={{ width: 70 }}
-            value={maxUses}
-            onChange={(e) => setMaxUses(parseInt(e.target.value, 10) || 0)}
-          />
-          <label htmlFor="expiresIn">expires in (e.g. 24h, blank = never)</label>
-          <input
-            id="expiresIn"
-            type="text"
-            size={8}
-            placeholder="never"
-            value={expiresIn}
-            onChange={(e) => setExpiresIn(e.target.value)}
-          />
-          <button className="primary" onClick={() => void createKey()}>
-            new setup key
-          </button>
-        </div>
-        <div className="tablewrap">
-          <table>
-            <thead>
-              <tr>
-                <th>id</th>
-                <th>status</th>
-                <th>key</th>
-                <th>uses</th>
-                <th>expires</th>
-                <th>created</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {keys.length === 0 && (
+      {tab === "peers" && (
+        <>
+          <h2>Registered peers</h2>
+          <div className="panel tablewrap">
+            <table>
+              <thead>
                 <tr>
-                  <td colSpan={7} className="muted">
-                    no setup keys
-                  </td>
+                  <th>id</th>
+                  <th>status</th>
+                  <th>hostname</th>
+                  <th>overlay ip</th>
+                  <th>public key</th>
+                  <th>endpoint</th>
+                  <th>created</th>
+                  <th></th>
                 </tr>
-              )}
-              {keys.map((k) => (
-                <tr key={k.id}>
-                  <td>{k.id}</td>
-                  <td>
-                    <KeyBadge k={k} />
-                  </td>
-                  <td className="key" title={k.key}>
-                    {k.key} <CopyButton text={k.key} />
-                  </td>
-                  <td>
-                    {k.uses_consumed}/{k.max_uses > 0 ? k.max_uses : "∞"}
-                  </td>
-                  <td className="muted">{formatTime(k.expires_at) || "never"}</td>
-                  <td className="muted">{formatTime(k.created_at)}</td>
-                  <td>
-                    {!k.revoked_at && (
-                      <button
-                        className="danger"
-                        onClick={() =>
-                          void revoke(
-                            `/api/setup-keys/${k.id}/revoke`,
-                            `revoke setup key ${k.id}?`,
-                          )
-                        }
-                      >
-                        revoke
-                      </button>
-                    )}
-                  </td>
+              </thead>
+              <tbody>
+                {peers.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="muted">
+                      no peers enrolled
+                    </td>
+                  </tr>
+                )}
+                {peers.map((p) => (
+                  <tr key={p.id}>
+                    <td>{p.id}</td>
+                    <td>
+                      <PeerBadge peer={p} />
+                    </td>
+                    <td>{p.hostname ?? ""}</td>
+                    <td>{p.assigned_ip}</td>
+                    <td className="mono">
+                      {p.public_key} <CopyButton text={p.public_key} />
+                    </td>
+                    <td>
+                      {endpointOf(p) || <span className="muted">unknown</span>}
+                    </td>
+                    <td className="muted">{formatTime(p.created_at)}</td>
+                    <td>
+                      {!p.revoked_at && (
+                        <button
+                          className="danger"
+                          onClick={() =>
+                            void revoke(
+                              `/api/peers/${p.id}/revoke`,
+                              `revoke peer ${p.id} (${p.hostname || p.assigned_ip})?`,
+                            )
+                          }
+                        >
+                          revoke
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {tab === "traffic" && (
+        <>
+          <h2>Liveness</h2>
+          <div className="panel tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>peer</th>
+                  <th>last seen</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+              </thead>
+              <tbody>
+                {peers.filter((p) => !p.revoked_at).length === 0 && (
+                  <tr>
+                    <td colSpan={2} className="muted">
+                      no active peers
+                    </td>
+                  </tr>
+                )}
+                {peers
+                  .filter((p) => !p.revoked_at)
+                  .map((p) => (
+                    <tr key={p.id}>
+                      <td>{peerLabel(p.hostname, p.assigned_ip)}</td>
+                      <td className="muted">
+                        {formatTime(p.last_seen_at) || "never"}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h2>Links</h2>
+          <div className="panel tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>reporter</th>
+                  <th>remote</th>
+                  <th>rx</th>
+                  <th>tx</th>
+                  <th>last handshake</th>
+                  <th>updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {links.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="muted">
+                      no reports yet
+                    </td>
+                  </tr>
+                )}
+                {links.map((l) => (
+                  <tr key={`${l.peer_id}-${l.remote_peer_id}`}>
+                    <td>{peerLabel(l.peer_hostname, l.peer_ip)}</td>
+                    <td>{peerLabel(l.remote_hostname, l.remote_ip)}</td>
+                    <td>{humanBytes(l.rx_bytes)}</td>
+                    <td>{humanBytes(l.tx_bytes)}</td>
+                    <td className="muted">
+                      {formatTime(l.last_handshake_at) || "never"}
+                    </td>
+                    <td className="muted">{formatTime(l.updated_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h2>Recent flows</h2>
+          <div className="panel tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>reported</th>
+                  <th>reporter</th>
+                  <th>proto</th>
+                  <th>flow</th>
+                  <th>tx</th>
+                  <th>rx</th>
+                  <th>pkts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {flows.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="muted">
+                      no flows recorded
+                    </td>
+                  </tr>
+                )}
+                {flows.map((f) => (
+                  <tr key={f.id}>
+                    <td className="muted">{formatTime(f.reported_at)}</td>
+                    <td>{f.peer_hostname || f.peer_id}</td>
+                    <td>{protocolName(f.protocol)}</td>
+                    <td className="mono">
+                      {f.src_ip}:{f.src_port} → {f.dst_ip}:{f.dst_port}
+                    </td>
+                    <td>{humanBytes(f.tx_bytes)}</td>
+                    <td>{humanBytes(f.rx_bytes)}</td>
+                    <td className="muted">
+                      {f.tx_packets}/{f.rx_packets}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {tab === "access" && (
+        <>
+          <h2>Setup keys</h2>
+          <div className="panel">
+            <div className="row">
+              <label htmlFor="maxUses">max uses (0 = unlimited)</label>
+              <input
+                id="maxUses"
+                type="number"
+                min={0}
+                style={{ width: 70 }}
+                value={maxUses}
+                onChange={(e) => setMaxUses(parseInt(e.target.value, 10) || 0)}
+              />
+              <label htmlFor="expiresIn">expires in (e.g. 24h, blank = never)</label>
+              <input
+                id="expiresIn"
+                type="text"
+                size={8}
+                placeholder="never"
+                value={expiresIn}
+                onChange={(e) => setExpiresIn(e.target.value)}
+              />
+              <button className="primary" onClick={() => void createKey()}>
+                new setup key
+              </button>
+            </div>
+            <div className="tablewrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>id</th>
+                    <th>status</th>
+                    <th>key</th>
+                    <th>uses</th>
+                    <th>expires</th>
+                    <th>created</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {keys.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="muted">
+                        no setup keys
+                      </td>
+                    </tr>
+                  )}
+                  {keys.map((k) => (
+                    <tr key={k.id}>
+                      <td>{k.id}</td>
+                      <td>
+                        <KeyBadge k={k} />
+                      </td>
+                      <td className="mono">
+                        {k.key} <CopyButton text={k.key} />
+                      </td>
+                      <td>
+                        {k.uses_consumed}/{k.max_uses > 0 ? k.max_uses : "∞"}
+                      </td>
+                      <td className="muted">
+                        {formatTime(k.expires_at) || "never"}
+                      </td>
+                      <td className="muted">{formatTime(k.created_at)}</td>
+                      <td>
+                        {!k.revoked_at && (
+                          <button
+                            className="danger"
+                            onClick={() =>
+                              void revoke(
+                                `/api/setup-keys/${k.id}/revoke`,
+                                `revoke setup key ${k.id}?`,
+                              )
+                            }
+                          >
+                            revoke
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

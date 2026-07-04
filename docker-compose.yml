@@ -1,0 +1,83 @@
+# wgmesh control plane + relay.
+#
+# Notes before you test:
+#   - The server runs plain HTTP here; put Traefik in front for TLS
+#     (labels sketched below) or expose 8443 with built-in TLS instead.
+#   - The relay MUST use host networking: it binds ephemeral UDP ports
+#     at runtime, which cannot be port-mapped through a bridge.
+#   - With Traefik in front, add --trust-proxy so enrollment records
+#     real client IPs instead of the proxy's.
+#   - The agent is included commented out: it needs host networking
+#     and NET_ADMIN to create the WireGuard interface; most setups run
+#     it directly on the host (see deploy/wgmesh-agent.service).
+#
+# State lives in named volumes; back up server-data (db + PSK + admin
+# token) — losing the PSK strands enrolled peers.
+
+services:
+  server:
+    build:
+      context: .
+      target: server
+    command: >
+      --listen 0.0.0.0:8080
+      --no-tls
+      --db /data/mesh.db
+      --psk-file /data/mesh-psk.key
+      --admin-token-file /data/admin-token
+      --relay-host ${RELAY_PUBLIC_IP:?set RELAY_PUBLIC_IP to the relay host's public address}
+      --relay-control http://host.docker.internal:8081
+      --relay-secret-file /data/relay-secret
+    volumes:
+      - server-data:/data
+      # The relay writes its secret to its own volume; copy it here
+      # once (or bind-mount a shared secrets dir in real deployments):
+      #   docker compose cp relay:/data/relay-secret ./relay-secret
+      #   docker compose cp ./relay-secret server:/data/relay-secret
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    # Behind Traefik instead of the port mapping above:
+    # labels:
+    #   traefik.enable: "true"
+    #   traefik.http.routers.wgmesh.rule: Host(`mesh.example.com`)
+    #   traefik.http.routers.wgmesh.entrypoints: websecure
+    #   traefik.http.routers.wgmesh.tls.certresolver: letsencrypt
+    #   traefik.http.services.wgmesh.loadbalancer.server.port: "8080"
+
+  relay:
+    build:
+      context: .
+      target: relay
+    command: >
+      --control 0.0.0.0:8081
+      --secret-file /data/relay-secret
+    # Host networking: forwarding ports are allocated dynamically and
+    # the relay must be reachable on its public UDP ports. Keep 8081
+    # (the control API) firewalled from everything but the server.
+    network_mode: host
+    volumes:
+      - relay-data:/data
+    restart: unless-stopped
+
+  # agent:
+  #   build:
+  #     context: .
+  #     target: agent
+  #   command: >
+  #     --server http://<server-address>:8080
+  #     --setup-key ${WGMESH_SETUP_KEY:?}
+  #     --key-file /data/wgkey.key
+  #   network_mode: host
+  #   cap_add:
+  #     - NET_ADMIN
+  #   volumes:
+  #     - agent-data:/data
+  #   restart: unless-stopped
+
+volumes:
+  server-data:
+  relay-data:
+  # agent-data:

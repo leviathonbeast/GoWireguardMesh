@@ -31,9 +31,10 @@ func (s *Store) AuthenticatePeer(ctx context.Context, token string) (int64, erro
 }
 
 // ApplyReport ingests one telemetry report from peerID: bumps
-// last_seen_at, accumulates link counter deltas, and appends flow
-// rows. One transaction — a failed report is fully retriable.
-func (s *Store) ApplyReport(ctx context.Context, peerID int64, report *proto.ReportRequest) error {
+// last_seen_at, refreshes the peer's endpoint hint material, and
+// accumulates link counter deltas and flow rows. One transaction — a
+// failed report is fully retriable.
+func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string, report *proto.ReportRequest) error {
 	now := time.Now().UTC().Format(timeFormat)
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -43,7 +44,11 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, report *proto.Rep
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE peers SET last_seen_at = ? WHERE id = ?`, now, peerID,
+		`UPDATE peers SET last_seen_at = ?,
+		        observed_ip = COALESCE(?, observed_ip),
+		        public_endpoint = COALESCE(?, public_endpoint)
+		 WHERE id = ?`,
+		now, nullable(observedIP), nullable(report.PublicEndpoint), peerID,
 	); err != nil {
 		return fmt.Errorf("update last_seen_at: %w", err)
 	}
@@ -100,6 +105,29 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, report *proto.Rep
 	}
 
 	return nil
+}
+
+// RelayPairKeys resolves the requesting peer's public key and checks
+// the relay target is a known, active peer.
+func (s *Store) RelayPairKeys(ctx context.Context, selfID int64, targetPublicKey string) (selfKey string, targetOK bool, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT public_key FROM peers WHERE id = ?`, selfID,
+	).Scan(&selfKey)
+	if err != nil {
+		return "", false, fmt.Errorf("look up peer %d: %w", selfID, err)
+	}
+
+	var n int
+
+	err = s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM peers WHERE public_key = ? AND revoked_at IS NULL`,
+		targetPublicKey,
+	).Scan(&n)
+	if err != nil {
+		return "", false, fmt.Errorf("look up target peer: %w", err)
+	}
+
+	return selfKey, n > 0, nil
 }
 
 type LinkStat struct {

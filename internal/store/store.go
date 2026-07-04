@@ -37,6 +37,11 @@ type PeerRow struct {
 	ID         int64
 	PublicKey  string
 	AssignedIP string
+
+	// Endpoint hint material, in preference order.
+	PublicEndpoint string // STUN-discovered ip:port, "" if unknown
+	ObservedIP     string // enroll/report source IP, "" if unknown
+	ListenPort     int    // 0 if unknown
 }
 
 type EnrollResult struct {
@@ -65,6 +70,12 @@ func newAuthToken() (token, hash string, err error) {
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// nullable maps "" to NULL so empty updates never clobber stored
+// values guarded by COALESCE.
+func nullable(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
 }
 
 // Open opens (creating if needed) the SQLite database at path and
@@ -97,10 +108,11 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 2
+const schemaVersion = 3
 
 var migrations = map[int]string{
 	2: migrationV2,
+	3: migrationV3,
 }
 
 // migrationV2 adds telemetry: per-peer auth tokens (issued at
@@ -138,6 +150,16 @@ CREATE TABLE flows (
 
 CREATE INDEX idx_flows_reported_at ON flows(reported_at);
 CREATE INDEX idx_flows_peer_id ON flows(peer_id);
+`
+
+// migrationV3 adds endpoint distribution: the underlay address the
+// server observed the peer at (enroll/report source), and the public
+// endpoint the peer discovered itself via STUN. The STUN endpoint is
+// preferred when handing out hints; observed_ip:listen_port is the
+// same-network fallback.
+const migrationV3 = `
+ALTER TABLE peers ADD COLUMN observed_ip TEXT;
+ALTER TABLE peers ADD COLUMN public_endpoint TEXT;
 `
 
 func ensureSchema(db *sql.DB, schemaSQL string) error {
@@ -231,7 +253,7 @@ func (s *Store) CreateSetupKey(ctx context.Context, maxUses int, expiresIn time.
 // the presented setup key is the same one used originally and has not
 // been revoked since. Expiry and exhaustion do NOT block a retry: a
 // single-use key is exhausted by the very enrollment being retried.
-func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string, listenPort int) (*EnrollResult, error) {
+func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string, listenPort int, observedIP, publicEndpoint string) (*EnrollResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
@@ -250,7 +272,7 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 
 	switch {
 	case err == nil:
-		return s.reEnroll(ctx, tx, setupKey, publicKey, existing, enrolledKeyID)
+		return s.reEnroll(ctx, tx, setupKey, publicKey, existing, enrolledKeyID, observedIP, publicEndpoint)
 	case errors.Is(err, sql.ErrNoRows):
 		// New enrollment; fall through.
 	default:
@@ -309,9 +331,10 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 	}
 
 	insert, err := tx.ExecContext(ctx,
-		`INSERT INTO peers (public_key, assigned_ip, hostname, listen_port, setup_key_id, auth_token_hash)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO peers (public_key, assigned_ip, hostname, listen_port, setup_key_id, auth_token_hash, observed_ip, public_endpoint)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		publicKey, ip, host, port, keyID, tokenHash,
+		nullable(observedIP), nullable(publicEndpoint),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert peer: %w", err)
@@ -341,7 +364,7 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 
 // reEnroll handles the idempotent path. The presented key must exist,
 // match the key the peer originally enrolled with, and not be revoked.
-func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey string, existing PeerRow, enrolledKeyID int64) (*EnrollResult, error) {
+func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey string, existing PeerRow, enrolledKeyID int64, observedIP, publicEndpoint string) (*EnrollResult, error) {
 	var (
 		presentedID int64
 		revokedAt   sql.NullString
@@ -370,7 +393,11 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE peers SET auth_token_hash = ? WHERE id = ?`, tokenHash, existing.ID,
+		`UPDATE peers SET auth_token_hash = ?,
+		        observed_ip = COALESCE(?, observed_ip),
+		        public_endpoint = COALESCE(?, public_endpoint)
+		 WHERE id = ?`,
+		tokenHash, nullable(observedIP), nullable(publicEndpoint), existing.ID,
 	); err != nil {
 		return nil, fmt.Errorf("rotate auth token: %w", err)
 	}
@@ -432,9 +459,15 @@ func (s *Store) allocateIP(ctx context.Context, tx *sql.Tx) (string, error) {
 	return "", fmt.Errorf("network %s has no free addresses", s.network)
 }
 
-func listOthers(ctx context.Context, tx *sql.Tx, publicKey string) ([]PeerRow, error) {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT id, public_key, assigned_ip
+// querier lets peer-list queries run inside or outside a transaction.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func listOthers(ctx context.Context, q querier, publicKey string) ([]PeerRow, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT id, public_key, assigned_ip,
+		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0)
 		 FROM peers
 		 WHERE revoked_at IS NULL AND public_key != ?
 		 ORDER BY id`,
@@ -449,7 +482,8 @@ func listOthers(ctx context.Context, tx *sql.Tx, publicKey string) ([]PeerRow, e
 
 	for rows.Next() {
 		var p PeerRow
-		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP); err != nil {
+		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP,
+			&p.PublicEndpoint, &p.ObservedIP, &p.ListenPort); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
 
@@ -461,6 +495,21 @@ func listOthers(ctx context.Context, tx *sql.Tx, publicKey string) ([]PeerRow, e
 	}
 
 	return out, nil
+}
+
+// PeersForID returns every active peer except id itself — the sync
+// payload for a reporting agent.
+func (s *Store) PeersForID(ctx context.Context, id int64) ([]PeerRow, error) {
+	var publicKey string
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT public_key FROM peers WHERE id = ?`, id,
+	).Scan(&publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("look up peer %d: %w", id, err)
+	}
+
+	return listOthers(ctx, s.db, publicKey)
 }
 
 // diagnoseKey explains (for logs only) why the consumption UPDATE

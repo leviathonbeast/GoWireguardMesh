@@ -6,6 +6,10 @@ type EnrollRequest struct {
 	PublicKey  string `json:"public_key"`
 	Hostname   string `json:"hostname,omitempty"`
 	ListenPort int    `json:"listen_port,omitempty"`
+
+	// PublicEndpoint is the enrollee's STUN-discovered public ip:port,
+	// "" when discovery failed or was disabled.
+	PublicEndpoint string `json:"public_endpoint,omitempty"`
 }
 
 // EnrollResponse is returned after successful enrollment.

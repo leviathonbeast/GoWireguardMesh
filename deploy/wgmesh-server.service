@@ -1,0 +1,32 @@
+# wgmesh control plane.
+#
+#   sudo mkdir -p /var/lib/wgmesh
+#   sudo cp bin/server /usr/local/bin/wgmesh-server
+#   sudo cp deploy/wgmesh-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wgmesh-server
+#
+# All state (db, PSK, TLS cert, admin token) lives in WorkingDirectory.
+# Adjust ExecStart flags to taste; add --no-tls --trust-proxy behind Traefik.
+
+[Unit]
+Description=wgmesh control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wgmesh-server --listen 0.0.0.0:8443
+WorkingDirectory=/var/lib/wgmesh
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the server needs no privileges at all.
+DynamicUser=yes
+StateDirectory=wgmesh
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/wgmesh
+
+[Install]
+WantedBy=multi-user.target
