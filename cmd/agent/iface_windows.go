@@ -7,9 +7,9 @@ import (
 	"net"
 	"os/exec"
 
-	"github.com/Microsoft/go-winio"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/ipc"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
@@ -27,20 +27,6 @@ var (
 	wgDevice     *device.Device
 	uapiListener net.Listener
 )
-
-// uapiListen opens the pipe wgctrl expects for this adapter name.
-// wireguard-go's own ipc.UAPIListen hardcodes the pipe owner to
-// LocalSystem (O:SY), which only works when running as the SYSTEM
-// service the official client installs. We run from an elevated
-// prompt, whose token owns the Administrators group instead — so we
-// create the identical pipe with owner BA. Same path, same ACL
-// (full access for SYSTEM and Administrators only).
-func uapiListen(name string) (net.Listener, error) {
-	return winio.ListenPipe(
-		`\\.\pipe\ProtectedPrefix\Administrators\WireGuard\`+name,
-		&winio.PipeConfig{SecurityDescriptor: "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)"},
-	)
-}
 
 func ensurePrivileged() error {
 	// No euid on Windows; Wintun adapter creation fails without
@@ -60,7 +46,21 @@ func createInterface(name string) error {
 		device.NewLogger(device.LogLevelError, fmt.Sprintf("(%s) ", name)),
 	)
 
-	uapi, err := uapiListen(name)
+	// IMPORTANT:
+	// Bring the userspace WireGuard backend online.
+	if err := dev.Up(); err != nil {
+		dev.Close()
+
+		return fmt.Errorf(
+			"bring WireGuard device %q up: %w",
+			name,
+			err,
+		)
+	}
+
+	// Official WireGuard UAPI listener.
+	// This is what wgctrl expects on Windows.
+	uapi, err := ipc.UAPIListen(name)
 	if err != nil {
 		dev.Close()
 		return fmt.Errorf("listen on UAPI pipe for %q: %w", name, err)
