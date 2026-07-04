@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,6 +18,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"gowireguard/internal/proto"
 )
 
 const (
@@ -27,6 +33,9 @@ var (
 	peerEndpointFlag = flag.String("peer-endpoint", "", "peer endpoint host:port (optional)")
 	peerAddrFlag     = flag.String("peer-addr", "", "peer overlay address, e.g. 100.64.0.2/32")
 	peerPSKFlag      = flag.String("peer-psk", "", "preshared key (base64, optional)")
+	serverFlag       = flag.String("server", "", "control plane URL (e.g. http://host:8080); enables enrollment mode")
+	setupKeyFlag     = flag.String("setup-key", "", "setup key for enrollment (required with --server)")
+	keyFileFlag      = flag.String("key-file", "wgkey.key", "path to private key file")
 )
 
 func generatePrivateKey() (wgtypes.Key, error) {
@@ -252,6 +261,99 @@ func loadOrGenerateKey(path string) (wgtypes.Key, error) {
 	return key, nil
 }
 
+// enroll registers this node with the control plane and returns the
+// mesh configuration. Never sends the private key.
+func enroll(serverURL, setupKey string, publicKey wgtypes.Key, hostname string, listenPort int) (*proto.EnrollResponse, error) {
+	reqBody, err := json.Marshal(proto.EnrollRequest{
+		SetupKey:   setupKey,
+		PublicKey:  publicKey.String(),
+		Hostname:   hostname,
+		ListenPort: listenPort,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode enroll request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	resp, err := client.Post(serverURL+"/enroll", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("post enroll to %q: %w", serverURL, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read enroll response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("enroll rejected: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var out proto.EnrollResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode enroll response: %w", err)
+	}
+
+	return &out, nil
+}
+
+// peerConfigFromProto converts a wire-format peer entry into the
+// wgtypes.PeerConfig handed to ConfigureDevice.
+func peerConfigFromProto(p proto.PeerConfigResponse) (wgtypes.PeerConfig, error) {
+	publicKey, err := wgtypes.ParseKey(p.PublicKey)
+	if err != nil {
+		return wgtypes.PeerConfig{}, fmt.Errorf("parse peer public key %q: %w", p.PublicKey, err)
+	}
+
+	var udpAddr *net.UDPAddr
+
+	if p.Endpoint != nil {
+		udpAddr, err = net.ResolveUDPAddr("udp", *p.Endpoint)
+		if err != nil {
+			return wgtypes.PeerConfig{}, fmt.Errorf("resolve endpoint %q: %w", *p.Endpoint, err)
+		}
+	}
+
+	allowed := make([]net.IPNet, 0, len(p.AllowedIPs))
+
+	for _, cidr := range p.AllowedIPs {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return wgtypes.PeerConfig{}, fmt.Errorf("parse allowed CIDR %q: %w", cidr, err)
+		}
+
+		allowed = append(allowed, *ipnet)
+	}
+
+	var psk *wgtypes.Key
+
+	if p.PresharedKey != nil {
+		key, err := wgtypes.ParseKey(*p.PresharedKey)
+		if err != nil {
+			return wgtypes.PeerConfig{}, fmt.Errorf("parse preshared key: %w", err)
+		}
+
+		psk = &key
+	}
+
+	var keepalive *time.Duration
+
+	if p.PersistentKeepaliveInterval != nil {
+		d := time.Duration(*p.PersistentKeepaliveInterval) * time.Second
+		keepalive = &d
+	}
+
+	return wgtypes.PeerConfig{
+		PublicKey:                   publicKey,
+		Endpoint:                    udpAddr,
+		PresharedKey:                psk,
+		AllowedIPs:                  allowed,
+		PersistentKeepaliveInterval: keepalive,
+	}, nil
+}
+
 func run() error {
 	flag.Parse()
 
@@ -264,12 +366,51 @@ func run() error {
 		return err
 	}
 
-	privateKey, err := loadOrGenerateKey("wgkey.key")
+	privateKey, err := loadOrGenerateKey(*keyFileFlag)
 	if err != nil {
 		return err
 	}
 
 	fmt.Printf("Public Key: %s\n", privateKey.PublicKey())
+
+	// Enrollment mode: the control plane dictates our overlay address
+	// and peer list; the manual --peer-* flags are the standalone path.
+	overlayAddr := *addrFlag
+
+	var enrolledPeers []wgtypes.PeerConfig
+
+	if *serverFlag != "" {
+		if *setupKeyFlag == "" {
+			return errors.New("--setup-key is required with --server")
+		}
+
+		hostname, _ := os.Hostname()
+
+		resp, err := enroll(*serverFlag, *setupKeyFlag, privateKey.PublicKey(), hostname, listenPort)
+		if err != nil {
+			return err
+		}
+
+		_, network, err := net.ParseCIDR(resp.NetworkCIDR)
+		if err != nil {
+			return fmt.Errorf("parse network CIDR %q from server: %w", resp.NetworkCIDR, err)
+		}
+
+		bits, _ := network.Mask.Size()
+		overlayAddr = fmt.Sprintf("%s/%d", resp.AssignedIP, bits)
+
+		for _, p := range resp.Peers {
+			cfg, err := peerConfigFromProto(p)
+			if err != nil {
+				return err
+			}
+
+			enrolledPeers = append(enrolledPeers, cfg)
+		}
+
+		fmt.Printf("Enrolled as peer %d, assigned %s, %d peer(s) in mesh\n",
+			resp.PeerID, overlayAddr, len(resp.Peers))
+	}
 
 	defer func() {
 		if err := deleteInterface(ifaceName); err != nil {
@@ -281,7 +422,7 @@ func run() error {
 		return err
 	}
 
-	if err := assignIPAddress(ifaceName, *addrFlag); err != nil {
+	if err := assignIPAddress(ifaceName, overlayAddr); err != nil {
 		return err
 	}
 
@@ -295,7 +436,7 @@ func run() error {
 	}
 	defer client.Close()
 
-	var peers []wgtypes.PeerConfig
+	peers := enrolledPeers
 
 	if *peerKeyFlag != "" {
 		if *peerAddrFlag == "" {
