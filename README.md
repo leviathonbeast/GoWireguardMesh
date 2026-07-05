@@ -341,9 +341,58 @@ privileges is a warning, never fatal.
   separate `server`, `relay`, and `agent` targets; the `agent` target is
   meant to be sidecar'd next to a service (`network_mode: service:<svc>`,
   `NET_ADMIN`) — see the sidecar example in [SECURITY.md](SECURITY.md).
+- **Gitea Actions**: `.gitea/workflows/docker-images.yml` builds and pushes
+  the `server`, `agent`, and `relay` Docker targets to the Gitea container
+  registry on pushes to `main` and `v*` tags.
 - **Back up** `mesh.db`, `mesh-psk.key` (the PSK master — losing it strands
   every peer), `admin-token`, and (built-in TLS) `key.pem`. Details and a
   cron sketch in [SECURITY.md](SECURITY.md).
+
+### Publishing images with Gitea Actions
+
+The workflow publishes these images by default:
+
+```txt
+gitea.mynetbird.uk/<owner>/wgmesh-server:latest
+gitea.mynetbird.uk/<owner>/wgmesh-agent:latest
+gitea.mynetbird.uk/<owner>/wgmesh-relay:latest
+```
+
+It also tags each image with the commit SHA. If your registry hostname is not
+`gitea.mynetbird.uk`, edit `REGISTRY` in
+`.gitea/workflows/docker-images.yml`.
+
+Create a Gitea access token with package write permission, then add it to the
+repository secrets as `REGISTRY_TOKEN`. The workflow logs in as the actor that
+triggered the run, so the token should belong to a user that can publish
+packages under the repository owner.
+
+On hosts that pull private images:
+
+```sh
+docker login gitea.mynetbird.uk
+docker pull gitea.mynetbird.uk/<owner>/wgmesh-agent:latest
+```
+
+Then sidecars can use the published image:
+
+```yaml
+services:
+  myservice-wg:
+    image: gitea.mynetbird.uk/<owner>/wgmesh-agent:latest
+    network_mode: "service:myservice"
+    cap_add: [NET_ADMIN]
+    command: >
+      --server https://mesh.example.com
+      --setup-key ${WGMESH_SETUP_KEY}
+      --listen-port 51820
+      --key-file /data/wgkey.key
+      --manage-firewall=false
+    volumes:
+      - myservice-wg:/data
+volumes:
+  myservice-wg:
+```
 
 ### Honest production status
 

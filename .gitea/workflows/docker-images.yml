@@ -1,0 +1,65 @@
+name: docker-images
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  # Change this if your Gitea container registry uses a different host.
+  REGISTRY: gitea.mynetbird.uk
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: server
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-server:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-server:${{ github.sha }}
+
+      - name: Build and push agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: agent
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-agent:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-agent:${{ github.sha }}
+
+      - name: Build and push relay image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: relay
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-relay:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-relay:${{ github.sha }}
