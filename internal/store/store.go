@@ -153,7 +153,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 7
+const schemaVersion = 8
 
 var migrations = map[int]string{
 	2: migrationV2,
@@ -162,7 +162,22 @@ var migrations = map[int]string{
 	5: migrationV5,
 	6: migrationV6,
 	7: migrationV7,
+	8: migrationV8,
 }
+
+// migrationV8 records the agent's selected path for each peer pair
+// (direct, ws-relay, udp-relay, probing-direct) so the UI can show
+// path state independently of byte-counter changes.
+const migrationV8 = `
+CREATE TABLE peer_paths (
+    peer_id        INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    remote_peer_id INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    state          TEXT NOT NULL,
+    endpoint       TEXT,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (peer_id, remote_peer_id)
+);
+`
 
 // migrationV7 stores operator-editable settings that must survive a
 // process restart. Overlay CIDRs live here once the server initializes

@@ -110,6 +110,33 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 		}
 	}
 
+	for _, p := range report.PathStates {
+		var remoteID int64
+
+		err := tx.QueryRowContext(ctx,
+			`SELECT id FROM peers WHERE public_key = ?`, p.PeerPublicKey,
+		).Scan(&remoteID)
+
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		case err != nil:
+			return fmt.Errorf("look up path peer %q: %w", p.PeerPublicKey, err)
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO peer_paths (peer_id, remote_peer_id, state, endpoint, updated_at)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT (peer_id, remote_peer_id) DO UPDATE SET
+			   state = excluded.state,
+			   endpoint = excluded.endpoint,
+			   updated_at = excluded.updated_at`,
+			peerID, remoteID, p.State, nullable(p.Endpoint), now,
+		); err != nil {
+			return fmt.Errorf("upsert path state: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit report: %w", err)
 	}
@@ -151,17 +178,23 @@ type LinkStat struct {
 	TxBytes         int64
 	LastHandshakeAt string // "" if never
 	UpdatedAt       string
+	PathState       string
+	PathEndpoint    string
+	PathUpdatedAt   string
 }
 
 func (s *Store) ListLinkStats(ctx context.Context) ([]LinkStat, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT l.peer_id, COALESCE(p.hostname, ''), p.assigned_ip,
-		        l.remote_peer_id, COALESCE(r.hostname, ''), r.assigned_ip,
-		        l.rx_bytes, l.tx_bytes, COALESCE(l.last_handshake_at, ''), l.updated_at
-		 FROM link_stats l
-		 JOIN peers p ON p.id = l.peer_id
-		 JOIN peers r ON r.id = l.remote_peer_id
-		 ORDER BY l.peer_id, l.remote_peer_id`,
+		`SELECT pp.peer_id, COALESCE(p.hostname, ''), p.assigned_ip,
+		        pp.remote_peer_id, COALESCE(r.hostname, ''), r.assigned_ip,
+		        COALESCE(l.rx_bytes, 0), COALESCE(l.tx_bytes, 0),
+		        COALESCE(l.last_handshake_at, ''), COALESCE(l.updated_at, pp.updated_at),
+		        pp.state, COALESCE(pp.endpoint, ''), pp.updated_at
+		 FROM peer_paths pp
+		 JOIN peers p ON p.id = pp.peer_id
+		 JOIN peers r ON r.id = pp.remote_peer_id
+		 LEFT JOIN link_stats l ON l.peer_id = pp.peer_id AND l.remote_peer_id = pp.remote_peer_id
+		 ORDER BY pp.peer_id, pp.remote_peer_id`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list link stats: %w", err)
@@ -174,7 +207,8 @@ func (s *Store) ListLinkStats(ctx context.Context) ([]LinkStat, error) {
 		var l LinkStat
 		if err := rows.Scan(&l.PeerID, &l.PeerHostname, &l.PeerIP,
 			&l.RemotePeerID, &l.RemoteHostname, &l.RemoteIP,
-			&l.RxBytes, &l.TxBytes, &l.LastHandshakeAt, &l.UpdatedAt); err != nil {
+			&l.RxBytes, &l.TxBytes, &l.LastHandshakeAt, &l.UpdatedAt,
+			&l.PathState, &l.PathEndpoint, &l.PathUpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan link stat: %w", err)
 		}
 

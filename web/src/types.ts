@@ -37,6 +37,9 @@ export interface LinkStat {
   tx_bytes: number;
   last_handshake_at?: string;
   updated_at: string;
+  path_state?: "direct" | "ws-relay" | "udp-relay" | "probing-direct";
+  path_endpoint?: string;
+  path_updated_at?: string;
 }
 
 export interface AclRule {

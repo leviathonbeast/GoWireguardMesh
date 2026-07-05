@@ -289,10 +289,17 @@ func peerConfigFromProto(p proto.PeerConfigResponse) (wgtypes.PeerConfig, error)
 
 	var udpAddr *net.UDPAddr
 
-	if p.Endpoint != nil {
-		udpAddr, err = net.ResolveUDPAddr("udp", *p.Endpoint)
+	endpoint := ""
+	if len(p.EndpointCandidates) > 0 {
+		endpoint = p.EndpointCandidates[0].Endpoint
+	} else if p.Endpoint != nil {
+		endpoint = *p.Endpoint
+	}
+
+	if endpoint != "" {
+		udpAddr, err = net.ResolveUDPAddr("udp", endpoint)
 		if err != nil {
-			return wgtypes.PeerConfig{}, fmt.Errorf("resolve endpoint %q: %w", *p.Endpoint, err)
+			return wgtypes.PeerConfig{}, fmt.Errorf("resolve endpoint %q: %w", endpoint, err)
 		}
 	}
 

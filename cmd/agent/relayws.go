@@ -185,6 +185,10 @@ func (p *wsRelayProxy) close() {
 	p.ws.Close(websocket.StatusNormalClosure, "")
 }
 
+func (p *wsRelayProxy) endpoint() *net.UDPAddr {
+	return p.udp.LocalAddr().(*net.UDPAddr)
+}
+
 // alive reports whether the proxy's pumps are still running, so the
 // reporter can prune a dead proxy and retry.
 func (p *wsRelayProxy) alive() bool {

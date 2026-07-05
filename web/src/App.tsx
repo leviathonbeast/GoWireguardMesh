@@ -120,6 +120,22 @@ function lastSeenLabel(p: Peer): string {
   return `${Math.floor(minutes / 60)}h ago`;
 }
 
+function PathBadge({ state }: { state?: LinkStat["path_state"] }) {
+  switch (state) {
+    case "direct":
+      return <span className="badge ok">direct</span>;
+    case "probing-direct":
+      return <span className="badge warn">probing-direct</span>;
+    case "ws-relay":
+      return <span className="badge warn">ws-relay</span>;
+    case "udp-relay":
+      return <span className="badge warn">udp-relay</span>;
+    default:
+      return <span className="badge bad">unknown</span>;
+  }
+}
+
+
 const TABS = ["peers", "traffic", "access", "audit", "admin"] as const;
 type Tab = (typeof TABS)[number];
 
@@ -341,6 +357,7 @@ export default function App() {
   const [networkCIDR6, setNetworkCIDR6] = useState("");
   const [networkPlan, setNetworkPlan] = useState<NetworkMigrationPlan | null>(null);
   const [networkConfirm, setNetworkConfirm] = useState("");
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
 
@@ -389,6 +406,16 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!token || !autoRefresh) return;
+
+    const id = window.setInterval(() => {
+      void refresh();
+    }, 5000);
+
+    return () => window.clearInterval(id);
+  }, [autoRefresh, refresh, token]);
 
   const connect = () => {
     const t = tokenInput.trim();
@@ -499,6 +526,14 @@ export default function App() {
             connect
           </button>
           <button onClick={() => void refresh()}>refresh</button>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+            />
+            5s auto
+          </label>
         </div>
       </header>
 
@@ -626,6 +661,7 @@ export default function App() {
                 <tr>
                   <th>reporter</th>
                   <th>remote</th>
+                  <th>path</th>
                   <th>rx</th>
                   <th>tx</th>
                   <th>last handshake</th>
@@ -635,7 +671,7 @@ export default function App() {
               <tbody>
                 {links.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="muted">
+                    <td colSpan={7} className="muted">
                       no reports yet
                     </td>
                   </tr>
@@ -644,6 +680,12 @@ export default function App() {
                   <tr key={`${l.peer_id}-${l.remote_peer_id}`}>
                     <td>{peerLabel(l.peer_hostname, l.peer_ip)}</td>
                     <td>{peerLabel(l.remote_hostname, l.remote_ip)}</td>
+                    <td>
+                      <PathBadge state={l.path_state} />
+                      {l.path_endpoint && (
+                        <div className="muted">{l.path_endpoint}</div>
+                      )}
+                    </td>
                     <td>{humanBytes(l.rx_bytes)}</td>
                     <td>{humanBytes(l.tx_bytes)}</td>
                     <td className="muted">

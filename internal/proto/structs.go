@@ -39,8 +39,16 @@ type PeerConfigResponse struct {
 
 	Endpoint *string `json:"endpoint,omitempty"`
 
+	EndpointCandidates []EndpointCandidate `json:"endpoint_candidates,omitempty"`
+
 	// Seconds.
 	PersistentKeepaliveInterval *int `json:"persistent_keepalive_interval,omitempty"`
 
 	AllowedIPs []string `json:"allowed_ips"`
+}
+
+type EndpointCandidate struct {
+	Endpoint string `json:"endpoint"`
+	Type     string `json:"type"`     // lan, stun
+	Priority int    `json:"priority"` // larger wins
 }

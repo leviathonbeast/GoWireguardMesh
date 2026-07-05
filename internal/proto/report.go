@@ -14,6 +14,10 @@ type ReportRequest struct {
 	// Flows carries overlay flow deltas observed via conntrack since
 	// the previous successful report.
 	Flows []FlowRecord `json:"flows,omitempty"`
+
+	// PathStates carries the agent's current path choice for each
+	// configured remote peer: direct, ws-relay, udp-relay, or probing-direct.
+	PathStates []PeerPathState `json:"path_states,omitempty"`
 }
 
 // ReportResponse doubles as the config-sync channel: every accepted
@@ -36,6 +40,12 @@ type PeerCounter struct {
 	RxBytes         int64  `json:"rx_bytes"`
 	TxBytes         int64  `json:"tx_bytes"`
 	LastHandshakeAt string `json:"last_handshake_at,omitempty"` // RFC3339, "" if never
+}
+
+type PeerPathState struct {
+	PeerPublicKey string `json:"peer_public_key"`
+	State         string `json:"state"`
+	Endpoint      string `json:"endpoint,omitempty"`
 }
 
 // FlowRecord is one aggregated overlay flow observed on the reporting

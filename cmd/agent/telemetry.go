@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -54,6 +55,13 @@ type flowCounters struct {
 	txPackets, rxPackets uint64
 }
 
+type directProbe struct {
+	started       time.Time
+	candidates    []*net.UDPAddr
+	index         int
+	relayEndpoint *net.UDPAddr
+}
+
 // telemetryReporter periodically collects WireGuard link counters and
 // conntrack flow data, converts them to deltas, and ships them to the
 // control plane. Deltas survive failed reports: pending data is only
@@ -82,6 +90,9 @@ type telemetryReporter struct {
 	relayTransport relayTransport
 	firstSeen      map[wgtypes.Key]time.Time
 	relayed        map[wgtypes.Key]bool
+	relayedAt      map[wgtypes.Key]time.Time
+	relayEndpoints map[wgtypes.Key]*net.UDPAddr
+	directProbes   map[wgtypes.Key]directProbe
 	wsProxies      map[wgtypes.Key]*wsRelayProxy
 	relayBroken    bool // control plane said no relay; stop asking
 }
@@ -131,6 +142,9 @@ func newTelemetryReporter(
 		pendingFlows:    make(map[flowKey]*proto.FlowRecord),
 		firstSeen:       make(map[wgtypes.Key]time.Time),
 		relayed:         make(map[wgtypes.Key]bool),
+		relayedAt:       make(map[wgtypes.Key]time.Time),
+		relayEndpoints:  make(map[wgtypes.Key]*net.UDPAddr),
+		directProbes:    make(map[wgtypes.Key]directProbe),
 		wsProxies:       make(map[wgtypes.Key]*wsRelayProxy),
 	}
 
@@ -325,13 +339,14 @@ func (t *telemetryReporter) send() {
 	if len(t.pendingCounters) == 0 && len(t.pendingFlows) == 0 {
 		// Still send: an empty report is the liveness heartbeat that
 		// keeps last_seen_at fresh on the server.
-		t.post(&proto.ReportRequest{})
+		t.post(&proto.ReportRequest{PathStates: t.currentPathStates()})
 		return
 	}
 
 	report := &proto.ReportRequest{
-		Counters: make([]proto.PeerCounter, 0, len(t.pendingCounters)),
-		Flows:    make([]proto.FlowRecord, 0, len(t.pendingFlows)),
+		Counters:   make([]proto.PeerCounter, 0, len(t.pendingCounters)),
+		Flows:      make([]proto.FlowRecord, 0, len(t.pendingFlows)),
+		PathStates: t.currentPathStates(),
 	}
 
 	for _, c := range t.pendingCounters {
@@ -346,6 +361,62 @@ func (t *telemetryReporter) send() {
 		t.pendingCounters = make(map[wgtypes.Key]*proto.PeerCounter)
 		t.pendingFlows = make(map[flowKey]*proto.FlowRecord)
 	}
+}
+
+func (t *telemetryReporter) currentPathStates() []proto.PeerPathState {
+	device, err := t.wg.Device(t.iface)
+	if err != nil {
+		return nil
+	}
+
+	out := make([]proto.PeerPathState, 0, len(device.Peers))
+	for _, peer := range device.Peers {
+		endpoint := ""
+		if peer.Endpoint != nil {
+			endpoint = peer.Endpoint.String()
+		}
+
+		out = append(out, proto.PeerPathState{
+			PeerPublicKey: peer.PublicKey.String(),
+			State:         t.pathState(peer.PublicKey),
+			Endpoint:      endpoint,
+		})
+	}
+
+	return out
+}
+
+func (t *telemetryReporter) pathState(peer wgtypes.Key) string {
+	if _, ok := t.directProbes[peer]; ok {
+		return "probing-direct"
+	}
+	if t.relayed[peer] {
+		if t.relayTransport == relayUDP {
+			return "udp-relay"
+		}
+		return "ws-relay"
+	}
+	return "direct"
+}
+
+func endpointCandidatesFromProto(p proto.PeerConfigResponse, fallback *net.UDPAddr) []*net.UDPAddr {
+	out := make([]*net.UDPAddr, 0, len(p.EndpointCandidates)+1)
+	seen := map[string]bool{}
+
+	for _, c := range p.EndpointCandidates {
+		udp, err := net.ResolveUDPAddr("udp", c.Endpoint)
+		if err != nil || seen[udp.String()] {
+			continue
+		}
+		seen[udp.String()] = true
+		out = append(out, udp)
+	}
+
+	if fallback != nil && !seen[fallback.String()] {
+		out = append(out, fallback)
+	}
+
+	return out
 }
 
 // post sends one report and applies the config-sync payload from the
@@ -410,6 +481,8 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 			fmt.Fprintf(os.Stderr, "telemetry: bad peer in sync payload: %v\n", err)
 			return // don't apply a partial view
 		}
+
+		t.maybeRetryDirect(cfg.PublicKey, endpointCandidatesFromProto(e, cfg.Endpoint))
 
 		desired = append(desired, cfg)
 	}

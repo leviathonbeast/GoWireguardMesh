@@ -34,6 +34,12 @@ Never expose `--no-tls` to the internet. Two options:
 The server warns loudly if it is serving plain HTTP on a non-loopback
 address without `--trust-proxy`.
 
+The web UI is protected by a single admin bearer token. Over HTTPS that is
+reasonable for a homelab control plane, but treat the token like root for the
+mesh: keep TLS strict, do not log or share the token, prefer putting the UI
+behind your existing identity-aware proxy/VPN allowlist when possible, and
+rotate `admin-token` if it leaks.
+
 ### 2. Rate limiting (on by default)
 
 Public endpoints (`/enroll`, `/report`, `/relay-pair`, `/relay-ws`) are
@@ -109,6 +115,10 @@ Flow logs are labeled per the reporting peer's vantage: **direction**
 protocol name (tcp/udp/icmp), and **ingress/egress port numbering** —
 the port traffic arrives on vs. leaves from at that peer. Header data
 only; payloads are never captured.
+
+Agents also report per-peer path state (`direct`, `ws-relay`, `udp-relay`,
+`probing-direct`) so operators can see whether traffic is on the preferred
+direct path or temporarily riding a relay.
 
 ## Topology notes
 

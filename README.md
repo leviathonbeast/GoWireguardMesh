@@ -186,11 +186,13 @@ cleartext.
 The server serves the admin interface at `/` (same port as the API). Open
 it, paste the contents of `admin-token`, and use the tabs:
 
-- **Peers** — registered peers with online/stale/offline status, overlay IP, endpoint, last seen;
-  revoke inline.
+- **Peers** — registered peers with online/stale/offline status, overlay IP,
+  endpoint, last seen, and a 5s auto-refresh toggle; revoke inline.
 - **Traffic** — liveness, per-link totals, and a NetBird-style traffic-event
   feed (both peer names resolved, protocol/port, ingress/egress ports, and
   `↓ rx / ↑ tx`) with a **search box** (ip / port / hostname / protocol).
+  Link rows show the current path: `direct`, `ws-relay`, `udp-relay`, or
+  `probing-direct`.
 - **Access** — recent request tracing when `--access-log=memory`.
 - **Audit** — the security activity log (colored by outcome) with search.
 - **Admin** — overlay-network migration preview/apply, ACL rules, and
@@ -253,13 +255,11 @@ Connectivity is attempted in this order, all automatic:
    makes the discovered mapping valid for tunnel traffic — on
    endpoint-independent NATs, at least. Symmetric NATs defeat this and
    fall through to the relay.
-2. **Endpoint hints.** The server distributes each peer's best-known
-   endpoint: its STUN result if it has one, otherwise the address the
-   control plane observed it at plus its listen port (which is what makes
-   same-LAN meshes work with zero configuration). Hints are only hints —
-   WireGuard roaming overrides them as soon as real traffic arrives, and
-   config sync never rewrites the endpoint of an already-known peer, so a
-   roamed connection is never dragged back to a stale hint.
+2. **Endpoint candidates.** The server distributes each peer's ordered
+   endpoint candidates: STUN-discovered public endpoint, observed LAN/source
+   IP plus listen port, and same-NAT LAN preference when both peers report the
+   same public endpoint. Candidates are priority ordered, but still just hints:
+   WireGuard roaming overrides them as soon as real traffic arrives.
 3. **Relay fallback.** If a peer has produced no handshake for 60s, the
    agent moves it onto a relay. The relay is a deliberately dumb
    forwarder: it never parses what it carries — all traffic is WireGuard
@@ -280,7 +280,14 @@ Connectivity is attempted in this order, all automatic:
      pair per peer pair, each side points its endpoint at its port, and
      the relay cross-forwards. Faster (no TCP head-of-line blocking) but
      needs the relay's port range reachable. Works with both embedded
-     and standalone relays.
+   and standalone relays.
+
+Relayed peers periodically retry direct candidates from config sync. The relay
+stays alive while a direct candidate is probed, so traffic has a fallback path
+during the test. If WireGuard handshakes from a non-relay endpoint, the agent
+closes the relay and marks the path `direct`; if the probe stays silent, it
+tries the next candidate, then restores the relay endpoint after the normal
+handshake timeout.
 
 Relay setup, two shapes:
 

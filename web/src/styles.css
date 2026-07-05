@@ -425,6 +425,18 @@ label {
   font-size: 13px;
 }
 
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.toggle input {
+  width: auto;
+}
+
 @media (max-width: 820px) {
   .metric-grid,
   .form-grid,

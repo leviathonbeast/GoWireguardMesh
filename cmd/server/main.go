@@ -537,17 +537,45 @@ func sameHost(a, b string) bool {
 // Hints are exactly that — WireGuard roaming overrides them the
 // moment authenticated traffic arrives from somewhere else.
 func endpointHint(self, p store.PeerRow) *string {
-	if p.PublicEndpoint == "" {
-		return lanEndpoint(p)
+	candidates := endpointCandidates(self, p)
+	if len(candidates) == 0 {
+		return nil
 	}
 
-	if self.PublicEndpoint != "" && sameHost(self.PublicEndpoint, p.PublicEndpoint) {
-		if lan := lanEndpoint(p); lan != nil {
-			return lan
+	return &candidates[0].Endpoint
+}
+
+func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
+	var out []proto.EndpointCandidate
+	seen := map[string]bool{}
+
+	add := func(endpoint, typ string, priority int) {
+		if endpoint == "" || seen[endpoint] {
+			return
 		}
+		seen[endpoint] = true
+		out = append(out, proto.EndpointCandidate{
+			Endpoint: endpoint,
+			Type:     typ,
+			Priority: priority,
+		})
 	}
 
-	return &p.PublicEndpoint
+	lan := lanEndpoint(p)
+	if p.PublicEndpoint != "" && self.PublicEndpoint != "" && sameHost(self.PublicEndpoint, p.PublicEndpoint) && lan != nil {
+		add(*lan, "lan", 100)
+		add(p.PublicEndpoint, "stun", 80)
+		return out
+	}
+
+	if p.PublicEndpoint != "" {
+		add(p.PublicEndpoint, "stun", 100)
+	}
+	if lan != nil {
+		add(*lan, "lan", 80)
+	}
+
+	return out
 }
 
 func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([]proto.PeerConfigResponse, error) {
@@ -567,6 +595,7 @@ func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([
 			PublicKey:                   o.PublicKey,
 			PresharedKey:                &pairPSK,
 			Endpoint:                    endpointHint(self, o),
+			EndpointCandidates:          endpointCandidates(self, o),
 			PersistentKeepaliveInterval: &keepalive,
 			AllowedIPs:                  allowedIPsForPeer(o),
 		})

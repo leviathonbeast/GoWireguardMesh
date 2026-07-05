@@ -24,6 +24,26 @@ func TestAllowedIPsForPeerIncludesIPv6WhenPresent(t *testing.T) {
 	}
 }
 
+func TestEndpointCandidatesPreferLANForSamePublicEndpoint(t *testing.T) {
+	self := store.PeerRow{PublicEndpoint: "203.0.113.1:51820"}
+	peer := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51821",
+		ObservedIP:     "192.168.1.20",
+		ListenPort:     51820,
+	}
+
+	got := endpointCandidates(self, peer)
+	if len(got) != 2 {
+		t.Fatalf("endpointCandidates returned %d candidates, want 2", len(got))
+	}
+	if got[0].Type != "lan" || got[0].Endpoint != "192.168.1.20:51820" {
+		t.Fatalf("first candidate = %#v, want LAN candidate", got[0])
+	}
+	if got[1].Type != "stun" {
+		t.Fatalf("second candidate = %#v, want STUN candidate", got[1])
+	}
+}
+
 func TestDefaultNetwork6CIDRParsesAsIPv6(t *testing.T) {
 	prefix, err := parseNetwork6(defaultNetwork6CIDR)
 	if err != nil {

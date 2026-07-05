@@ -92,6 +92,9 @@ type linkStatJSON struct {
 	TxBytes         int64  `json:"tx_bytes"`
 	LastHandshakeAt string `json:"last_handshake_at,omitempty"`
 	UpdatedAt       string `json:"updated_at"`
+	PathState       string `json:"path_state,omitempty"`
+	PathEndpoint    string `json:"path_endpoint,omitempty"`
+	PathUpdatedAt   string `json:"path_updated_at,omitempty"`
 }
 
 type flowJSON struct {
