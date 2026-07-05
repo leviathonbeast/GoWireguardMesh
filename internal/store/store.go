@@ -285,13 +285,16 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 	)
 
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, assigned_ip, setup_key_id FROM peers WHERE public_key = ?`,
+		`SELECT id, assigned_ip, setup_key_id,
+		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0)
+		 FROM peers WHERE public_key = ?`,
 		publicKey,
-	).Scan(&existing.ID, &existing.AssignedIP, &enrolledKeyID)
+	).Scan(&existing.ID, &existing.AssignedIP, &enrolledKeyID,
+		&existing.PublicEndpoint, &existing.ObservedIP, &existing.ListenPort)
 
 	switch {
 	case err == nil:
-		return s.reEnroll(ctx, tx, setupKey, publicKey, existing, enrolledKeyID, observedIP, publicEndpoint)
+		return s.reEnroll(ctx, tx, setupKey, publicKey, existing, enrolledKeyID, observedIP, publicEndpoint, listenPort)
 	case errors.Is(err, sql.ErrNoRows):
 		// New enrollment; fall through.
 	default:
@@ -374,7 +377,14 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 	}
 
 	return &EnrollResult{
-		Peer:      PeerRow{ID: peerID, PublicKey: publicKey, AssignedIP: ip},
+		Peer: PeerRow{
+			ID:             peerID,
+			PublicKey:      publicKey,
+			AssignedIP:     ip,
+			PublicEndpoint: publicEndpoint,
+			ObservedIP:     observedIP,
+			ListenPort:     listenPort,
+		},
 		Others:    others,
 		Created:   true,
 		AuthToken: token,
@@ -383,7 +393,7 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 
 // reEnroll handles the idempotent path. The presented key must exist,
 // match the key the peer originally enrolled with, and not be revoked.
-func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey string, existing PeerRow, enrolledKeyID int64, observedIP, publicEndpoint string) (*EnrollResult, error) {
+func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey string, existing PeerRow, enrolledKeyID int64, observedIP, publicEndpoint string, listenPort int) (*EnrollResult, error) {
 	var (
 		presentedID int64
 		revokedAt   sql.NullString
@@ -411,12 +421,21 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 		return nil, err
 	}
 
+	// Refresh endpoint material along with the token: agents may come
+	// back with a different listen port or address, and stale values
+	// here become bad hints handed to every other peer.
+	var port sql.NullInt64
+	if listenPort > 0 {
+		port = sql.NullInt64{Int64: int64(listenPort), Valid: true}
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE peers SET auth_token_hash = ?,
 		        observed_ip = COALESCE(?, observed_ip),
-		        public_endpoint = COALESCE(?, public_endpoint)
+		        public_endpoint = COALESCE(?, public_endpoint),
+		        listen_port = COALESCE(?, listen_port)
 		 WHERE id = ?`,
-		tokenHash, nullable(observedIP), nullable(publicEndpoint), existing.ID,
+		tokenHash, nullable(observedIP), nullable(publicEndpoint), port, existing.ID,
 	); err != nil {
 		return nil, fmt.Errorf("rotate auth token: %w", err)
 	}
@@ -430,7 +449,21 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 		return nil, fmt.Errorf("commit re-enroll: %w", err)
 	}
 
+	// Mirror the UPDATE's COALESCE semantics so the result row (used
+	// for pairwise endpoint hints) matches what was just stored.
 	existing.PublicKey = publicKey
+
+	if observedIP != "" {
+		existing.ObservedIP = observedIP
+	}
+
+	if publicEndpoint != "" {
+		existing.PublicEndpoint = publicEndpoint
+	}
+
+	if listenPort > 0 {
+		existing.ListenPort = listenPort
+	}
 
 	return &EnrollResult{Peer: existing, Others: others, Created: false, AuthToken: token}, nil
 }
@@ -528,24 +561,27 @@ func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool
 	return out, nil
 }
 
-// PeersForID returns the reporting agent's public key and the peers
-// visible to it — the sync payload.
-func (s *Store) PeersForID(ctx context.Context, id int64) (string, []PeerRow, error) {
-	var publicKey string
+// PeersForID returns the reporting agent's own row (used for pairwise
+// endpoint hints) and the peers visible to it — the sync payload.
+func (s *Store) PeersForID(ctx context.Context, id int64) (PeerRow, []PeerRow, error) {
+	self := PeerRow{ID: id}
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key FROM peers WHERE id = ?`, id,
-	).Scan(&publicKey)
+		`SELECT public_key, assigned_ip,
+		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0)
+		 FROM peers WHERE id = ?`, id,
+	).Scan(&self.PublicKey, &self.AssignedIP,
+		&self.PublicEndpoint, &self.ObservedIP, &self.ListenPort)
 	if err != nil {
-		return "", nil, fmt.Errorf("look up peer %d: %w", id, err)
+		return PeerRow{}, nil, fmt.Errorf("look up peer %d: %w", id, err)
 	}
 
 	others, err := listVisible(ctx, s.db, id, s.DefaultAllow)
 	if err != nil {
-		return "", nil, err
+		return PeerRow{}, nil, err
 	}
 
-	return publicKey, others, nil
+	return self, others, nil
 }
 
 // diagnoseKey explains (for logs only) why the consumption UPDATE

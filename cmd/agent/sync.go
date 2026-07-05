@@ -45,7 +45,7 @@ func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig
 				Remove:    true,
 			})
 
-			fmt.Printf("sync: removing peer %s\n", key)
+			fmt.Printf("[agent] sync remove peer %s\n", key)
 		}
 	}
 
@@ -55,21 +55,40 @@ func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig
 		if !exists {
 			changes = append(changes, want)
 
-			fmt.Printf("sync: adding peer %s\n", key)
+			fmt.Printf("[agent] sync add peer %s\n", key)
 
 			continue
 		}
 
-		if peerNeedsUpdate(cur, want) {
-			update := want
-			update.UpdateOnly = true
-			update.ReplaceAllowedIPs = true
-			update.Endpoint = nil // roaming owns established endpoints
+		fieldsChanged := peerNeedsUpdate(cur, want)
 
-			changes = append(changes, update)
+		// A peer that has never completed a handshake may receive a
+		// corrected endpoint hint — but only when the hint actually
+		// differs from what the device already has. Without a
+		// handshake, roaming cannot have moved the endpoint, so the
+		// kernel's value IS the last applied hint; comparing against
+		// it makes this a one-shot apply instead of a 30s flap. Once
+		// a handshake exists, roaming owns the endpoint outright.
+		endpointStale := cur.LastHandshakeTime.IsZero() &&
+			want.Endpoint != nil &&
+			(cur.Endpoint == nil || cur.Endpoint.String() != want.Endpoint.String())
 
-			fmt.Printf("sync: updating peer %s\n", key)
+		if !fieldsChanged && !endpointStale {
+			continue
 		}
+
+		update := want
+		update.UpdateOnly = true
+		update.ReplaceAllowedIPs = true
+
+		if !endpointStale {
+			update.Endpoint = nil // roaming owns established endpoints
+		}
+
+		changes = append(changes, update)
+
+		fmt.Printf("[agent] sync update peer %s (fields=%t endpoint %v -> %v)\n",
+			key, fieldsChanged, cur.Endpoint, update.Endpoint)
 	}
 
 	if len(changes) == 0 {
@@ -84,7 +103,9 @@ func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig
 }
 
 // peerNeedsUpdate compares the fields the control plane owns —
-// deliberately not the endpoint.
+// deliberately not the endpoint, and deliberately not handshake
+// state: "no handshake yet" is not a config difference, and treating
+// it as one made every sync tick rewrite the peer.
 func peerNeedsUpdate(cur wgtypes.Peer, want wgtypes.PeerConfig) bool {
 	if !sameAllowedIPs(cur.AllowedIPs, want.AllowedIPs) {
 		return true

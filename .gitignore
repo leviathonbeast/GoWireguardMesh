@@ -11,3 +11,4 @@ admin-token
 cert.pem
 key.pem
 node_modules/
+*.exe

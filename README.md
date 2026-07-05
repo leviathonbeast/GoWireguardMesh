@@ -226,19 +226,69 @@ Connectivity is attempted in this order, all automatic:
    config sync never rewrites the endpoint of an already-known peer, so a
    roamed connection is never dragged back to a stale hint.
 3. **Relay fallback.** If a peer has produced no handshake for 60s, the
-   agent asks the control plane for a relay path. The relay
-   (`cmd/relay`) is a deliberately dumb UDP forwarder: the control plane
-   allocates a port pair per peer pair over a shared-secret control API,
-   each side points its WireGuard endpoint at its own port, and the relay
-   cross-forwards between them. It never parses what it carries — all
-   traffic is WireGuard ciphertext, so the relay can drop packets but not
-   read or forge them. This replaces TURN, which kernel WireGuard cannot
-   speak (the kernel owns the UDP socket).
+   agent moves it onto a relay. The relay is a deliberately dumb
+   forwarder: it never parses what it carries — all traffic is WireGuard
+   ciphertext, so it can drop packets but not read or forge them. This
+   replaces TURN, which kernel WireGuard cannot speak (the kernel owns
+   the UDP socket). Two transports, chosen by `--relay-transport` on the
+   agent:
 
-Relay setup: run `relay` on a host with a public IP, open its UDP port
-range, keep the control port (8081) reachable from the control plane only,
-and copy its generated `relay-secret` to the server host. Then start the
-server with `--relay-host <public-ip>`.
+   - **websocket** (default): the agent opens a WebSocket to the control
+     plane's own port and pumps datagrams through a loopback UDP proxy
+     that the peer's endpoint points at — kernel WireGuard never knows
+     the transport isn't UDP. Because it rides the existing API port,
+     relayed traffic needs **no firewall holes beyond 443** and
+     traverses UDP-blocking networks (the NetBird-parity posture). It is
+     WireGuard-over-TCP, so it is the last resort. Embedded relay only —
+     auth reuses the peer's enrollment token and the store.
+   - **udp**: the raw UDP forwarder. The control plane allocates a port
+     pair per peer pair, each side points its endpoint at its port, and
+     the relay cross-forwards. Faster (no TCP head-of-line blocking) but
+     needs the relay's port range reachable. Works with both embedded
+     and standalone relays.
+
+Relay setup, two shapes:
+
+- **Embedded (default choice, NetBird-style single binary):** run the
+  control plane with `--relay-embedded --relay-host <address agents
+  dial>`. The relay lives in the server process — no second binary, no
+  shared secret, no control hop. Serves both transports: WebSocket over
+  the API port (nothing extra to open), and UDP over
+  `--relay-port-min/--relay-port-max` (default 51900-51999) for agents
+  that opt into `--relay-transport udp`.
+- **Standalone (`cmd/relay`):** UDP only, for when the relay needs its
+  own public-IP host. Run `relay` with `--port-min/--port-max`, keep the
+  control port (8081) reachable from the control plane only, copy its
+  generated `relay-secret` to the server host, and start the server
+  with `--relay-host <public-ip> --relay-control <url>`. Agents must use
+  `--relay-transport udp`.
+
+For UDP, exhaustion of the port range returns 503 and each peer pair
+consumes two ports.
+
+### Firewall posture
+
+With the embedded relay and the default WebSocket transport, a full
+mesh needs, on the control-plane host: **443** (or 8443) for the API,
+web UI, enrollment, telemetry, *and* relayed traffic — one port. Agents
+need nothing inbound; WireGuard's own port is opened locally by
+`--manage-firewall` for direct connectivity but is not required for the
+relay path. That matches NetBird's "443 plus WireGuard" posture. Opt
+into `--relay-transport udp` only when you want the relay's throughput
+and can open its port range.
+
+## Host firewall integration
+
+All three binaries open their own ports on the host firewall at startup
+and remove the rules on shutdown (`--manage-firewall`, on by default):
+the agent its WireGuard listen port (udp), the server its API port (tcp),
+the relay its forwarding range (udp, only when `--port-min/--port-max`
+is set — ephemeral ports cannot be pre-opened). The backend is detected
+in order: firewalld, ufw, nftables (component-owned table), iptables;
+on Windows, Windows Defender Firewall via netsh. firewalld rules are
+runtime-only on purpose — a component that is not running should not
+leave holes, and it re-adds its rule on every start. No backend or no
+privileges is a warning, never fatal.
 
 ## Deployment
 

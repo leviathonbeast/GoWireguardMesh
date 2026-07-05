@@ -1,18 +1,24 @@
-# wgmesh control plane + relay.
+# wgmesh control plane with embedded relay — one service, one binary.
 #
 # Notes before you test:
 #   - The server runs plain HTTP here; put Traefik in front for TLS
 #     (labels sketched below) or expose 8443 with built-in TLS instead.
-#   - The relay MUST use host networking: it binds ephemeral UDP ports
-#     at runtime, which cannot be port-mapped through a bridge.
 #   - With Traefik in front, add --trust-proxy so enrollment records
 #     real client IPs instead of the proxy's.
+#   - Set RELAY_PUBLIC_IP to the address agents dial for relayed
+#     traffic (this host's LAN or public IP).
+#   - With the default --relay-transport websocket on agents, relayed
+#     traffic rides the API port (8080/443) and the UDP range below is
+#     not needed — drop that ports line. Keep it only if some agents
+#     use --relay-transport udp.
+#   - Container firewalls aren't a thing, so --manage-firewall=false;
+#     open the mapped ports on the HOST firewall instead.
 #   - The agent is included commented out: it needs host networking
 #     and NET_ADMIN to create the WireGuard interface; most setups run
 #     it directly on the host (see deploy/wgmesh-agent.service).
 #
-# State lives in named volumes; back up server-data (db + PSK + admin
-# token) — losing the PSK strands enrolled peers.
+# State lives in a named volume; back up server-data (db + PSK master +
+# admin token) — losing the PSK master strands enrolled peers.
 
 services:
   server:
@@ -22,24 +28,23 @@ services:
     command: >
       --listen 0.0.0.0:8080
       --no-tls
+      --manage-firewall=false
       --db /data/mesh.db
       --psk-file /data/mesh-psk.key
       --admin-token-file /data/admin-token
-      --relay-host ${RELAY_PUBLIC_IP:?set RELAY_PUBLIC_IP to the relay host's public address}
-      --relay-control http://host.docker.internal:8081
-      --relay-secret-file /data/relay-secret
+      --relay-embedded
+      --relay-host ${RELAY_PUBLIC_IP:?set RELAY_PUBLIC_IP to the address agents dial}
+      --relay-port-min 51900
+      --relay-port-max 51999
     volumes:
       - server-data:/data
-      # The relay writes its secret to its own volume; copy it here
-      # once (or bind-mount a shared secrets dir in real deployments):
-      #   docker compose cp relay:/data/relay-secret ./relay-secret
-      #   docker compose cp ./relay-secret server:/data/relay-secret
     ports:
       - "8080:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # Only needed for agents using --relay-transport udp; the default
+      # websocket transport relays over 8080 above.
+      - "51900-51999:51900-51999/udp"
     restart: unless-stopped
-    # Behind Traefik instead of the port mapping above:
+    # Behind Traefik instead of the 8080 mapping above (keep the UDP range):
     # labels:
     #   traefik.enable: "true"
     #   traefik.http.routers.wgmesh.rule: Host(`mesh.example.com`)
@@ -47,20 +52,21 @@ services:
     #   traefik.http.routers.wgmesh.tls.certresolver: letsencrypt
     #   traefik.http.services.wgmesh.loadbalancer.server.port: "8080"
 
-  relay:
-    build:
-      context: .
-      target: relay
-    command: >
-      --control 0.0.0.0:8081
-      --secret-file /data/relay-secret
-    # Host networking: forwarding ports are allocated dynamically and
-    # the relay must be reachable on its public UDP ports. Keep 8081
-    # (the control API) firewalled from everything but the server.
-    network_mode: host
-    volumes:
-      - relay-data:/data
-    restart: unless-stopped
+  # Standalone relay, only for a separate public-IP host:
+  # relay:
+  #   build:
+  #     context: .
+  #     target: relay
+  #   command: >
+  #     --control 0.0.0.0:8081
+  #     --secret-file /data/relay-secret
+  #     --port-min 51900
+  #     --port-max 51999
+  #     --manage-firewall=false
+  #   network_mode: host
+  #   volumes:
+  #     - relay-data:/data
+  #   restart: unless-stopped
 
   # agent:
   #   build:
@@ -79,5 +85,5 @@ services:
 
 volumes:
   server-data:
-  relay-data:
+  # relay-data:
   # agent-data:

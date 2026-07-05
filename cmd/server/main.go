@@ -26,8 +26,10 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	gowireguard "gowireguard"
+	"gowireguard/internal/firewall"
 	"gowireguard/internal/proto"
 	"gowireguard/internal/psk"
+	"gowireguard/internal/relay"
 	"gowireguard/internal/store"
 	"gowireguard/internal/tlsutil"
 )
@@ -42,7 +44,9 @@ type server struct {
 	pskMaster   wgtypes.Key // never distributed; per-pair PSKs derive from it
 	adminToken  string
 	trustProxy  bool
-	relay       *relayClient // nil when no relay is configured
+	relay       relayAllocator // nil when no relay is configured
+	relayHost   string         // public data-plane address agents dial
+	wsHub       *relay.WSHub   // nil unless the embedded WS relay is enabled
 }
 
 // clientIP is the peer's underlay address as seen by the control
@@ -70,6 +74,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func overlayAddress(addr string) (string, error) {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return "", fmt.Errorf("parse overlay address %q", addr)
+	}
+
+	if ip.To4() != nil {
+		return fmt.Sprintf("%s/32", ip.String()), nil
+	}
+
+	return fmt.Sprintf("%s/128", ip.String()), nil
 }
 
 func run() error {
@@ -125,10 +142,14 @@ func runServe(args []string) error {
 	adminTokenFile := fs.String("admin-token-file", "admin-token", "path to admin API token file (generated if missing)")
 	flowRetention := fs.Duration("flow-retention", 7*24*time.Hour, "how long to keep flow log rows")
 	trustProxy := fs.Bool("trust-proxy", false, "trust X-Forwarded-For for client addresses (only behind a reverse proxy)")
-	relayHost := fs.String("relay-host", "", "public address of the relay's data plane (enables relay fallback)")
-	relayControl := fs.String("relay-control", "http://127.0.0.1:8081", "relay control API URL")
-	relaySecretFile := fs.String("relay-secret-file", "relay-secret", "path to the relay control shared secret")
+	relayHost := fs.String("relay-host", "", "address agents dial for relayed traffic (enables relay fallback)")
+	relayEmbedded := fs.Bool("relay-embedded", false, "run the relay inside this process (NetBird-style single binary; no relay-control/secret needed)")
+	relayPortMin := fs.Int("relay-port-min", 51900, "embedded relay: lowest forwarding UDP port")
+	relayPortMax := fs.Int("relay-port-max", 51999, "embedded relay: highest forwarding UDP port")
+	relayControl := fs.String("relay-control", "http://127.0.0.1:8081", "standalone relay: control API URL")
+	relaySecretFile := fs.String("relay-secret-file", "relay-secret", "standalone relay: path to the control shared secret")
 	defaultPolicy := fs.String("default-policy", "allow", "ACL default: \"allow\" (open mesh) or \"deny\" (only rule-connected pairs see each other)")
+	manageFirewall := fs.Bool("manage-firewall", true, "open the API port on the host firewall (removed again on shutdown)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -164,6 +185,28 @@ func runServe(args []string) error {
 		return err
 	}
 
+	if *manageFirewall {
+		if _, portStr, err := net.SplitHostPort(*listen); err == nil {
+			if port, err := strconv.Atoi(portStr); err == nil {
+				fw, ferr := firewall.Open("wgmesh-server")
+				if ferr != nil {
+					log.Printf("firewall: %v; open tcp %d yourself if needed", ferr, port)
+				} else if err := fw.AllowTCP(port); err != nil {
+					// Common when running unprivileged; the API port
+					// then needs opening by hand.
+					log.Printf("firewall (%s): %v", fw.Backend(), err)
+				} else {
+					log.Printf("firewall (%s): opened tcp %d", fw.Backend(), port)
+					defer func() {
+						if err := fw.Close(); err != nil {
+							log.Printf("firewall cleanup: %v", err)
+						}
+					}()
+				}
+			}
+		}
+	}
+
 	srv := &server{
 		store:       st,
 		networkCIDR: prefix.Masked().String(),
@@ -172,13 +215,57 @@ func runServe(args []string) error {
 		trustProxy:  *trustProxy,
 	}
 
-	if *relayHost != "" {
-		srv.relay, err = newRelayClient(*relayHost, *relayControl, *relaySecretFile)
+	switch {
+	case *relayEmbedded:
+		// NetBird-style single binary: the relay runs in-process, the
+		// allocator is a function call, and no shared secret exists.
+		if *relayHost == "" {
+			return errors.New("--relay-embedded requires --relay-host (the address agents dial, e.g. this host's LAN or public IP)")
+		}
+
+		rs, err := relay.New(relay.Config{PortMin: *relayPortMin, PortMax: *relayPortMax})
+		if err != nil {
+			return err
+		}
+		defer rs.Close()
+
+		srv.relay = embeddedRelay{rs: rs}
+		srv.relayHost = *relayHost
+
+		// The WebSocket relay rides this process's own port, so it
+		// works over the same 443 as the API — no extra firewall
+		// holes. Only the embedded relay offers it (it needs the
+		// store for auth); a standalone relay stays UDP-only.
+		srv.wsHub = relay.NewWSHub()
+
+		if *manageFirewall {
+			fw, ferr := firewall.Open("wgmesh-server-relay")
+			if ferr != nil {
+				log.Printf("firewall: %v; open udp %d-%d yourself if needed", ferr, *relayPortMin, *relayPortMax)
+			} else if err := fw.AllowUDPRange(*relayPortMin, *relayPortMax); err != nil {
+				log.Printf("firewall (%s): %v", fw.Backend(), err)
+			} else {
+				log.Printf("firewall (%s): opened udp %d-%d", fw.Backend(), *relayPortMin, *relayPortMax)
+				defer func() {
+					if err := fw.Close(); err != nil {
+						log.Printf("firewall cleanup: %v", err)
+					}
+				}()
+			}
+		}
+
+		log.Printf("embedded relay on udp %d-%d, agents dial %s", *relayPortMin, *relayPortMax, *relayHost)
+
+	case *relayHost != "":
+		rc, err := newRelayClient(*relayControl, *relaySecretFile)
 		if err != nil {
 			return err
 		}
 
-		log.Printf("relay fallback enabled via %s (control %s)", *relayHost, *relayControl)
+		srv.relay = rc
+		srv.relayHost = *relayHost
+
+		log.Printf("standalone relay fallback via %s (control %s)", *relayHost, *relayControl)
 	}
 
 	ui, err := iofs.Sub(gowireguard.WebUI, "web/dist")
@@ -190,6 +277,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("POST /enroll", srv.handleEnroll)
 	mux.HandleFunc("POST /report", srv.handleReport)
 	mux.HandleFunc("POST /relay-pair", srv.handleRelayPair)
+	mux.HandleFunc("GET /relay-ws", srv.handleRelayWS)
 	mux.Handle("GET /", http.FileServerFS(ui))
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))
@@ -227,9 +315,14 @@ func runServe(args []string) error {
 		return err
 	}
 
-	log.Printf("control plane on https://%s (network %s, db %s)", *listen, srv.networkCIDR, *dbPath)
-	log.Printf("web UI at https://%s/ (token in %s)", *listen, *adminTokenFile)
-	log.Printf("agents should pin the certificate: --server-ca %s", *tlsCert)
+	log.Printf("[server] control plane on https://%s (network %s, db %s)", *listen, srv.networkCIDR, *dbPath)
+	log.Printf("[server] web UI at https://%s/ (token in %s)", *listen, *adminTokenFile)
+	log.Printf("[server] agents should pin the certificate: --server-ca %s", *tlsCert)
+	if srv.relay == nil {
+		log.Printf("[server] relay fallback disabled; direct UDP connectivity between peers is required")
+	} else {
+		log.Printf("[server] relay fallback enabled for NATed peers")
+	}
 
 	if err := http.ListenAndServeTLS(*listen, *tlsCert, *tlsKey, mux); err != nil {
 		return fmt.Errorf("https server: %w", err)
@@ -268,19 +361,19 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		// Uniform 401: invalid, expired, revoked, and exhausted are
 		// indistinguishable on the wire. The real reason goes to the
 		// server log only.
-		log.Printf("enroll rejected for %s: %v", req.PublicKey, err)
+		log.Printf("[server] enroll rejected for %s (listen_port=%d): %v", req.PublicKey, req.ListenPort, err)
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	case err != nil:
-		log.Printf("enroll failed for %s: %v", req.PublicKey, err)
+		log.Printf("[server] enroll failed for %s (listen_port=%d): %v", req.PublicKey, req.ListenPort, err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
 	if res.Created {
-		log.Printf("enrolled peer %d (%s) at %s", res.Peer.ID, req.PublicKey, res.Peer.AssignedIP)
+		log.Printf("[server] enrolled peer %d (%s) at %s (listen_port=%d, endpoint=%s)", res.Peer.ID, req.PublicKey, res.Peer.AssignedIP, req.ListenPort, req.PublicEndpoint)
 	} else {
-		log.Printf("idempotent re-enroll of peer %d (%s)", res.Peer.ID, req.PublicKey)
+		log.Printf("[server] idempotent re-enroll of peer %d (%s) (listen_port=%d, endpoint=%s)", res.Peer.ID, req.PublicKey, req.ListenPort, req.PublicEndpoint)
 	}
 
 	out, err := s.buildResponse(res)
@@ -294,16 +387,10 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// endpointHint picks the best-known underlay endpoint for a peer:
-// its own STUN discovery wins, then the address the control plane
-// observed it at combined with its listen port. Hints are exactly
-// that — WireGuard roaming overrides them the moment real traffic
-// arrives from somewhere else.
-func endpointHint(p store.PeerRow) *string {
-	if p.PublicEndpoint != "" {
-		return &p.PublicEndpoint
-	}
-
+// lanEndpoint is the address the control plane observed the peer at,
+// paired with its listen port — the path that works when both sides
+// share a network with the server.
+func lanEndpoint(p store.PeerRow) *string {
 	if p.ObservedIP != "" && p.ListenPort > 0 {
 		ep := net.JoinHostPort(p.ObservedIP, strconv.Itoa(p.ListenPort))
 		return &ep
@@ -312,13 +399,46 @@ func endpointHint(p store.PeerRow) *string {
 	return nil
 }
 
-func (s *server) buildPeerEntries(selfKey string, others []store.PeerRow) ([]proto.PeerConfigResponse, error) {
+// sameHost reports whether two "host:port" endpoints share a host.
+func sameHost(a, b string) bool {
+	ha, _, errA := net.SplitHostPort(a)
+	hb, _, errB := net.SplitHostPort(b)
+
+	return errA == nil && errB == nil && ha == hb
+}
+
+// endpointHint picks the best-known underlay endpoint for the peer p,
+// as seen from the peer self requesting the list.
+//
+// Normally p's own STUN discovery wins. But when BOTH sides
+// discovered the same public IP, they sit behind the same NAT — the
+// STUN address would have to hairpin through their shared router,
+// which most consumer NATs refuse. The address the control plane
+// observed p at is the path that actually routes in that topology.
+//
+// Hints are exactly that — WireGuard roaming overrides them the
+// moment authenticated traffic arrives from somewhere else.
+func endpointHint(self, p store.PeerRow) *string {
+	if p.PublicEndpoint == "" {
+		return lanEndpoint(p)
+	}
+
+	if self.PublicEndpoint != "" && sameHost(self.PublicEndpoint, p.PublicEndpoint) {
+		if lan := lanEndpoint(p); lan != nil {
+			return lan
+		}
+	}
+
+	return &p.PublicEndpoint
+}
+
+func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([]proto.PeerConfigResponse, error) {
 	keepalive := keepaliveSeconds
 
 	peers := make([]proto.PeerConfigResponse, 0, len(others))
 
 	for _, o := range others {
-		pairKey, err := psk.DerivePairKey(s.pskMaster, selfKey, o.PublicKey)
+		pairKey, err := psk.DerivePairKey(s.pskMaster, self.PublicKey, o.PublicKey)
 		if err != nil {
 			return nil, err
 		}
@@ -328,7 +448,7 @@ func (s *server) buildPeerEntries(selfKey string, others []store.PeerRow) ([]pro
 		peers = append(peers, proto.PeerConfigResponse{
 			PublicKey:                   o.PublicKey,
 			PresharedKey:                &pairPSK,
-			Endpoint:                    endpointHint(o),
+			Endpoint:                    endpointHint(self, o),
 			PersistentKeepaliveInterval: &keepalive,
 			AllowedIPs:                  []string{o.AssignedIP + "/32"},
 		})
@@ -338,7 +458,7 @@ func (s *server) buildPeerEntries(selfKey string, others []store.PeerRow) ([]pro
 }
 
 func (s *server) buildResponse(res *store.EnrollResult) (proto.EnrollResponse, error) {
-	peers, err := s.buildPeerEntries(res.Peer.PublicKey, res.Others)
+	peers, err := s.buildPeerEntries(res.Peer, res.Others)
 	if err != nil {
 		return proto.EnrollResponse{}, err
 	}

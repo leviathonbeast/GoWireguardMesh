@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,25 +14,41 @@ import (
 	"strings"
 	"time"
 
+	"gowireguard/internal/relay"
 	"gowireguard/internal/store"
 )
 
-// relayClient talks to the relay's control API on behalf of agents.
+// relayAllocator hands out forwarding port pairs. Implemented by the
+// embedded in-process relay and by the HTTP client for a standalone
+// relay host.
+type relayAllocator interface {
+	allocate(pairID string) (portA, portB int, err error)
+}
+
+// embeddedRelay adapts internal/relay for in-process use: no control
+// hop, no shared secret.
+type embeddedRelay struct {
+	rs *relay.Server
+}
+
+func (e embeddedRelay) allocate(pairID string) (int, int, error) {
+	return e.rs.Allocate(pairID)
+}
+
+// relayClient talks to a standalone relay's control API.
 type relayClient struct {
-	host       string // public data-plane address agents dial
 	controlURL string
 	secret     string
 	http       *http.Client
 }
 
-func newRelayClient(host, controlURL, secretFile string) (*relayClient, error) {
+func newRelayClient(controlURL, secretFile string) (*relayClient, error) {
 	data, err := os.ReadFile(secretFile)
 	if err != nil {
 		return nil, fmt.Errorf("read relay secret %q: %w", secretFile, err)
 	}
 
 	return &relayClient{
-		host:       host,
 		controlURL: controlURL,
 		secret:     strings.TrimSpace(string(data)),
 		http:       &http.Client{Timeout: 5 * time.Second},
@@ -66,6 +80,10 @@ func (rc *relayClient) allocate(pairID string) (portA, portB int, err error) {
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
 		return 0, 0, fmt.Errorf("read relay response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return 0, 0, fmt.Errorf("%w: %s", relay.ErrPortsExhausted, strings.TrimSpace(string(raw)))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -135,31 +153,32 @@ func (s *server) handleRelayPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// One allocation per unordered pair: derive the id from the
-	// sorted keys so both sides land on the same forwarding session.
-	lo, hi := selfKey, req.PeerPublicKey
-	if lo > hi {
-		lo, hi = hi, lo
-	}
-
-	sum := sha256.Sum256([]byte(lo + "|" + hi))
-	pairID := hex.EncodeToString(sum[:16])
+	// One allocation per unordered pair: both sides land on the same
+	// forwarding session.
+	pairID := relayPairID(selfKey, req.PeerPublicKey)
 
 	portA, portB, err := s.relay.allocate(pairID)
 	if err != nil {
 		log.Printf("relay allocate for peer %d: %v", peerID, err)
+
+		if errors.Is(err, relay.ErrPortsExhausted) {
+			writeError(w, http.StatusServiceUnavailable, "relay port range exhausted")
+			return
+		}
+
 		writeError(w, http.StatusBadGateway, "relay unavailable")
 
 		return
 	}
 
-	// Convention: port A serves the lexicographically smaller key.
+	// Convention: port A serves the lexicographically smaller key, so
+	// the two sides pick opposite ports of the same pair.
 	port := portA
-	if selfKey != lo {
+	if selfKey > req.PeerPublicKey {
 		port = portB
 	}
 
-	endpoint := net.JoinHostPort(s.relay.host, strconv.Itoa(port))
+	endpoint := net.JoinHostPort(s.relayHost, strconv.Itoa(port))
 
 	log.Printf("relay pair %s: peer %d gets %s", pairID[:8], peerID, endpoint)
 	writeJSON(w, http.StatusOK, map[string]string{"endpoint": endpoint})

@@ -1,20 +1,11 @@
-// Command relay is the wgmesh NAT-traversal fallback: a dumb UDP
-// pair forwarder.
+// Command relay runs the wgmesh NAT-traversal relay standalone, for
+// deployments where the relay lives on its own public-IP host. When
+// the relay can run on the same host as the control plane, prefer
+// the server's --relay-embedded mode instead: one binary, no shared
+// secret, no control hop.
 //
-// For each peer pair the control plane allocates two UDP ports over
-// the control API. Peer A points its WireGuard endpoint for B at
-// port A; peer B points its endpoint for A at port B. The relay
-// learns each side's real address from the first packet it receives
-// (WireGuard persistent keepalives guarantee those arrive) and then
-// cross-forwards: traffic in on port A goes out port B to B's last
-// known address, and vice versa.
-//
-// The relay never parses what it forwards — everything is WireGuard
-// ciphertext, so a compromised relay can delay or drop traffic but
-// not read or forge it. This design exists because kernel WireGuard
-// owns its UDP socket and cannot speak TURN's allocation framing;
-// a plain forwarder achieves the same fallback with zero cooperation
-// from the kernel.
+// The control API must be reachable by the control plane only —
+// firewall it or bind it to a private address.
 package main
 
 import (
@@ -30,13 +21,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
-	"time"
-)
 
-const (
-	idleTimeout   = 10 * time.Minute
-	cleanupPeriod = time.Minute
+	"gowireguard/internal/firewall"
+	"gowireguard/internal/relay"
 )
 
 func main() {
@@ -50,27 +37,47 @@ func run() error {
 	control := flag.String("control", "127.0.0.1:8081", "control API listen address (server-to-relay; keep private)")
 	dataIP := flag.String("data-ip", "0.0.0.0", "IP to bind forwarding ports on")
 	secretFile := flag.String("secret-file", "relay-secret", "path to control API shared secret (generated if missing)")
+	portMin := flag.Int("port-min", 0, "lowest forwarding UDP port (0 = ephemeral; set a range so the firewall can allow it)")
+	portMax := flag.Int("port-max", 0, "highest forwarding UDP port")
+	manageFirewall := flag.Bool("manage-firewall", true, "open the forwarding port range on the host firewall (requires --port-min/--port-max)")
 	flag.Parse()
+
+	ip := net.ParseIP(*dataIP)
+	if ip == nil {
+		return fmt.Errorf("parse data-ip %q: not an IP address", *dataIP)
+	}
 
 	secret, err := loadOrGenerateSecret(*secretFile)
 	if err != nil {
 		return err
 	}
 
-	r := &relay{
-		dataIP: net.ParseIP(*dataIP),
-		pairs:  make(map[string]*pair),
-		secret: secret,
+	rs, err := relay.New(relay.Config{DataIP: ip, PortMin: *portMin, PortMax: *portMax})
+	if err != nil {
+		return err
 	}
+	defer rs.Close()
 
-	if r.dataIP == nil {
-		return fmt.Errorf("parse data-ip %q: not an IP address", *dataIP)
+	if *manageFirewall && *portMin > 0 {
+		fw, ferr := firewall.Open("wgmesh-relay")
+		if ferr != nil {
+			log.Printf("firewall: %v; open udp %d-%d yourself if needed", ferr, *portMin, *portMax)
+		} else if err := fw.AllowUDPRange(*portMin, *portMax); err != nil {
+			log.Printf("firewall (%s): %v", fw.Backend(), err)
+		} else {
+			log.Printf("firewall (%s): opened udp %d-%d", fw.Backend(), *portMin, *portMax)
+			defer func() {
+				if err := fw.Close(); err != nil {
+					log.Printf("firewall cleanup: %v", err)
+				}
+			}()
+		}
+	} else if *manageFirewall {
+		log.Printf("firewall: skipped — ephemeral ports cannot be pre-opened; set --port-min/--port-max")
 	}
-
-	go r.cleanupLoop()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /allocate", r.handleAllocate)
+	mux.HandleFunc("POST /allocate", handleAllocate(rs, secret))
 
 	log.Printf("relay control on http://%s (secret in %s), forwarding on %s", *control, *secretFile, *dataIP)
 
@@ -79,6 +86,41 @@ func run() error {
 	}
 
 	return nil
+}
+
+func handleAllocate(rs *relay.Server, secret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		presented, ok := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(presented), []byte(secret)) != 1 {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+
+		var body struct {
+			PairID string `json:"pair_id"`
+		}
+
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.PairID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pair_id is required"})
+			return
+		}
+
+		portA, portB, err := rs.Allocate(body.PairID)
+		if err != nil {
+			log.Printf("allocate %q: %v", body.PairID, err)
+
+			if errors.Is(err, relay.ErrPortsExhausted) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "relay port range exhausted"})
+				return
+			}
+
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]int{"port_a": portA, "port_b": portB})
+	}
 }
 
 func loadOrGenerateSecret(path string) (string, error) {
@@ -103,162 +145,6 @@ func loadOrGenerateSecret(path string) (string, error) {
 	}
 
 	return strings.TrimSpace(string(data)), nil
-}
-
-type relay struct {
-	dataIP net.IP
-	secret string
-
-	mu    sync.Mutex
-	pairs map[string]*pair
-}
-
-// pair is one bidirectional forwarding session between two peers.
-type pair struct {
-	id string
-
-	connA, connB *net.UDPConn
-
-	mu         sync.Mutex
-	srcA, srcB *net.UDPAddr
-	lastActive time.Time
-}
-
-func (r *relay) handleAllocate(w http.ResponseWriter, req *http.Request) {
-	presented, ok := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
-	if !ok || subtle.ConstantTimeCompare([]byte(presented), []byte(r.secret)) != 1 {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-
-	var body struct {
-		PairID string `json:"pair_id"`
-	}
-
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.PairID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pair_id is required"})
-		return
-	}
-
-	p, err := r.allocate(body.PairID)
-	if err != nil {
-		log.Printf("allocate %q: %v", body.PairID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]int{
-		"port_a": p.connA.LocalAddr().(*net.UDPAddr).Port,
-		"port_b": p.connB.LocalAddr().(*net.UDPAddr).Port,
-	})
-}
-
-// allocate returns the existing pair for id or creates one on two
-// fresh ephemeral UDP ports.
-func (r *relay) allocate(id string) (*pair, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if p, ok := r.pairs[id]; ok {
-		p.touch()
-		return p, nil
-	}
-
-	connA, err := net.ListenUDP("udp", &net.UDPAddr{IP: r.dataIP})
-	if err != nil {
-		return nil, fmt.Errorf("bind port A: %w", err)
-	}
-
-	connB, err := net.ListenUDP("udp", &net.UDPAddr{IP: r.dataIP})
-	if err != nil {
-		connA.Close()
-		return nil, fmt.Errorf("bind port B: %w", err)
-	}
-
-	p := &pair{id: id, connA: connA, connB: connB, lastActive: time.Now()}
-	r.pairs[id] = p
-
-	go p.forward(connA, connB, true)
-	go p.forward(connB, connA, false)
-
-	log.Printf("allocated pair %q: ports %d/%d",
-		id,
-		connA.LocalAddr().(*net.UDPAddr).Port,
-		connB.LocalAddr().(*net.UDPAddr).Port,
-	)
-
-	return p, nil
-}
-
-func (p *pair) touch() {
-	p.mu.Lock()
-	p.lastActive = time.Now()
-	p.mu.Unlock()
-}
-
-// forward reads packets arriving on in and cross-sends them out via
-// out to the opposite side's last known address. fromA marks which
-// leg this goroutine serves, so it knows which source to record and
-// which destination to use.
-func (p *pair) forward(in, out *net.UDPConn, fromA bool) {
-	buf := make([]byte, 65535)
-
-	for {
-		n, src, err := in.ReadFromUDP(buf)
-		if err != nil {
-			return // socket closed by cleanup
-		}
-
-		p.mu.Lock()
-
-		if fromA {
-			p.srcA = src
-		} else {
-			p.srcB = src
-		}
-
-		dst := p.srcB
-		if !fromA {
-			dst = p.srcA
-		}
-
-		p.lastActive = time.Now()
-		p.mu.Unlock()
-
-		if dst == nil {
-			continue // other side hasn't checked in yet
-		}
-
-		if _, err := out.WriteToUDP(buf[:n], dst); err != nil {
-			log.Printf("pair %q: forward: %v", p.id, err)
-		}
-	}
-}
-
-func (r *relay) cleanupLoop() {
-	ticker := time.NewTicker(cleanupPeriod)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		r.mu.Lock()
-
-		for id, p := range r.pairs {
-			p.mu.Lock()
-			idle := time.Since(p.lastActive)
-			p.mu.Unlock()
-
-			if idle > idleTimeout {
-				p.connA.Close()
-				p.connB.Close()
-				delete(r.pairs, id)
-
-				log.Printf("expired idle pair %q", id)
-			}
-		}
-
-		r.mu.Unlock()
-	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -26,12 +26,12 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 	peerID, err := s.store.AuthenticatePeer(r.Context(), token)
 	if err != nil {
 		if errors.Is(err, store.ErrUnauthorized) {
-			log.Printf("report rejected: %v", err)
+			log.Printf("[server] report rejected: %v", err)
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 
-		log.Printf("report auth failed: %v", err)
+		log.Printf("[server] report auth failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -44,7 +44,7 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.ApplyReport(r.Context(), peerID, s.clientIP(r), &report); err != nil {
-		log.Printf("apply report from peer %d: %v", peerID, err)
+		log.Printf("[server] apply report from peer %d: %v", peerID, err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -52,16 +52,16 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 	// The response doubles as config sync: the agent applies this
 	// peer list, so membership, endpoint, ACL, and PSK changes
 	// propagate within one report interval.
-	selfKey, others, err := s.store.PeersForID(r.Context(), peerID)
+	self, others, err := s.store.PeersForID(r.Context(), peerID)
 	if err != nil {
-		log.Printf("build sync payload for peer %d: %v", peerID, err)
+		log.Printf("[server] build sync payload for peer %d: %v", peerID, err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	entries, err := s.buildPeerEntries(selfKey, others)
+	entries, err := s.buildPeerEntries(self, others)
 	if err != nil {
-		log.Printf("build sync payload for peer %d: %v", peerID, err)
+		log.Printf("[server] build sync payload for peer %d: %v", peerID, err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

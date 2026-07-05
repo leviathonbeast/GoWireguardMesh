@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,12 +22,21 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"gowireguard/internal/firewall"
 	"gowireguard/internal/proto"
 )
 
 const (
-	ifaceName  = "wg-int"
-	listenPort = 51820
+	ifaceName = "wg-int"
+	//listenPort = 51820
+)
+
+var (
+	listenPortFlag = flag.Int(
+		"listen-port",
+		0,
+		"WireGuard UDP listen port (0 = auto-select a free port)",
+	)
 )
 
 var (
@@ -40,46 +50,10 @@ var (
 	serverCAFlag       = flag.String("server-ca", "", "PEM certificate to trust for the control plane (pin its self-signed cert.pem)")
 	reportIntervalFlag = flag.Duration("report-interval", 30*time.Second, "telemetry reporting interval")
 	stunServerFlag     = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables)")
+	relayTransportFlag = flag.String("relay-transport", "websocket", "relay fallback transport: \"websocket\" (rides the control-plane port, needs no extra firewall holes) or \"udp\" (faster, needs the relay port range reachable)")
+	manageFirewallFlag = flag.Bool("manage-firewall", true, "open the WireGuard listen port on the host firewall (removed again on shutdown)")
 	keyFileFlag        = flag.String("key-file", "wgkey.key", "path to private key file")
 )
-
-func configureWireGuard(
-	client *wgctrl.Client,
-	iface string,
-	privateKey wgtypes.Key,
-	listenPort int,
-	peers []wgtypes.PeerConfig,
-) error {
-	cfg := wgtypes.Config{
-		PrivateKey:   &privateKey,
-		ListenPort:   &listenPort,
-		ReplacePeers: true,
-		Peers:        peers,
-	}
-
-	if err := client.ConfigureDevice(iface, cfg); err != nil {
-		return fmt.Errorf("configure device %q: %w", iface, err)
-	}
-
-	fmt.Println("Configured WireGuard device")
-
-	return nil
-}
-
-func printDeviceState(client *wgctrl.Client, iface string) error {
-	device, err := client.Device(iface)
-	if err != nil {
-		return fmt.Errorf("read device %q: %w", iface, err)
-	}
-
-	fmt.Println("\n===== WireGuard Device =====")
-	fmt.Printf("Name        : %s\n", device.Name)
-	fmt.Printf("Public Key  : %s\n", device.PublicKey)
-	fmt.Printf("Listen Port : %d\n", device.ListenPort)
-	fmt.Printf("Peers       : %d\n", len(device.Peers))
-
-	return nil
-}
 
 func waitForShutdown() {
 	sigCh := make(chan os.Signal, 1)
@@ -150,6 +124,45 @@ func buildPeerConfig(
 	}
 
 	return cfg, nil
+}
+
+func resolveListenPort(preferred int, portFile string) (int, error) {
+	if portFile != "" {
+		if data, err := os.ReadFile(portFile); err == nil {
+			if port, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && port > 0 && port <= 65535 {
+				conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: port})
+				if err == nil {
+					localPort := conn.LocalAddr().(*net.UDPAddr).Port
+					_ = conn.Close()
+					return localPort, nil
+				}
+			}
+		}
+	}
+
+	if preferred > 0 {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: preferred})
+		if err == nil {
+			port := conn.LocalAddr().(*net.UDPAddr).Port
+			_ = conn.Close()
+			return port, nil
+		}
+	}
+
+	conn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		return 0, fmt.Errorf("find available udp port: %w", err)
+	}
+	defer conn.Close()
+
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+	if portFile != "" {
+		if err := os.WriteFile(portFile, []byte(strconv.Itoa(port)+"\n"), 0600); err != nil {
+			return 0, fmt.Errorf("write listen-port file %q: %w", portFile, err)
+		}
+	}
+
+	return port, nil
 }
 
 func loadOrGenerateKey(path string) (wgtypes.Key, error) {
@@ -310,6 +323,32 @@ func peerConfigFromProto(p proto.PeerConfigResponse) (wgtypes.PeerConfig, error)
 	}, nil
 }
 
+// overlayAddress combines the assigned IP with the mesh network's
+// prefix length. The interface address MUST carry the network prefix
+// (/16), not /32: the connected route it creates is the only thing
+// steering 100.64.0.0/16 traffic into wg-int. With /32 the kernel has
+// no route to other peers, so overlay-bound packets leak out the
+// default LAN route with an underlay source address — observed as
+// icmp flows like "10.0.40.x -> 100.64.0.x" that never get replies.
+// Reachability within the /16 is still enforced by cryptokey routing
+// (ENOKEY) and server-side ACL visibility.
+func overlayAddress(addr string, network netip.Prefix) (string, error) {
+	ip, err := netip.ParseAddr(addr)
+	if err != nil {
+		return "", fmt.Errorf("parse overlay address %q: %w", addr, err)
+	}
+
+	return fmt.Sprintf("%s/%d", ip, network.Bits()), nil
+}
+
+func effectiveListenPort(flagPort, resolvedPort int) int {
+	if resolvedPort > 0 {
+		return resolvedPort
+	}
+
+	return flagPort
+}
+
 func run() error {
 	flag.Parse()
 
@@ -327,7 +366,32 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("Public Key: %s\n", privateKey.PublicKey())
+	listenPort, err := resolveListenPort(*listenPortFlag, *keyFileFlag+".port")
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("[agent] public key: %s\n", privateKey.PublicKey())
+	fmt.Printf("[agent] using listen port: %d\n", listenPort)
+
+	if *manageFirewallFlag {
+		fw, err := firewall.Open("wgmesh-agent")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[agent] firewall: %v; open udp %d yourself if needed\n", err, listenPort)
+		} else {
+			if err := fw.AllowUDP(listenPort); err != nil {
+				fmt.Fprintf(os.Stderr, "[agent] firewall (%s): %v\n", fw.Backend(), err)
+			} else {
+				fmt.Printf("[agent] firewall (%s): opened udp %d\n", fw.Backend(), listenPort)
+			}
+
+			defer func() {
+				if err := fw.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "[agent] firewall cleanup: %v\n", err)
+				}
+			}()
+		}
+	}
 
 	// Enrollment mode: the control plane dictates our overlay address
 	// and peer list; the manual --peer-* flags are the standalone path.
@@ -336,7 +400,7 @@ func run() error {
 	var (
 		enrolledPeers []wgtypes.PeerConfig
 		authToken     string
-		meshNetwork   netip.Prefix
+		networkPrefix netip.Prefix
 	)
 
 	if *serverFlag != "" {
@@ -351,27 +415,53 @@ func run() error {
 		var publicEndpoint string
 
 		if *stunServerFlag != "" {
-			publicEndpoint, err = discoverPublicEndpoint(*stunServerFlag, listenPort)
+			publicEndpoint, err = discoverPublicEndpoint(
+				*stunServerFlag,
+				listenPort,
+			)
+
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "stun: %v (continuing without public endpoint)\n", err)
+				fmt.Fprintf(
+					os.Stderr,
+					"[agent] stun discovery failed: %v (continuing without public endpoint)\n",
+					err,
+				)
 			} else {
-				fmt.Printf("STUN public endpoint: %s\n", publicEndpoint)
+				fmt.Printf(
+					"[agent] stun public endpoint: %s\n",
+					publicEndpoint,
+				)
 			}
 		}
 
-		resp, err := enroll(*serverFlag, *setupKeyFlag, *serverCAFlag, privateKey.PublicKey(), hostname, listenPort, publicEndpoint)
+		resp, err := enroll(
+			*serverFlag,
+			*setupKeyFlag,
+			*serverCAFlag,
+			privateKey.PublicKey(),
+			hostname,
+			effectiveListenPort(*listenPortFlag, listenPort),
+			publicEndpoint,
+		)
 		if err != nil {
 			return err
 		}
 
 		authToken = resp.AuthToken
 
-		meshNetwork, err = netip.ParsePrefix(resp.NetworkCIDR)
+		networkPrefix, err = netip.ParsePrefix(resp.NetworkCIDR)
 		if err != nil {
-			return fmt.Errorf("parse network CIDR %q from server: %w", resp.NetworkCIDR, err)
+			return fmt.Errorf(
+				"parse network CIDR %q from server: %w",
+				resp.NetworkCIDR,
+				err,
+			)
 		}
 
-		overlayAddr = fmt.Sprintf("%s/%d", resp.AssignedIP, meshNetwork.Bits())
+		overlayAddr, err = overlayAddress(resp.AssignedIP, networkPrefix)
+		if err != nil {
+			return err
+		}
 
 		for _, p := range resp.Peers {
 			cfg, err := peerConfigFromProto(p)
@@ -382,13 +472,21 @@ func run() error {
 			enrolledPeers = append(enrolledPeers, cfg)
 		}
 
-		fmt.Printf("Enrolled as peer %d, assigned %s, %d peer(s) in mesh\n",
-			resp.PeerID, overlayAddr, len(resp.Peers))
+		fmt.Printf(
+			"[agent] enrolled as peer %d, assigned %s, %d peer(s) in mesh\n",
+			resp.PeerID,
+			overlayAddr,
+			len(resp.Peers),
+		)
 	}
 
 	defer func() {
 		if err := deleteInterface(ifaceName); err != nil {
-			fmt.Fprintf(os.Stderr, "cleanup error: %v\n", err)
+			fmt.Fprintf(
+				os.Stderr,
+				"cleanup error: %v\n",
+				err,
+			)
 		}
 	}()
 
@@ -404,17 +502,13 @@ func run() error {
 		return err
 	}
 
-	client, err := wgctrl.New()
-	if err != nil {
-		return fmt.Errorf("create wgctrl client: %w", err)
-	}
-	defer client.Close()
-
 	peers := enrolledPeers
 
 	if *peerKeyFlag != "" {
 		if *peerAddrFlag == "" {
-			return errors.New("peer-addr is required when peer-key is set")
+			return errors.New(
+				"peer-addr is required when peer-key is set",
+			)
 		}
 
 		peerCfg, err := buildPeerConfig(
@@ -430,8 +524,9 @@ func run() error {
 		peers = append(peers, peerCfg)
 	}
 
+	// WINDOWS:
+	// Configure embedded wireguard-go directly.
 	if err := configureWireGuard(
-		client,
 		ifaceName,
 		privateKey,
 		listenPort,
@@ -440,46 +535,51 @@ func run() error {
 		return err
 	}
 
-	if err := printDeviceState(client, ifaceName); err != nil {
-		return err
-	}
+	fmt.Println("[agent] wireguard interface setup complete")
+	fmt.Println("[agent] direct peer connectivity requires each peer to reach the configured endpoint over UDP")
 
-	fmt.Println("\nWireGuard interface setup complete")
-
-	// Telemetry runs only in enrollment mode: without a control plane
-	// there is nowhere to report.
+	// Telemetry/reporting keeps the mesh converged and drives relay fallback.
+	// On Windows the embedded backend does not yet expose wgctrl telemetry,
+	// so only the Linux path starts the reporter loop.
+	var reporterStop chan struct{}
 	if authToken != "" {
-		reporter, err := newTelemetryReporter(
-			client,
-			*serverFlag,
-			authToken,
-			*serverCAFlag,
-			ifaceName,
-			meshNetwork,
-			*reportIntervalFlag,
-		)
+		wgClient, err := wgctrl.New()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[agent] wgctrl init failed: %v\n", err)
+		} else {
+			defer wgClient.Close()
+		}
+
+		transport, err := parseRelayTransport(*relayTransportFlag)
 		if err != nil {
 			return err
 		}
 
-		stop := make(chan struct{})
-		done := make(chan struct{})
-
-		go func() {
-			defer close(done)
-			reporter.run(stop)
-		}()
-
-		defer func() {
-			close(stop)
-			<-done
-		}()
-
-		fmt.Printf("Telemetry reporting every %s\n", *reportIntervalFlag)
+		reporter, err := newTelemetryReporter(
+			wgClient,
+			*serverFlag,
+			authToken,
+			*serverCAFlag,
+			ifaceName,
+			networkPrefix,
+			*reportIntervalFlag,
+			transport,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[agent] telemetry init failed: %v\n", err)
+		} else {
+			reporterStop = make(chan struct{})
+			go reporter.run(reporterStop)
+			fmt.Printf("[agent] telemetry reporting enabled every %s\n", *reportIntervalFlag)
+		}
 	}
 
 	// Block until terminated.
 	waitForShutdown()
+
+	if reporterStop != nil {
+		close(reporterStop)
+	}
 
 	return nil
 }

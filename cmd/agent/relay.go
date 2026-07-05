@@ -32,6 +32,16 @@ func (t *telemetryReporter) checkHandshakes() {
 
 	now := time.Now()
 
+	// Retire WebSocket proxies whose pumps have stopped (relay dropped
+	// the connection); clearing relayed lets the peer fall back again.
+	for key, p := range t.wsProxies {
+		if !p.alive() {
+			p.close()
+			delete(t.wsProxies, key)
+			delete(t.relayed, key)
+		}
+	}
+
 	for _, peer := range device.Peers {
 		if _, ok := t.firstSeen[peer.PublicKey]; !ok {
 			t.firstSeen[peer.PublicKey] = now
@@ -55,42 +65,73 @@ func (t *telemetryReporter) checkHandshakes() {
 			continue
 		}
 
-		endpoint, err := t.requestRelayEndpoint(peer.PublicKey)
+		if t.switchToRelay(peer.PublicKey, silentFor) {
+			t.relayed[peer.PublicKey] = true
+		}
+	}
+}
+
+// switchToRelay moves one peer onto the configured relay transport.
+// Returns true when the peer is now relayed (so it is not retried).
+func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Duration) bool {
+	switch t.relayTransport {
+	case relayWebSocket:
+		proxy, err := t.startWSRelay(peer)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "relay: %v\n", err)
-			continue
+			if err == errNoWSRelay {
+				t.relayBroken = true
+				fmt.Fprintln(os.Stderr, "[agent] relay: control plane has no websocket relay; direct connectivity only")
+
+				return false
+			}
+
+			fmt.Fprintf(os.Stderr, "[agent] relay ws for %s: %v\n", peer, err)
+
+			return false
+		}
+
+		t.wsProxies[peer] = proxy
+
+		fmt.Printf("[agent] relay: no handshake with %s for %s, tunnelling over websocket\n",
+			peer, silentFor.Round(time.Second))
+
+		return true
+
+	default: // relayUDP
+		endpoint, err := t.requestRelayEndpoint(peer)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[agent] relay request failed for %s: %v\n", peer, err)
+			return false
 		}
 
 		if endpoint == "" {
-			// Control plane has no relay configured; stop asking.
 			t.relayBroken = true
-			fmt.Fprintln(os.Stderr, "relay: control plane has no relay configured; direct connectivity only")
+			fmt.Fprintln(os.Stderr, "[agent] relay: control plane has no relay configured; direct connectivity only")
 
-			continue
+			return false
 		}
 
 		udpAddr, err := net.ResolveUDPAddr("udp", endpoint)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "relay: resolve %q: %v\n", endpoint, err)
-			continue
+			fmt.Fprintf(os.Stderr, "[agent] relay: resolve %q: %v\n", endpoint, err)
+			return false
 		}
 
-		err = t.wg.ConfigureDevice(t.iface, wgtypes.Config{
+		if err := t.wg.ConfigureDevice(t.iface, wgtypes.Config{
 			Peers: []wgtypes.PeerConfig{{
-				PublicKey:  peer.PublicKey,
+				PublicKey:  peer,
 				UpdateOnly: true,
 				Endpoint:   udpAddr,
 			}},
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "relay: set endpoint for %s: %v\n", peer.PublicKey, err)
-			continue
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "[agent] relay: set endpoint for %s: %v\n", peer, err)
+			return false
 		}
 
-		t.relayed[peer.PublicKey] = true
+		fmt.Printf("[agent] relay: no handshake with %s for %s, switched to udp relay %s\n",
+			peer, silentFor.Round(time.Second), endpoint)
 
-		fmt.Printf("relay: no handshake with %s for %s, switched to relay %s\n",
-			peer.PublicKey, silentFor.Round(time.Second), endpoint)
+		return true
 	}
 }
 

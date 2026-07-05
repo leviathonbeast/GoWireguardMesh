@@ -76,16 +76,32 @@ type telemetryReporter struct {
 	pendingFlows    map[flowKey]*proto.FlowRecord
 
 	// Relay fallback state.
-	firstSeen   map[wgtypes.Key]time.Time
-	relayed     map[wgtypes.Key]bool
-	relayBroken bool // control plane said no relay; stop asking
+	relayTransport relayTransport
+	firstSeen      map[wgtypes.Key]time.Time
+	relayed        map[wgtypes.Key]bool
+	wsProxies      map[wgtypes.Key]*wsRelayProxy
+	relayBroken    bool // control plane said no relay; stop asking
 }
+
+// relayTransport selects how the agent tunnels to a relayed peer.
+type relayTransport int
+
+const (
+	// relayWebSocket rides the control plane's own port (443), so it
+	// needs no extra firewall holes and traverses UDP-blocking
+	// networks — the NetBird-parity default.
+	relayWebSocket relayTransport = iota
+	// relayUDP is the raw UDP forwarder: faster, but needs the relay's
+	// port range reachable.
+	relayUDP
+)
 
 func newTelemetryReporter(
 	wg *wgctrl.Client,
 	serverURL, authToken, serverCA, iface string,
 	network netip.Prefix,
 	interval time.Duration,
+	transport relayTransport,
 ) (*telemetryReporter, error) {
 	client, err := newHTTPClient(serverCA)
 	if err != nil {
@@ -100,12 +116,14 @@ func newTelemetryReporter(
 		iface:           iface,
 		network:         network,
 		interval:        interval,
+		relayTransport:  transport,
 		prevLink:        make(map[wgtypes.Key]linkCounters),
 		prevFlow:        make(map[flowKey]flowCounters),
 		pendingCounters: make(map[wgtypes.Key]*proto.PeerCounter),
 		pendingFlows:    make(map[flowKey]*proto.FlowRecord),
 		firstSeen:       make(map[wgtypes.Key]time.Time),
 		relayed:         make(map[wgtypes.Key]bool),
+		wsProxies:       make(map[wgtypes.Key]*wsRelayProxy),
 	}
 
 	dumper, err := newFlowDumper()
@@ -130,6 +148,10 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 		case <-stop:
 			t.collect()
 			t.send()
+
+			for _, p := range t.wsProxies {
+				p.close()
+			}
 
 			if t.ct != nil {
 				t.ct.Close()
