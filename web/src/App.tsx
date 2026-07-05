@@ -6,6 +6,8 @@ import type {
   AuditRow,
   Flow,
   LinkStat,
+  NetworkConfig,
+  NetworkMigrationPlan,
   Peer,
   SetupKey,
 } from "./types";
@@ -79,11 +81,18 @@ function CopyButton({ text }: { text: string }) {
 }
 
 function PeerBadge({ peer }: { peer: Peer }) {
-  return peer.revoked_at ? (
-    <span className="badge bad">revoked</span>
-  ) : (
-    <span className="badge ok">active</span>
-  );
+  switch (peer.health_status) {
+    case "online":
+      return <span className="badge ok">online</span>;
+    case "stale":
+      return <span className="badge warn">stale</span>;
+    case "revoked":
+      return <span className="badge bad">revoked</span>;
+    case "offline":
+      return <span className="badge bad">offline</span>;
+    default:
+      return <span className="badge warn">unknown</span>;
+  }
 }
 
 function KeyBadge({ k }: { k: SetupKey }) {
@@ -99,6 +108,16 @@ function endpointOf(p: Peer): string {
   if (p.public_endpoint) return p.public_endpoint;
   if (p.observed_ip && p.listen_port) return `${p.observed_ip}:${p.listen_port}`;
   return "";
+}
+
+function lastSeenLabel(p: Peer): string {
+  if (p.revoked_at) return "revoked";
+  if (!p.last_seen_at) return "never seen";
+  if (p.last_seen_age_seconds == null) return formatTime(p.last_seen_at);
+  if (p.last_seen_age_seconds < 60) return `${p.last_seen_age_seconds}s ago`;
+  const minutes = Math.floor(p.last_seen_age_seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
 }
 
 const TABS = ["peers", "traffic", "access", "audit", "admin"] as const;
@@ -212,6 +231,7 @@ const EVENT_PHRASE: Record<string, string> = {
   setup_key_create: "created a setup key",
   acl_create: "added an ACL rule",
   acl_delete: "deleted an ACL rule",
+  network_migrate: "changed the overlay network",
   revoke: "revoked",
 };
 
@@ -313,6 +333,14 @@ export default function App() {
   const [acl, setAcl] = useState<AclResponse>({ default_policy: "allow", rules: [] });
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [access, setAccess] = useState<AccessLogRow[]>([]);
+  const [network, setNetwork] = useState<NetworkConfig>({
+    network_cidr: "",
+    network_cidr6: "",
+  });
+  const [networkCIDR, setNetworkCIDR] = useState("");
+  const [networkCIDR6, setNetworkCIDR6] = useState("");
+  const [networkPlan, setNetworkPlan] = useState<NetworkMigrationPlan | null>(null);
+  const [networkConfirm, setNetworkConfirm] = useState("");
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
 
@@ -333,7 +361,7 @@ export default function App() {
     if (!token) return;
     setError("");
     try {
-      const [p, k, l, f, a, au, al] = await Promise.all([
+      const [p, k, l, f, a, au, al, n] = await Promise.all([
         api<Peer[]>("/api/peers", token),
         api<SetupKey[]>("/api/setup-keys", token),
         api<LinkStat[]>("/api/link-stats", token),
@@ -341,6 +369,7 @@ export default function App() {
         api<AclResponse>("/api/acl", token),
         api<AuditRow[]>("/api/audit?limit=200", token),
         api<AccessLogRow[]>("/api/access-log?limit=200", token),
+        api<NetworkConfig>("/api/network", token),
       ]);
       setPeers(p);
       setKeys(k);
@@ -349,6 +378,9 @@ export default function App() {
       setAcl(a);
       setAudit(au);
       setAccess(al);
+      setNetwork(n);
+      setNetworkCIDR((cur) => cur || n.network_cidr);
+      setNetworkCIDR6((cur) => cur || n.network_cidr6);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -406,6 +438,48 @@ export default function App() {
     }
   };
 
+  const previewNetworkMigration = async () => {
+    setError("");
+    try {
+      const plan = await api<NetworkMigrationPlan>("/api/network/preview", token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          network_cidr: networkCIDR.trim(),
+          network_cidr6: networkCIDR6.trim(),
+        }),
+      });
+      setNetworkPlan(plan);
+      setNetworkConfirm("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setNetworkPlan(null);
+    }
+  };
+
+  const applyNetworkMigration = async () => {
+    setError("");
+    try {
+      const plan = await api<NetworkMigrationPlan>("/api/network/apply", token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          network_cidr: networkCIDR.trim(),
+          network_cidr6: networkCIDR6.trim(),
+          confirm: networkConfirm,
+        }),
+      });
+      setNetworkPlan(plan);
+      setNetwork(plan.target);
+      setNetworkCIDR(plan.target.network_cidr);
+      setNetworkCIDR6(plan.target.network_cidr6);
+      setNetworkConfirm("");
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   return (
     <div className="wrap">
       <header className="topbar">
@@ -453,6 +527,7 @@ export default function App() {
                   <th>status</th>
                   <th>hostname</th>
                   <th>overlay ip</th>
+                  <th>last seen</th>
                   <th>public key</th>
                   <th>endpoint</th>
                   <th>created</th>
@@ -462,7 +537,7 @@ export default function App() {
               <tbody>
                 {peers.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="muted">
+                    <td colSpan={9} className="muted">
                       no peers enrolled
                     </td>
                   </tr>
@@ -480,6 +555,7 @@ export default function App() {
                         <div className="muted">{p.assigned_ip6}</div>
                       )}
                     </td>
+                    <td className="muted">{lastSeenLabel(p)}</td>
                     <td className="mono">
                       {p.public_key} <CopyButton text={p.public_key} />
                     </td>
@@ -697,6 +773,132 @@ export default function App() {
 
       {tab === "admin" && (
         <>
+          <h2>Overlay network</h2>
+          <div className="panel stack">
+            <div className="metric-grid">
+              <div className="metric">
+                <div className="metric-label">current IPv4</div>
+                <div className="metric-value">{network.network_cidr || "unknown"}</div>
+              </div>
+              <div className="metric">
+                <div className="metric-label">current IPv6</div>
+                <div className="metric-value">{network.network_cidr6 || "unknown"}</div>
+              </div>
+              <div className="metric">
+                <div className="metric-label">active peers</div>
+                <div className="metric-value">
+                  {peers.filter((p) => !p.revoked_at).length}
+                </div>
+              </div>
+              <div className="metric">
+                <div className="metric-label">total assignments</div>
+                <div className="metric-value">{peers.length}</div>
+              </div>
+            </div>
+
+            <div className="notice warn">
+              Changing the overlay network reassigns every peer. Running agents
+              adopt the new interface address from their next report response;
+              restarting an agent also re-enrolls it onto the new assignment.
+            </div>
+
+            <div className="form-grid">
+              <label>
+                <span>IPv4 CIDR</span>
+                <input
+                  value={networkCIDR}
+                  placeholder="100.64.0.0/16"
+                  onChange={(e) => {
+                    setNetworkCIDR(e.target.value);
+                    setNetworkPlan(null);
+                  }}
+                />
+              </label>
+              <label>
+                <span>IPv6 CIDR</span>
+                <input
+                  value={networkCIDR6}
+                  placeholder="fd00:100:64::/64"
+                  onChange={(e) => {
+                    setNetworkCIDR6(e.target.value);
+                    setNetworkPlan(null);
+                  }}
+                />
+              </label>
+              <div className="form-actions">
+                <button className="primary" onClick={() => void previewNetworkMigration()}>
+                  preview changes
+                </button>
+              </div>
+            </div>
+
+            {networkPlan && (
+              <div className="stack">
+                <div className="notice">
+                  {networkPlan.message ||
+                    "Preview ready. Review the reassignment plan before applying."}
+                </div>
+                <div className="tablewrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>peer</th>
+                        <th>IPv4</th>
+                        <th>IPv6</th>
+                        <th>status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {networkPlan.changes.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="muted">
+                            no peers to reassign
+                          </td>
+                        </tr>
+                      )}
+                      {networkPlan.changes.map((c) => (
+                        <tr key={c.id}>
+                          <td>{c.hostname || `peer ${c.id}`}</td>
+                          <td>
+                            <span className="muted">{c.old_ip}</span>
+                            <div>{c.new_ip}</div>
+                          </td>
+                          <td>
+                            <span className="muted">{c.old_ip6 || "none"}</span>
+                            <div>{c.new_ip6}</div>
+                          </td>
+                          <td>
+                            {c.revoked_at ? (
+                              <span className="badge bad">revoked</span>
+                            ) : (
+                              <span className="badge warn">will move</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="confirm-box">
+                  <label>
+                    <span>type REASSIGN OVERLAY NETWORK to apply</span>
+                    <input
+                      value={networkConfirm}
+                      onChange={(e) => setNetworkConfirm(e.target.value)}
+                    />
+                  </label>
+                  <button
+                    className="danger"
+                    disabled={networkConfirm !== "REASSIGN OVERLAY NETWORK"}
+                    onClick={() => void applyNetworkMigration()}
+                  >
+                    apply network migration
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <h2>ACL rules</h2>
           <div className="panel">
             <p className="muted" style={{ marginTop: 0 }}>

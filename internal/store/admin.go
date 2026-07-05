@@ -16,7 +16,7 @@ type PeerInfo struct {
 	ID             int64
 	PublicKey      string
 	AssignedIP     string
-	AssignedIP6    string // "" when the IPv6 overlay is disabled
+	AssignedIP6    string // "" when the IPv6 overlay is not configured
 	Hostname       string // "" if unset
 	ListenPort     int    // 0 if unset
 	ObservedIP     string // "" if unknown

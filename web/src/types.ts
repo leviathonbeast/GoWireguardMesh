@@ -5,6 +5,8 @@ export interface Peer {
   public_key: string;
   assigned_ip: string;
   assigned_ip6?: string;
+  health_status: "online" | "stale" | "offline" | "revoked" | "unknown";
+  last_seen_age_seconds?: number;
   hostname?: string;
   listen_port?: number;
   observed_ip?: string;
@@ -100,4 +102,26 @@ export interface AccessLogRow {
   peer_id?: number;
   user_agent?: string;
   headers?: Record<string, string>;
+}
+
+export interface NetworkConfig {
+  network_cidr: string;
+  network_cidr6: string;
+}
+
+export interface NetworkPeerChange {
+  id: number;
+  hostname?: string;
+  revoked_at?: string;
+  old_ip: string;
+  new_ip: string;
+  old_ip6?: string;
+  new_ip6: string;
+}
+
+export interface NetworkMigrationPlan {
+  current: NetworkConfig;
+  target: NetworkConfig;
+  changes: NetworkPeerChange[];
+  message?: string;
 }

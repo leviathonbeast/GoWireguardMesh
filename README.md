@@ -5,9 +5,10 @@ NetBird/Tailscale-style overlay network with full control and no premium
 paywalls.
 
 Peers get stable identities (WireGuard keypairs), enroll against a central
-control plane with setup keys, receive an overlay IP from CGNAT space
-(`100.64.0.0/16` by default), and configure their WireGuard interface with the
-peers they are allowed to reach — automatically, and kept in sync.
+control plane with setup keys, receive overlay IPs from CGNAT and ULA space
+(`100.64.0.0/16` and `fd00:100:64::/64` by default), and configure their
+WireGuard interface with the peers they are allowed to reach — automatically,
+and kept in sync.
 
 For production hardening and the VPS + per-service-sidecar deployment model,
 see [SECURITY.md](SECURITY.md).
@@ -126,7 +127,7 @@ Flags for `server`:
 | `--listen` | `127.0.0.1:8080` | listen address |
 | `--db` | `mesh.db` | SQLite database path |
 | `--network` | `100.64.0.0/16` | IPv4 overlay network; peers get the lowest free IP |
-| `--network6` | off | optional IPv6 overlay network; peers also get the lowest free IPv6 |
+| `--network6` | `fd00:100:64::/64` | IPv6 overlay network; peers also get the lowest free IPv6 |
 | `--psk-file` | `mesh-psk.key` | PSK master file (never distributed; per-pair keys derive from it) |
 | `--no-tls` | off | plain HTTP: behind a TLS-terminating proxy, or dev (warns if exposed) |
 | `--tls-cert` / `--tls-key` | `cert.pem` / `key.pem` | TLS cert/key; self-signed pair generated if missing |
@@ -185,14 +186,15 @@ cleartext.
 The server serves the admin interface at `/` (same port as the API). Open
 it, paste the contents of `admin-token`, and use the tabs:
 
-- **Peers** — registered peers with status, overlay IP, endpoint, last seen;
+- **Peers** — registered peers with online/stale/offline status, overlay IP, endpoint, last seen;
   revoke inline.
 - **Traffic** — liveness, per-link totals, and a NetBird-style traffic-event
   feed (both peer names resolved, protocol/port, ingress/egress ports, and
   `↓ rx / ↑ tx`) with a **search box** (ip / port / hostname / protocol).
-- **Access** — ACL rules (with the default policy shown) and setup-key
-  management.
+- **Access** — recent request tracing when `--access-log=memory`.
 - **Audit** — the security activity log (colored by outcome) with search.
+- **Admin** — overlay-network migration preview/apply, ACL rules, and
+  setup-key management.
 
 The UI lives in `web/` (React + TypeScript); `npm run dev` starts a Vite dev
 server that proxies API calls to a control plane on `127.0.0.1:8080`.
@@ -202,7 +204,11 @@ The admin API behind it (all require `Authorization: Bearer <admin-token>`):
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/peers` | list all peers, including revoked |
+| `GET /api/peers/{id}/ping` | heartbeat/liveness status from the peer's last report |
 | `POST /api/peers/{id}/revoke` | revoke a peer (kept out of enrollment responses; IP stays reserved) |
+| `GET /api/network` | current persisted overlay CIDRs |
+| `POST /api/network/preview` | preview a full overlay re-IP plan |
+| `POST /api/network/apply` | apply a confirmed overlay re-IP plan |
 | `GET /api/setup-keys` · `POST /api/setup-keys` | list / create (`{"max_uses":0,"expires_in":"24h"}`) |
 | `POST /api/setup-keys/{id}/revoke` | revoke a key (also blocks re-enroll with it) |
 | `GET /api/acl` · `POST /api/acl` · `POST /api/acl/{id}/delete` | list / create / delete ACL rules |
@@ -223,7 +229,8 @@ POSTs to `/report` every `--report-interval` (default 30s) with:
   counters, plus the last handshake time. Deltas survive agent restarts
   (kernel counters reset when the interface is recreated) and failed reports
   (pending data is kept until the server accepts it). Every report — even an
-  empty one — bumps the peer's `last_seen_at`, so it doubles as a heartbeat.
+  empty one — bumps the peer's `last_seen_at`, so it doubles as a heartbeat
+  for `GET /api/peers/{id}/ping` and the Peers table.
 - **Flow logs** — overlay-only flows read from conntrack: protocol, src/dst
   address and port, byte/packet deltas in both directions. Src is the flow
   initiator. Header data only; payloads are never captured.
@@ -401,9 +408,10 @@ The agent will:
 3. Receive its assigned overlay IPs, an auth token, and the peers it may
    reach — each with its per-pair PSK, endpoint hint, and keepalive.
 4. Create the `wg-int` interface, assign the address(es), configure peers, and
-   report telemetry every 30s. Each report response re-syncs the peer list,
-   so membership/endpoint/ACL/PSK changes land within one interval. Blocks
-   until SIGINT/SIGTERM, then tears the interface down.
+   report telemetry every 30s. Each report response re-syncs the peer list and
+   the agent's own assigned address, so membership/endpoint/ACL/PSK and
+   overlay-network changes land within one interval. Blocks until
+   SIGINT/SIGTERM, then tears the interface down.
 
 Re-running the agent is safe: enrollment is idempotent, so a node that
 re-enrolls with the same public key and its original setup key gets its

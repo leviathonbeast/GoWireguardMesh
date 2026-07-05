@@ -597,6 +597,8 @@ func run() error {
 			authToken,
 			*serverCAFlag,
 			ifaceName,
+			overlayAddr,
+			overlayAddr6,
 			networkPrefix,
 			networkPrefix6,
 			*reportIntervalFlag,

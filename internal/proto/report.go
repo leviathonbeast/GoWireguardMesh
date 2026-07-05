@@ -20,7 +20,11 @@ type ReportRequest struct {
 // report returns the current peer list, so membership and endpoint
 // changes propagate within one report interval without restarts.
 type ReportResponse struct {
-	Peers []PeerConfigResponse `json:"peers"`
+	AssignedIP   string               `json:"assigned_ip,omitempty"`
+	AssignedIP6  string               `json:"assigned_ip6,omitempty"`
+	NetworkCIDR  string               `json:"network_cidr,omitempty"`
+	NetworkCIDR6 string               `json:"network_cidr6,omitempty"`
+	Peers        []PeerConfigResponse `json:"peers"`
 }
 
 // PeerCounter is the reporting agent's view of one WireGuard link.

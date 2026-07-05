@@ -55,6 +55,41 @@ func assignIPAddress(ifaceName, cidr string) error {
 	return nil
 }
 
+func replaceIPAddress(ifaceName, oldCIDR, newCIDR string) error {
+	if oldCIDR == newCIDR {
+		return nil
+	}
+
+	link, err := netlink.LinkByName(ifaceName)
+	if err != nil {
+		return fmt.Errorf("lookup interface %q: %w", ifaceName, err)
+	}
+
+	if newCIDR != "" {
+		addr, err := netlink.ParseAddr(newCIDR)
+		if err != nil {
+			return fmt.Errorf("parse CIDR %q: %w", newCIDR, err)
+		}
+		if err := netlink.AddrAdd(link, addr); err != nil {
+			return fmt.Errorf("assign address %q: %w", newCIDR, err)
+		}
+		fmt.Printf("Assigned %s to %s\n", newCIDR, ifaceName)
+	}
+
+	if oldCIDR != "" {
+		addr, err := netlink.ParseAddr(oldCIDR)
+		if err != nil {
+			return fmt.Errorf("parse old CIDR %q: %w", oldCIDR, err)
+		}
+		if err := netlink.AddrDel(link, addr); err != nil {
+			return fmt.Errorf("remove old address %q: %w", oldCIDR, err)
+		}
+		fmt.Printf("Removed %s from %s\n", oldCIDR, ifaceName)
+	}
+
+	return nil
+}
+
 func bringInterfaceUp(ifaceName string) error {
 	link, err := netlink.LinkByName(ifaceName)
 	if err != nil {

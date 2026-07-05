@@ -71,7 +71,14 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, proto.ReportResponse{Peers: entries})
+	cfg := s.currentNetworkConfig()
+	writeJSON(w, http.StatusOK, proto.ReportResponse{
+		AssignedIP:   self.AssignedIP,
+		AssignedIP6:  self.AssignedIP6,
+		NetworkCIDR:  cfg.NetworkCIDR,
+		NetworkCIDR6: cfg.NetworkCIDR6,
+		Peers:        entries,
+	})
 }
 
 type linkStatJSON struct {

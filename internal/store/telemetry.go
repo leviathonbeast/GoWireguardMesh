@@ -193,7 +193,7 @@ type FlowRow struct {
 	PeerID       int64
 	PeerHostname string
 	PeerIP       string // reporter's IPv4 overlay IP, for direction labeling
-	PeerIP6      string // reporter's IPv6 overlay IP, "" when disabled
+	PeerIP6      string // reporter's IPv6 overlay IP, "" when not configured
 	Protocol     int
 	SrcIP        string
 	SrcPort      int

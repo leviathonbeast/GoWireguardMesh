@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -29,8 +30,10 @@ var ErrUnauthorized = errors.New("unauthorized")
 const timeFormat = "2006-01-02T15:04:05.000Z"
 
 type Store struct {
-	db      *sql.DB
-	network netip.Prefix
+	db *sql.DB
+
+	networkMu sync.RWMutex
+	network   netip.Prefix
 
 	// DefaultAllow is the ACL default policy: true means every peer
 	// sees every peer unless the operator adds rules; false means
@@ -42,20 +45,43 @@ type Store struct {
 	// expiry. Zero means no expiry. Set once at startup.
 	TokenTTL time.Duration
 
-	// Network6 is the optional IPv6 ULA overlay. The zero value
-	// (invalid prefix) means IPv6 is disabled and peers get only an
-	// IPv4 overlay address. Set once at startup, like DefaultAllow.
+	// Network6 is the IPv6 ULA overlay. The server configures a
+	// default prefix, but the zero value keeps store tests and any
+	// non-server callers IPv4-only. Set once at startup, like
+	// DefaultAllow.
 	Network6 netip.Prefix
 }
 
 // v6Enabled reports whether the mesh hands out IPv6 overlay addresses.
-func (s *Store) v6Enabled() bool { return s.Network6.IsValid() }
+func (s *Store) v6Enabled() bool { return s.network6().IsValid() }
+
+func (s *Store) network4() netip.Prefix {
+	s.networkMu.RLock()
+	defer s.networkMu.RUnlock()
+
+	return s.network
+}
+
+func (s *Store) network6() netip.Prefix {
+	s.networkMu.RLock()
+	defer s.networkMu.RUnlock()
+
+	return s.Network6
+}
+
+func (s *Store) setNetworks(network4, network6 netip.Prefix) {
+	s.networkMu.Lock()
+	defer s.networkMu.Unlock()
+
+	s.network = network4.Masked()
+	s.Network6 = network6.Masked()
+}
 
 type PeerRow struct {
 	ID          int64
 	PublicKey   string
 	AssignedIP  string
-	AssignedIP6 string // "" when the IPv6 overlay is disabled
+	AssignedIP6 string // "" when the IPv6 overlay is not configured
 
 	// Endpoint hint material, in preference order.
 	PublicEndpoint string // STUN-discovered ip:port, "" if unknown
@@ -127,7 +153,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 6
+const schemaVersion = 7
 
 var migrations = map[int]string{
 	2: migrationV2,
@@ -135,13 +161,25 @@ var migrations = map[int]string{
 	4: migrationV4,
 	5: migrationV5,
 	6: migrationV6,
+	7: migrationV7,
 }
 
-// migrationV6 adds the optional IPv6 overlay address. It is NULL for
-// peers on an IPv4-only mesh and backfilled on the next re-enroll once
-// the operator turns on --network6. A partial unique index enforces
-// one v6 address per peer without constraining the NULLs (SQLite can't
-// add a UNIQUE column via ALTER TABLE, so the index is separate).
+// migrationV7 stores operator-editable settings that must survive a
+// process restart. Overlay CIDRs live here once the server initializes
+// them from flags/defaults, and the web UI updates them during network
+// migrations.
+const migrationV7 = `
+CREATE TABLE settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+`
+
+// migrationV6 adds the IPv6 overlay address. It is NULL until peers
+// re-enroll against a server with Network6 configured. A partial
+// unique index enforces one v6 address per peer without constraining
+// the NULLs (SQLite can't add a UNIQUE column via ALTER TABLE, so the
+// index is separate).
 const migrationV6 = `
 ALTER TABLE peers ADD COLUMN assigned_ip6 TEXT;
 
@@ -484,10 +522,10 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 		return nil, err
 	}
 
-	// Backfill an IPv6 overlay address if the operator turned on the v6
-	// overlay after this peer first enrolled. Agents re-enroll at every
-	// startup, so existing peers pick up a v6 address on their next
-	// launch without any explicit migration sweep. "" leaves the column
+	// Backfill an IPv6 overlay address if this peer first enrolled
+	// before Network6 was configured. Agents re-enroll at every startup,
+	// so existing peers pick up a v6 address on their next launch
+	// without any explicit migration sweep. "" leaves the column
 	// untouched via COALESCE below.
 	var ip6Backfill string
 	if s.v6Enabled() && existing.AssignedIP6 == "" {
@@ -553,13 +591,13 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 
 // allocateIP returns the lowest free IPv4 host address in the overlay.
 func (s *Store) allocateIP(ctx context.Context, tx *sql.Tx) (string, error) {
-	return allocateAddr(ctx, tx, s.network, "assigned_ip")
+	return allocateAddr(ctx, tx, s.network4(), "assigned_ip")
 }
 
 // allocateIP6 returns the lowest free IPv6 overlay host address. Only
 // called when the v6 overlay is enabled.
 func (s *Store) allocateIP6(ctx context.Context, tx *sql.Tx) (string, error) {
-	return allocateAddr(ctx, tx, s.Network6, "assigned_ip6")
+	return allocateAddr(ctx, tx, s.network6(), "assigned_ip6")
 }
 
 // allocateAddr returns the lowest free host address in prefix, treating

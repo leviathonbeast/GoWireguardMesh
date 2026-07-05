@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -68,6 +69,8 @@ type peerJSON struct {
 	PublicKey      string `json:"public_key"`
 	AssignedIP     string `json:"assigned_ip"`
 	AssignedIP6    string `json:"assigned_ip6,omitempty"`
+	HealthStatus   string `json:"health_status"`
+	LastSeenAgeSec int64  `json:"last_seen_age_seconds,omitempty"`
 	Hostname       string `json:"hostname,omitempty"`
 	ListenPort     int    `json:"listen_port,omitempty"`
 	ObservedIP     string `json:"observed_ip,omitempty"`
@@ -87,6 +90,21 @@ type setupKeyJSON struct {
 	UsesConsumed int    `json:"uses_consumed"`
 }
 
+const networkMigrationConfirm = "REASSIGN OVERLAY NETWORK"
+
+type networkMigrationRequest struct {
+	NetworkCIDR  string `json:"network_cidr"`
+	NetworkCIDR6 string `json:"network_cidr6"`
+	Confirm      string `json:"confirm,omitempty"`
+}
+
+type peerPingJSON struct {
+	PeerID         int64  `json:"peer_id"`
+	Status         string `json:"status"`
+	LastSeenAt     string `json:"last_seen_at,omitempty"`
+	LastSeenAgeSec int64  `json:"last_seen_age_seconds,omitempty"`
+}
+
 func (s *server) handleListPeers(w http.ResponseWriter, r *http.Request) {
 	peers, err := s.store.ListPeers(r.Context())
 	if err != nil {
@@ -97,10 +115,81 @@ func (s *server) handleListPeers(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]peerJSON, 0, len(peers))
 	for _, p := range peers {
-		out = append(out, peerJSON(p))
+		health, age := peerHealth(p.LastSeenAt, p.RevokedAt)
+		out = append(out, peerJSON{
+			ID:             p.ID,
+			PublicKey:      p.PublicKey,
+			AssignedIP:     p.AssignedIP,
+			AssignedIP6:    p.AssignedIP6,
+			HealthStatus:   health,
+			LastSeenAgeSec: age,
+			Hostname:       p.Hostname,
+			ListenPort:     p.ListenPort,
+			ObservedIP:     p.ObservedIP,
+			PublicEndpoint: p.PublicEndpoint,
+			CreatedAt:      p.CreatedAt,
+			LastSeenAt:     p.LastSeenAt,
+			RevokedAt:      p.RevokedAt,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *server) handlePingPeer(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	peers, err := s.store.ListPeers(r.Context())
+	if err != nil {
+		log.Printf("ping peer %d: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	for _, p := range peers {
+		if p.ID != id {
+			continue
+		}
+
+		status, age := peerHealth(p.LastSeenAt, p.RevokedAt)
+		writeJSON(w, http.StatusOK, peerPingJSON{
+			PeerID:         p.ID,
+			Status:         status,
+			LastSeenAt:     p.LastSeenAt,
+			LastSeenAgeSec: age,
+		})
+		return
+	}
+
+	writeError(w, http.StatusNotFound, "peer not found")
+}
+
+func peerHealth(lastSeenAt, revokedAt string) (string, int64) {
+	if revokedAt != "" {
+		return "revoked", 0
+	}
+	if lastSeenAt == "" {
+		return "offline", 0
+	}
+
+	lastSeen, err := time.Parse(time.RFC3339Nano, lastSeenAt)
+	if err != nil {
+		return "unknown", 0
+	}
+
+	age := int64(time.Since(lastSeen).Seconds())
+	switch {
+	case age <= 90:
+		return "online", age
+	case age <= 300:
+		return "stale", age
+	default:
+		return "offline", age
+	}
 }
 
 func (s *server) handleListSetupKeys(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +206,86 @@ func (s *server) handleListSetupKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *server) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.currentNetworkConfig())
+}
+
+func (s *server) handlePreviewNetworkMigration(w http.ResponseWriter, r *http.Request) {
+	target4, target6, ok := s.parseNetworkMigrationRequest(w, r)
+	if !ok {
+		return
+	}
+
+	plan, err := s.store.PreviewNetworkMigration(r.Context(), target4, target6)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	plan.Message = "Preview only. Applying this plan reassigns overlay IPs in the control plane; running peers adopt their new self IP from the next report response."
+
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *server) handleApplyNetworkMigration(w http.ResponseWriter, r *http.Request) {
+	var req networkMigrationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.Confirm != networkMigrationConfirm {
+		writeError(w, http.StatusBadRequest, `confirm must be "REASSIGN OVERLAY NETWORK"`)
+		return
+	}
+
+	target4, target6, ok := parseNetworkMigrationTarget(w, req)
+	if !ok {
+		return
+	}
+
+	plan, err := s.store.ApplyNetworkMigration(r.Context(), target4, target6)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.setNetworkConfig(plan.Target)
+	plan.Message = "Overlay assignments were updated. Running peers adopt their new interface address from the next report response; restart/re-enroll also receives the new assignment."
+	s.audit(r, "network_migrate", http.StatusOK,
+		fmt.Sprintf("%s -> %s, %s -> %s, peers=%d",
+			plan.Current.NetworkCIDR, plan.Target.NetworkCIDR,
+			plan.Current.NetworkCIDR6, plan.Target.NetworkCIDR6,
+			len(plan.Changes),
+		))
+
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *server) parseNetworkMigrationRequest(w http.ResponseWriter, r *http.Request) (netip.Prefix, netip.Prefix, bool) {
+	var req networkMigrationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return netip.Prefix{}, netip.Prefix{}, false
+	}
+
+	return parseNetworkMigrationTarget(w, req)
+}
+
+func parseNetworkMigrationTarget(w http.ResponseWriter, req networkMigrationRequest) (netip.Prefix, netip.Prefix, bool) {
+	target4, err := parseNetwork4(req.NetworkCIDR)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return netip.Prefix{}, netip.Prefix{}, false
+	}
+
+	target6, err := parseNetwork6(req.NetworkCIDR6)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return netip.Prefix{}, netip.Prefix{}, false
+	}
+
+	return target4, target6, true
 }
 
 func (s *server) handleCreateSetupKey(w http.ResponseWriter, r *http.Request) {

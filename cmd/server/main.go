@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -38,8 +39,11 @@ import (
 // this, not the agent — resolves the old agent-side TODO.
 const keepaliveSeconds = 25
 
+const defaultNetwork6CIDR = "fd00:100:64::/64"
+
 type server struct {
 	store        *store.Store
+	networkMu    sync.RWMutex
 	networkCIDR  string
 	network6CIDR string
 	pskMaster    wgtypes.Key // never distributed; per-pair PSKs derive from it
@@ -123,7 +127,7 @@ func runServe(args []string) error {
 	dbPath := fs.String("db", "mesh.db", "path to sqlite database")
 	listen := fs.String("listen", "127.0.0.1:8080", "listen address")
 	network := fs.String("network", "100.64.0.0/16", "overlay network (CIDR)")
-	network6 := fs.String("network6", "", "optional IPv6 overlay network (CIDR, e.g. fd00:100:64::/64)")
+	network6 := fs.String("network6", defaultNetwork6CIDR, "IPv6 overlay network (CIDR)")
 	pskFile := fs.String("psk-file", "mesh-psk.key", "path to network preshared key file")
 	noTLS := fs.Bool("no-tls", false, "serve plain HTTP: for dev, or production behind a TLS-terminating reverse proxy (e.g. Traefik)")
 	tlsCert := fs.String("tls-cert", "cert.pem", "path to TLS certificate (self-signed generated if missing)")
@@ -164,24 +168,14 @@ func runServe(args []string) error {
 		return err
 	}
 
-	prefix, err := netip.ParsePrefix(*network)
+	prefix, err := parseNetwork4(*network)
 	if err != nil {
-		return fmt.Errorf("parse network %q: %w", *network, err)
-	}
-	if !prefix.Addr().Is4() {
-		return fmt.Errorf("--network must be an IPv4 CIDR, got %q", *network)
+		return err
 	}
 
-	var prefix6 netip.Prefix
-	if *network6 != "" {
-		prefix6, err = netip.ParsePrefix(*network6)
-		if err != nil {
-			return fmt.Errorf("parse network6 %q: %w", *network6, err)
-		}
-		if !prefix6.Addr().Is6() {
-			return fmt.Errorf("--network6 must be an IPv6 CIDR, got %q", *network6)
-		}
-		prefix6 = prefix6.Masked()
+	prefix6, err := parseNetwork6(*network6)
+	if err != nil {
+		return err
 	}
 
 	st, err := store.Open(*dbPath, prefix, gowireguard.SchemaSQL)
@@ -189,7 +183,11 @@ func runServe(args []string) error {
 		return err
 	}
 	defer st.Close()
-	st.Network6 = prefix6
+
+	networkCfg, err := st.LoadOrInitNetworkConfig(context.Background(), prefix, prefix6)
+	if err != nil {
+		return err
+	}
 
 	switch *defaultPolicy {
 	case "allow":
@@ -236,8 +234,8 @@ func runServe(args []string) error {
 
 	srv := &server{
 		store:        st,
-		networkCIDR:  prefix.Masked().String(),
-		network6CIDR: network6CIDR(prefix6),
+		networkCIDR:  networkCfg.NetworkCIDR,
+		network6CIDR: networkCfg.NetworkCIDR6,
 		pskMaster:    networkPSK,
 		adminToken:   adminToken,
 		trustProxy:   *trustProxy,
@@ -320,6 +318,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /relay-ws", publicLimit(srv.handleRelayWS))
 	mux.Handle("GET /", http.FileServerFS(ui))
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
+	mux.HandleFunc("GET /api/peers/{id}/ping", srv.requireAdmin(srv.handlePingPeer))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))
 	mux.HandleFunc("GET /api/setup-keys", srv.requireAdmin(srv.handleListSetupKeys))
 	mux.HandleFunc("POST /api/setup-keys", srv.requireAdmin(srv.handleCreateSetupKey))
@@ -327,6 +326,9 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /api/link-stats", srv.requireAdmin(srv.handleListLinkStats))
 	mux.HandleFunc("GET /api/flows", srv.requireAdmin(srv.handleListFlows))
 	mux.HandleFunc("GET /api/access-log", srv.requireAdmin(srv.handleListAccessLog))
+	mux.HandleFunc("GET /api/network", srv.requireAdmin(srv.handleGetNetwork))
+	mux.HandleFunc("POST /api/network/preview", srv.requireAdmin(srv.handlePreviewNetworkMigration))
+	mux.HandleFunc("POST /api/network/apply", srv.requireAdmin(srv.handleApplyNetworkMigration))
 	mux.HandleFunc("GET /api/acl", srv.requireAdmin(srv.handleListACL))
 	mux.HandleFunc("POST /api/acl", srv.requireAdmin(srv.handleCreateACL))
 	mux.HandleFunc("POST /api/acl/{id}/delete", srv.requireAdmin(srv.handleDeleteACL))
@@ -391,12 +393,55 @@ func network6CIDR(prefix netip.Prefix) string {
 	return prefix.String()
 }
 
+func parseNetwork4(raw string) (netip.Prefix, error) {
+	prefix, err := netip.ParsePrefix(raw)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("parse network %q: %w", raw, err)
+	}
+	if !prefix.Addr().Is4() {
+		return netip.Prefix{}, fmt.Errorf("--network must be an IPv4 CIDR, got %q", raw)
+	}
+
+	return prefix.Masked(), nil
+}
+
+func parseNetwork6(raw string) (netip.Prefix, error) {
+	prefix, err := netip.ParsePrefix(raw)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("parse network6 %q: %w", raw, err)
+	}
+	if !prefix.Addr().Is6() {
+		return netip.Prefix{}, fmt.Errorf("--network6 must be an IPv6 CIDR, got %q", raw)
+	}
+
+	return prefix.Masked(), nil
+}
+
 func (s *server) network6LogSuffix() string {
-	if s.network6CIDR == "" {
+	cfg := s.currentNetworkConfig()
+	if cfg.NetworkCIDR6 == "" {
 		return ""
 	}
 
-	return ", " + s.network6CIDR
+	return ", " + cfg.NetworkCIDR6
+}
+
+func (s *server) currentNetworkConfig() store.NetworkConfig {
+	s.networkMu.RLock()
+	defer s.networkMu.RUnlock()
+
+	return store.NetworkConfig{
+		NetworkCIDR:  s.networkCIDR,
+		NetworkCIDR6: s.network6CIDR,
+	}
+}
+
+func (s *server) setNetworkConfig(cfg store.NetworkConfig) {
+	s.networkMu.Lock()
+	defer s.networkMu.Unlock()
+
+	s.networkCIDR = cfg.NetworkCIDR
+	s.network6CIDR = cfg.NetworkCIDR6
 }
 
 func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
@@ -545,12 +590,14 @@ func (s *server) buildResponse(res *store.EnrollResult) (proto.EnrollResponse, e
 		return proto.EnrollResponse{}, err
 	}
 
+	cfg := s.currentNetworkConfig()
+
 	return proto.EnrollResponse{
 		PeerID:       int(res.Peer.ID),
 		AssignedIP:   res.Peer.AssignedIP,
 		AssignedIP6:  res.Peer.AssignedIP6,
-		NetworkCIDR:  s.networkCIDR,
-		NetworkCIDR6: s.network6CIDR,
+		NetworkCIDR:  cfg.NetworkCIDR,
+		NetworkCIDR6: cfg.NetworkCIDR6,
 		Peers:        peers,
 		AuthToken:    res.AuthToken,
 	}, nil

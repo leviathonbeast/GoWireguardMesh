@@ -64,6 +64,8 @@ type telemetryReporter struct {
 	serverURL string
 	authToken string
 	iface     string
+	selfAddr  string
+	selfAddr6 string
 	network   netip.Prefix
 	network6  netip.Prefix
 	interval  time.Duration
@@ -100,6 +102,7 @@ const (
 func newTelemetryReporter(
 	wg *wgctrl.Client,
 	serverURL, authToken, serverCA, iface string,
+	selfAddr, selfAddr6 string,
 	network netip.Prefix,
 	network6 netip.Prefix,
 	interval time.Duration,
@@ -116,6 +119,8 @@ func newTelemetryReporter(
 		serverURL:       serverURL,
 		authToken:       authToken,
 		iface:           iface,
+		selfAddr:        selfAddr,
+		selfAddr6:       selfAddr6,
 		network:         network,
 		network6:        network6,
 		interval:        interval,
@@ -382,16 +387,24 @@ func (t *telemetryReporter) post(report *proto.ReportRequest) bool {
 		return true // report was accepted; only the sync failed
 	}
 
-	t.applySync(sync.Peers)
+	t.applySync(sync)
 
 	return true
 }
 
-// applySync converts the server's peer list and reconciles the device.
-func (t *telemetryReporter) applySync(entries []proto.PeerConfigResponse) {
-	desired := make([]wgtypes.PeerConfig, 0, len(entries))
+// applySync reconciles this agent's own interface address and then the
+// peer list. The self-address path lets the control plane re-IP the
+// mesh and have running agents adopt their new address without a
+// process restart.
+func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
+	if err := t.applySelfAssignment(sync); err != nil {
+		fmt.Fprintf(os.Stderr, "telemetry: %v\n", err)
+		return
+	}
 
-	for _, e := range entries {
+	desired := make([]wgtypes.PeerConfig, 0, len(sync.Peers))
+
+	for _, e := range sync.Peers {
 		cfg, err := peerConfigFromProto(e)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "telemetry: bad peer in sync payload: %v\n", err)
@@ -404,4 +417,60 @@ func (t *telemetryReporter) applySync(entries []proto.PeerConfigResponse) {
 	if err := syncPeers(t.wg, t.iface, desired); err != nil {
 		fmt.Fprintf(os.Stderr, "telemetry: %v\n", err)
 	}
+}
+
+func (t *telemetryReporter) applySelfAssignment(sync proto.ReportResponse) error {
+	if sync.AssignedIP == "" || sync.NetworkCIDR == "" {
+		return nil
+	}
+
+	network, err := netip.ParsePrefix(sync.NetworkCIDR)
+	if err != nil {
+		return fmt.Errorf("parse synced network CIDR %q: %w", sync.NetworkCIDR, err)
+	}
+
+	nextAddr, err := overlayAddress(sync.AssignedIP, network)
+	if err != nil {
+		return err
+	}
+
+	var (
+		network6  netip.Prefix
+		nextAddr6 string
+	)
+	if sync.NetworkCIDR6 != "" {
+		network6, err = netip.ParsePrefix(sync.NetworkCIDR6)
+		if err != nil {
+			return fmt.Errorf("parse synced IPv6 network CIDR %q: %w", sync.NetworkCIDR6, err)
+		}
+		if sync.AssignedIP6 != "" {
+			nextAddr6, err = overlayAddress(sync.AssignedIP6, network6)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if nextAddr != t.selfAddr {
+		if err := replaceIPAddress(t.iface, t.selfAddr, nextAddr); err != nil {
+			return err
+		}
+		fmt.Printf("[agent] adopted new overlay address %s\n", nextAddr)
+		t.selfAddr = nextAddr
+	}
+
+	if nextAddr6 != t.selfAddr6 {
+		if err := replaceIPAddress(t.iface, t.selfAddr6, nextAddr6); err != nil {
+			return err
+		}
+		if nextAddr6 != "" {
+			fmt.Printf("[agent] adopted new IPv6 overlay address %s\n", nextAddr6)
+		}
+		t.selfAddr6 = nextAddr6
+	}
+
+	t.network = network
+	t.network6 = network6
+
+	return nil
 }

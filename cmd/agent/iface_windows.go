@@ -142,6 +142,49 @@ func assignIPAddress(ifaceName, cidr string) error {
 	return nil
 }
 
+func replaceIPAddress(ifaceName, oldCIDR, newCIDR string) error {
+	if oldCIDR == newCIDR {
+		return nil
+	}
+
+	if newCIDR != "" {
+		if err := assignIPAddress(ifaceName, newCIDR); err != nil {
+			return err
+		}
+	}
+
+	if oldCIDR == "" {
+		return nil
+	}
+
+	ip, _, err := net.ParseCIDR(oldCIDR)
+	if err != nil {
+		return fmt.Errorf("parse old CIDR %q: %w", oldCIDR, err)
+	}
+
+	family := "ipv4"
+	if ip.To4() == nil {
+		family = "ipv6"
+	}
+
+	out, err := exec.Command(
+		"netsh",
+		"interface",
+		family,
+		"delete",
+		"address",
+		"name="+ifaceName,
+		ip.String(),
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("remove old address %q via netsh: %w: %s", oldCIDR, err, out)
+	}
+
+	fmt.Printf("Removed %s from %s\n", oldCIDR, ifaceName)
+
+	return nil
+}
+
 func bringInterfaceUp(ifaceName string) error {
 	// Wintun adapters are already up once created.
 	return nil

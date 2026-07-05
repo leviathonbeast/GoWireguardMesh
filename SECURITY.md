@@ -119,10 +119,12 @@ only; payloads are never captured.
   With the default WebSocket relay transport, that single port also
   carries relayed traffic — no UDP range required. Add the UDP relay
   range only if you set `--relay-transport udp` for throughput.
-- Optional dual-stack overlay: keep `--network` as the IPv4 overlay and
-  add a ULA such as `--network6 fd00:100:64::/64` if your services need
-  IPv6 addresses inside the mesh. Existing peers pick up IPv6 on their
-  next re-enroll/start.
+- Dual-stack overlay: keep `--network` as the IPv4 overlay and override
+  the default ULA with `--network6 <cidr>` if you need a different IPv6
+  mesh range. The web UI can migrate both overlay CIDRs with a preview
+  and explicit confirmation; running agents adopt the new self address
+  from the next report response, and restart/re-enroll also returns the
+  new assignment.
 - Firewall the VPS with your provider's security groups too; the
   built-in firewall management is defense in depth, not the perimeter.
 
