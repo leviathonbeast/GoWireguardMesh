@@ -95,12 +95,14 @@ Two layers, by design:
   WireGuard IP), the underlay `remote_ip` the server saw, the raw
   `X-Forwarded-For` proxy chain, user-agent, method, path, and status.
   Retained `--audit-retention` (default 90d), pruned daily.
-- **Access log** (firehose, JSON lines to stdout): *every* request, with
-  method, path, status, duration, original IP, proxy chain, the
-  authenticated peer's overlay IP, and a **redacted** header dump.
-  `Authorization`, `Cookie`, and the WebSocket key are never logged.
-  Ship stdout to your log aggregator; do not persist telemetry reports
-  to the audit table (they would flood it every 30s).
+- **Access log** (request firehose): *every* request, with method, path,
+  status, duration, original IP, proxy chain, the authenticated peer's
+  overlay IP, and a **redacted** header dump. `Authorization`, `Cookie`,
+  and the WebSocket key are never logged. `--access-log=memory` (default)
+  keeps a bounded ring for the UI's Access tab and `GET /api/access-log`;
+  `--access-log=stdout` emits JSONL for a log shipper; `--access-log=off`
+  disables request tracing. Do not persist telemetry reports to the
+  audit table (they would flood it every 30s).
 
 Flow logs are labeled per the reporting peer's vantage: **direction**
 (egress = it opened the connection, ingress = something reached in),
@@ -117,6 +119,10 @@ only; payloads are never captured.
   With the default WebSocket relay transport, that single port also
   carries relayed traffic — no UDP range required. Add the UDP relay
   range only if you set `--relay-transport udp` for throughput.
+- Optional dual-stack overlay: keep `--network` as the IPv4 overlay and
+  add a ULA such as `--network6 fd00:100:64::/64` if your services need
+  IPv6 addresses inside the mesh. Existing peers pick up IPv6 on their
+  next re-enroll/start.
 - Firewall the VPS with your provider's security groups too; the
   built-in firewall management is defense in depth, not the perimeter.
 

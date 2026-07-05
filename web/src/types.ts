@@ -4,6 +4,7 @@ export interface Peer {
   id: number;
   public_key: string;
   assigned_ip: string;
+  assigned_ip6?: string;
   hostname?: string;
   listen_port?: number;
   observed_ip?: string;
@@ -84,4 +85,19 @@ export interface AuditRow {
   path?: string;
   status?: number;
   detail?: string;
+}
+
+export interface AccessLogRow {
+  time: string;
+  event: string;
+  method: string;
+  path: string;
+  status: number;
+  duration_ms: number;
+  remote_ip: string;
+  forwarded_for?: string;
+  overlay_ip?: string;
+  peer_id?: number;
+  user_agent?: string;
+  headers?: Record<string, string>;
 }

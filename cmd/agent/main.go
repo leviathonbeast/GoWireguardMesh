@@ -41,9 +41,11 @@ var (
 
 var (
 	addrFlag           = flag.String("addr", "100.64.0.1/16", "overlay address (CIDR)")
+	addr6Flag          = flag.String("addr6", "", "optional IPv6 overlay address (CIDR)")
 	peerKeyFlag        = flag.String("peer-key", "", "peer public key (base64)")
 	peerEndpointFlag   = flag.String("peer-endpoint", "", "peer endpoint host:port (optional)")
 	peerAddrFlag       = flag.String("peer-addr", "", "peer overlay address, e.g. 100.64.0.2/32")
+	peerAddr6Flag      = flag.String("peer-addr6", "", "optional peer IPv6 overlay address, e.g. fd00:100:64::2/128")
 	peerPSKFlag        = flag.String("peer-psk", "", "preshared key (base64, optional)")
 	serverFlag         = flag.String("server", "", "control plane URL (e.g. https://host:8080); enables enrollment mode")
 	setupKeyFlag       = flag.String("setup-key", "", "setup key for enrollment (required with --server)")
@@ -75,6 +77,7 @@ func buildPeerConfig(
 	pubkey,
 	endpoint,
 	allowedCIDR,
+	allowedCIDR6,
 	presharedKey string,
 ) (wgtypes.PeerConfig, error) {
 	publicKey, err := wgtypes.ParseKey(pubkey)
@@ -99,6 +102,16 @@ func buildPeerConfig(
 			fmt.Errorf("parse allowed CIDR %q: %w", allowedCIDR, err)
 	}
 
+	allowed := []net.IPNet{*allowedNet}
+	if allowedCIDR6 != "" {
+		_, allowedNet6, err := net.ParseCIDR(allowedCIDR6)
+		if err != nil {
+			return wgtypes.PeerConfig{},
+				fmt.Errorf("parse IPv6 allowed CIDR %q: %w", allowedCIDR6, err)
+		}
+		allowed = append(allowed, *allowedNet6)
+	}
+
 	var psk *wgtypes.Key
 
 	if presharedKey != "" {
@@ -114,12 +127,10 @@ func buildPeerConfig(
 	keepalive := 25 * time.Second
 
 	cfg := wgtypes.PeerConfig{
-		PublicKey:    publicKey,
-		Endpoint:     udpAddr,
-		PresharedKey: psk,
-		AllowedIPs: []net.IPNet{
-			*allowedNet,
-		},
+		PublicKey:                   publicKey,
+		Endpoint:                    udpAddr,
+		PresharedKey:                psk,
+		AllowedIPs:                  allowed,
 		PersistentKeepaliveInterval: &keepalive,
 	}
 
@@ -396,11 +407,13 @@ func run() error {
 	// Enrollment mode: the control plane dictates our overlay address
 	// and peer list; the manual --peer-* flags are the standalone path.
 	overlayAddr := *addrFlag
+	overlayAddr6 := *addr6Flag
 
 	var (
-		enrolledPeers []wgtypes.PeerConfig
-		authToken     string
-		networkPrefix netip.Prefix
+		enrolledPeers  []wgtypes.PeerConfig
+		authToken      string
+		networkPrefix  netip.Prefix
+		networkPrefix6 netip.Prefix
 	)
 
 	if *serverFlag != "" {
@@ -463,6 +476,22 @@ func run() error {
 			return err
 		}
 
+		if resp.NetworkCIDR6 != "" {
+			networkPrefix6, err = netip.ParsePrefix(resp.NetworkCIDR6)
+			if err != nil {
+				return fmt.Errorf(
+					"parse IPv6 network CIDR %q from server: %w",
+					resp.NetworkCIDR6,
+					err,
+				)
+			}
+
+			overlayAddr6, err = overlayAddress(resp.AssignedIP6, networkPrefix6)
+			if err != nil {
+				return err
+			}
+		}
+
 		for _, p := range resp.Peers {
 			cfg, err := peerConfigFromProto(p)
 			if err != nil {
@@ -472,12 +501,12 @@ func run() error {
 			enrolledPeers = append(enrolledPeers, cfg)
 		}
 
-		fmt.Printf(
-			"[agent] enrolled as peer %d, assigned %s, %d peer(s) in mesh\n",
-			resp.PeerID,
-			overlayAddr,
-			len(resp.Peers),
-		)
+		assigned := overlayAddr
+		if overlayAddr6 != "" {
+			assigned += ", " + overlayAddr6
+		}
+
+		fmt.Printf("[agent] enrolled as peer %d, assigned %s, %d peer(s) in mesh\n", resp.PeerID, assigned, len(resp.Peers))
 	}
 
 	defer func() {
@@ -498,6 +527,12 @@ func run() error {
 		return err
 	}
 
+	if overlayAddr6 != "" {
+		if err := assignIPAddress(ifaceName, overlayAddr6); err != nil {
+			return err
+		}
+	}
+
 	if err := bringInterfaceUp(ifaceName); err != nil {
 		return err
 	}
@@ -515,6 +550,7 @@ func run() error {
 			*peerKeyFlag,
 			*peerEndpointFlag,
 			*peerAddrFlag,
+			*peerAddr6Flag,
 			*peerPSKFlag,
 		)
 		if err != nil {
@@ -562,6 +598,7 @@ func run() error {
 			*serverCAFlag,
 			ifaceName,
 			networkPrefix,
+			networkPrefix6,
 			*reportIntervalFlag,
 			transport,
 		)

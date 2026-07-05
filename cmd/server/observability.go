@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -15,14 +16,97 @@ import (
 	"gowireguard/internal/store"
 )
 
-// accessLogMu serializes access-log writes: concurrent requests must
-// not interleave partial JSON lines on stdout.
-var accessLogMu sync.Mutex
+type accessLogMode string
 
-// writeAccessLog emits one JSON line (no log-package prefix) so a log
-// shipper can parse each line as one object. The record carries its
-// own "time" field.
-func writeAccessLog(line accessLogLine) {
+const (
+	accessLogMemory accessLogMode = "memory"
+	accessLogStdout accessLogMode = "stdout"
+	accessLogOff    accessLogMode = "off"
+)
+
+func parseAccessLogMode(raw string) (accessLogMode, error) {
+	switch accessLogMode(raw) {
+	case accessLogMemory, accessLogStdout, accessLogOff:
+		return accessLogMode(raw), nil
+	default:
+		return "", errors.New(`access-log must be "memory", "stdout", or "off"`)
+	}
+}
+
+// accessLogSink owns request-trace storage/output. In memory mode it
+// keeps a bounded newest-first ring for the admin API. In stdout mode
+// it emits JSONL for a log shipper and keeps no copy. Off drops lines.
+type accessLogSink struct {
+	mode  accessLogMode
+	mu    sync.Mutex
+	next  int
+	full  bool
+	lines []accessLogLine
+}
+
+func newAccessLogSink(mode accessLogMode, size int) *accessLogSink {
+	if size < 1 {
+		size = 1
+	}
+
+	return &accessLogSink{
+		mode:  mode,
+		lines: make([]accessLogLine, size),
+	}
+}
+
+func (s *accessLogSink) write(line accessLogLine) {
+	if s == nil || s.mode == accessLogOff {
+		return
+	}
+
+	if s.mode == accessLogStdout {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		writeAccessLogStdout(line)
+		return
+	}
+
+	s.mu.Lock()
+	s.lines[s.next] = line
+	s.next = (s.next + 1) % len(s.lines)
+	if s.next == 0 {
+		s.full = true
+	}
+	s.mu.Unlock()
+}
+
+func (s *accessLogSink) list(limit int) []accessLogLine {
+	if s == nil || s.mode != accessLogMemory || limit <= 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	total := s.next
+	if s.full {
+		total = len(s.lines)
+	}
+	if limit > total {
+		limit = total
+	}
+
+	out := make([]accessLogLine, 0, limit)
+	for i := 0; i < limit; i++ {
+		idx := s.next - 1 - i
+		if idx < 0 {
+			idx += len(s.lines)
+		}
+		out = append(out, s.lines[idx])
+	}
+
+	return out
+}
+
+// writeAccessLogStdout emits one JSON line (no log-package prefix) so
+// a log shipper can parse each line as one object.
+func writeAccessLogStdout(line accessLogLine) {
 	b, err := json.Marshal(line)
 	if err != nil {
 		return
@@ -30,9 +114,7 @@ func writeAccessLog(line accessLogLine) {
 
 	b = append(b, '\n')
 
-	accessLogMu.Lock()
 	os.Stdout.Write(b)
-	accessLogMu.Unlock()
 }
 
 // isLoopback reports whether a listen address binds only the loopback
@@ -68,6 +150,22 @@ type auditRowJSON struct {
 	Path         string `json:"path,omitempty"`
 	Status       int    `json:"status,omitempty"`
 	Detail       string `json:"detail,omitempty"`
+}
+
+func (s *server) handleListAccessLog(w http.ResponseWriter, r *http.Request) {
+	limit := 200
+
+	if q := r.URL.Query().Get("limit"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n < 1 || n > 2000 {
+			writeError(w, http.StatusBadRequest, "limit must be 1-2000")
+			return
+		}
+
+		limit = n
+	}
+
+	writeJSON(w, http.StatusOK, s.accessLog.list(limit))
 }
 
 func (s *server) handleListAudit(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +333,7 @@ func (s *server) logRequests(next http.Handler) http.Handler {
 			Headers:      safeHeaders(r.Header),
 		}
 
-		writeAccessLog(line)
+		s.accessLog.write(line)
 	})
 }
 

@@ -14,10 +14,12 @@ type EnrollRequest struct {
 
 // EnrollResponse is returned after successful enrollment.
 type EnrollResponse struct {
-	PeerID      int                  `json:"peer_id"`
-	AssignedIP  string               `json:"assigned_ip"`
-	NetworkCIDR string               `json:"network_cidr"`
-	Peers       []PeerConfigResponse `json:"peers"`
+	PeerID       int                  `json:"peer_id"`
+	AssignedIP   string               `json:"assigned_ip"`
+	AssignedIP6  string               `json:"assigned_ip6,omitempty"`
+	NetworkCIDR  string               `json:"network_cidr"`
+	NetworkCIDR6 string               `json:"network_cidr6,omitempty"`
+	Peers        []PeerConfigResponse `json:"peers"`
 
 	// AuthToken authenticates subsequent agent requests (telemetry
 	// reports). Rotated on every enrollment, including idempotent

@@ -125,7 +125,8 @@ Flags for `server`:
 |---|---|---|
 | `--listen` | `127.0.0.1:8080` | listen address |
 | `--db` | `mesh.db` | SQLite database path |
-| `--network` | `100.64.0.0/16` | overlay network; peers get the lowest free IP |
+| `--network` | `100.64.0.0/16` | IPv4 overlay network; peers get the lowest free IP |
+| `--network6` | off | optional IPv6 overlay network; peers also get the lowest free IPv6 |
 | `--psk-file` | `mesh-psk.key` | PSK master file (never distributed; per-pair keys derive from it) |
 | `--no-tls` | off | plain HTTP: behind a TLS-terminating proxy, or dev (warns if exposed) |
 | `--tls-cert` / `--tls-key` | `cert.pem` / `key.pem` | TLS cert/key; self-signed pair generated if missing |
@@ -143,6 +144,8 @@ Flags for `server`:
 | **Telemetry & security** | | |
 | `--token-ttl` | `0` (never) | peer auth-token lifetime; agents re-enroll to refresh |
 | `--rate-limit` / `--rate-burst` | `20` / `40` | per-source req/s + burst on public endpoints (0 = off) |
+| `--access-log` | `memory` | request tracing: `memory` for UI/API ring, `stdout` for JSONL shipping, `off` |
+| `--access-log-size` | `1000` | in-memory request ring size |
 | `--flow-retention` | `168h` | flow-log retention (pruned hourly) |
 | `--audit-retention` | `2160h` (90d) | audit-log retention (pruned daily) |
 
@@ -206,6 +209,7 @@ The admin API behind it (all require `Authorization: Bearer <admin-token>`):
 | `GET /api/link-stats` | accumulated per-link transfer totals + last handshake |
 | `GET /api/flows?limit=100` | recent flow log entries (direction, protocol, ports, bytes) |
 | `GET /api/audit?limit=200` | security audit log |
+| `GET /api/access-log?limit=200` | recent request log when `--access-log=memory` |
 
 `GET /healthz` is unauthenticated, for liveness probes.
 
@@ -394,9 +398,9 @@ The agent will:
    reused forever. Never delete it casually.
 2. Discover its public endpoint via STUN, then POST its **public** key to
    `/enroll` (the private key never leaves the machine).
-3. Receive its assigned overlay IP, an auth token, and the peers it may
+3. Receive its assigned overlay IPs, an auth token, and the peers it may
    reach — each with its per-pair PSK, endpoint hint, and keepalive.
-4. Create the `wg-int` interface, assign the address, configure peers, and
+4. Create the `wg-int` interface, assign the address(es), configure peers, and
    report telemetry every 30s. Each report response re-syncs the peer list,
    so membership/endpoint/ACL/PSK changes land within one interval. Blocks
    until SIGINT/SIGTERM, then tears the interface down.
@@ -412,8 +416,10 @@ The original manual flags still work for point-to-point testing:
 
 ```sh
 sudo ./bin/agent --addr 100.64.0.1/16 \
+  --addr6 fd00:100:64::1/64 \
   --peer-key <base64-pubkey> \
   --peer-addr 100.64.0.2/32 \
+  --peer-addr6 fd00:100:64::2/128 \
   --peer-endpoint 192.168.1.20:51820 \
   --peer-psk <base64-psk>          # optional
 ```
@@ -438,14 +444,16 @@ Success (`200`):
 {
   "peer_id": 2,
   "assigned_ip": "100.64.0.2",
+  "assigned_ip6": "fd00:100:64::2",
   "network_cidr": "100.64.0.0/16",
+  "network_cidr6": "fd00:100:64::/64",
   "auth_token": "…",
   "peers": [
     {
       "public_key": "…",
       "preshared_key": "…",
       "persistent_keepalive_interval": 25,
-      "allowed_ips": ["100.64.0.1/32"],
+      "allowed_ips": ["100.64.0.1/32", "fd00:100:64::1/128"],
       "endpoint": "203.0.113.11:51820"
     }
   ]

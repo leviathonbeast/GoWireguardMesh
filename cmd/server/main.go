@@ -39,14 +39,16 @@ import (
 const keepaliveSeconds = 25
 
 type server struct {
-	store       *store.Store
-	networkCIDR string
-	pskMaster   wgtypes.Key // never distributed; per-pair PSKs derive from it
-	adminToken  string
-	trustProxy  bool
-	relay       relayAllocator // nil when no relay is configured
-	relayHost   string         // public data-plane address agents dial
-	wsHub       *relay.WSHub   // nil unless the embedded WS relay is enabled
+	store        *store.Store
+	networkCIDR  string
+	network6CIDR string
+	pskMaster    wgtypes.Key // never distributed; per-pair PSKs derive from it
+	adminToken   string
+	trustProxy   bool
+	relay        relayAllocator // nil when no relay is configured
+	relayHost    string         // public data-plane address agents dial
+	wsHub        *relay.WSHub   // nil unless the embedded WS relay is enabled
+	accessLog    *accessLogSink
 }
 
 // clientIP is the peer's underlay address as seen by the control
@@ -121,6 +123,7 @@ func runServe(args []string) error {
 	dbPath := fs.String("db", "mesh.db", "path to sqlite database")
 	listen := fs.String("listen", "127.0.0.1:8080", "listen address")
 	network := fs.String("network", "100.64.0.0/16", "overlay network (CIDR)")
+	network6 := fs.String("network6", "", "optional IPv6 overlay network (CIDR, e.g. fd00:100:64::/64)")
 	pskFile := fs.String("psk-file", "mesh-psk.key", "path to network preshared key file")
 	noTLS := fs.Bool("no-tls", false, "serve plain HTTP: for dev, or production behind a TLS-terminating reverse proxy (e.g. Traefik)")
 	tlsCert := fs.String("tls-cert", "cert.pem", "path to TLS certificate (self-signed generated if missing)")
@@ -141,6 +144,8 @@ func runServe(args []string) error {
 	auditRetention := fs.Duration("audit-retention", 90*24*time.Hour, "how long to keep audit-log rows")
 	rateLimit := fs.Float64("rate-limit", 20, "per-source requests/second on public endpoints (0 = disabled)")
 	rateBurst := fs.Float64("rate-burst", 40, "per-source burst allowance on public endpoints")
+	accessLogRaw := fs.String("access-log", "memory", "request access log mode: memory, stdout, or off")
+	accessLogSize := fs.Int("access-log-size", 1000, "request access log ring size when --access-log=memory")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -154,9 +159,29 @@ func runServe(args []string) error {
 		log.Printf("WARNING: --trust-proxy is set while listening on %s (not loopback). Ensure a reverse proxy is the ONLY thing that can reach this port, or clients can spoof X-Forwarded-For.", *listen)
 	}
 
+	accessMode, err := parseAccessLogMode(*accessLogRaw)
+	if err != nil {
+		return err
+	}
+
 	prefix, err := netip.ParsePrefix(*network)
 	if err != nil {
 		return fmt.Errorf("parse network %q: %w", *network, err)
+	}
+	if !prefix.Addr().Is4() {
+		return fmt.Errorf("--network must be an IPv4 CIDR, got %q", *network)
+	}
+
+	var prefix6 netip.Prefix
+	if *network6 != "" {
+		prefix6, err = netip.ParsePrefix(*network6)
+		if err != nil {
+			return fmt.Errorf("parse network6 %q: %w", *network6, err)
+		}
+		if !prefix6.Addr().Is6() {
+			return fmt.Errorf("--network6 must be an IPv6 CIDR, got %q", *network6)
+		}
+		prefix6 = prefix6.Masked()
 	}
 
 	st, err := store.Open(*dbPath, prefix, gowireguard.SchemaSQL)
@@ -164,6 +189,7 @@ func runServe(args []string) error {
 		return err
 	}
 	defer st.Close()
+	st.Network6 = prefix6
 
 	switch *defaultPolicy {
 	case "allow":
@@ -209,11 +235,13 @@ func runServe(args []string) error {
 	}
 
 	srv := &server{
-		store:       st,
-		networkCIDR: prefix.Masked().String(),
-		pskMaster:   networkPSK,
-		adminToken:  adminToken,
-		trustProxy:  *trustProxy,
+		store:        st,
+		networkCIDR:  prefix.Masked().String(),
+		network6CIDR: network6CIDR(prefix6),
+		pskMaster:    networkPSK,
+		adminToken:   adminToken,
+		trustProxy:   *trustProxy,
+		accessLog:    newAccessLogSink(accessMode, *accessLogSize),
 	}
 
 	switch {
@@ -298,6 +326,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("POST /api/setup-keys/{id}/revoke", srv.requireAdmin(srv.handleRevokeSetupKey))
 	mux.HandleFunc("GET /api/link-stats", srv.requireAdmin(srv.handleListLinkStats))
 	mux.HandleFunc("GET /api/flows", srv.requireAdmin(srv.handleListFlows))
+	mux.HandleFunc("GET /api/access-log", srv.requireAdmin(srv.handleListAccessLog))
 	mux.HandleFunc("GET /api/acl", srv.requireAdmin(srv.handleListACL))
 	mux.HandleFunc("POST /api/acl", srv.requireAdmin(srv.handleCreateACL))
 	mux.HandleFunc("POST /api/acl/{id}/delete", srv.requireAdmin(srv.handleDeleteACL))
@@ -319,7 +348,7 @@ func runServe(args []string) error {
 			log.Printf("WARNING: serving plain HTTP on %s with no TLS. Setup keys, the admin token, and peer tokens cross the wire in cleartext. Use only on a trusted network, or put TLS in front (Traefik) and set --trust-proxy.", *listen)
 		}
 
-		log.Printf("control plane on http://%s (network %s, db %s) — plain HTTP; terminate TLS upstream (e.g. Traefik) or use for dev only", *listen, srv.networkCIDR, *dbPath)
+		log.Printf("control plane on http://%s (network %s%s, db %s) — plain HTTP; terminate TLS upstream (e.g. Traefik) or use for dev only", *listen, srv.networkCIDR, srv.network6LogSuffix(), *dbPath)
 		log.Printf("web UI at http://%s/ (token in %s)", *listen, *adminTokenFile)
 
 		if err := http.ListenAndServe(*listen, handler); err != nil {
@@ -338,7 +367,7 @@ func runServe(args []string) error {
 		return err
 	}
 
-	log.Printf("[server] control plane on https://%s (network %s, db %s)", *listen, srv.networkCIDR, *dbPath)
+	log.Printf("[server] control plane on https://%s (network %s%s, db %s)", *listen, srv.networkCIDR, srv.network6LogSuffix(), *dbPath)
 	log.Printf("[server] web UI at https://%s/ (token in %s)", *listen, *adminTokenFile)
 	log.Printf("[server] agents should pin the certificate: --server-ca %s", *tlsCert)
 	if srv.relay == nil {
@@ -352,6 +381,22 @@ func runServe(args []string) error {
 	}
 
 	return nil
+}
+
+func network6CIDR(prefix netip.Prefix) string {
+	if !prefix.IsValid() {
+		return ""
+	}
+
+	return prefix.String()
+}
+
+func (s *server) network6LogSuffix() string {
+	if s.network6CIDR == "" {
+		return ""
+	}
+
+	return ", " + s.network6CIDR
 }
 
 func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
@@ -478,11 +523,20 @@ func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([
 			PresharedKey:                &pairPSK,
 			Endpoint:                    endpointHint(self, o),
 			PersistentKeepaliveInterval: &keepalive,
-			AllowedIPs:                  []string{o.AssignedIP + "/32"},
+			AllowedIPs:                  allowedIPsForPeer(o),
 		})
 	}
 
 	return peers, nil
+}
+
+func allowedIPsForPeer(p store.PeerRow) []string {
+	allowed := []string{p.AssignedIP + "/32"}
+	if p.AssignedIP6 != "" {
+		allowed = append(allowed, p.AssignedIP6+"/128")
+	}
+
+	return allowed
 }
 
 func (s *server) buildResponse(res *store.EnrollResult) (proto.EnrollResponse, error) {
@@ -492,11 +546,13 @@ func (s *server) buildResponse(res *store.EnrollResult) (proto.EnrollResponse, e
 	}
 
 	return proto.EnrollResponse{
-		PeerID:      int(res.Peer.ID),
-		AssignedIP:  res.Peer.AssignedIP,
-		NetworkCIDR: s.networkCIDR,
-		Peers:       peers,
-		AuthToken:   res.AuthToken,
+		PeerID:       int(res.Peer.ID),
+		AssignedIP:   res.Peer.AssignedIP,
+		AssignedIP6:  res.Peer.AssignedIP6,
+		NetworkCIDR:  s.networkCIDR,
+		NetworkCIDR6: s.network6CIDR,
+		Peers:        peers,
+		AuthToken:    res.AuthToken,
 	}, nil
 }
 

@@ -41,12 +41,21 @@ type Store struct {
 	// issue. Agents re-enroll (rotating the token) at startup and on
 	// expiry. Zero means no expiry. Set once at startup.
 	TokenTTL time.Duration
+
+	// Network6 is the optional IPv6 ULA overlay. The zero value
+	// (invalid prefix) means IPv6 is disabled and peers get only an
+	// IPv4 overlay address. Set once at startup, like DefaultAllow.
+	Network6 netip.Prefix
 }
 
+// v6Enabled reports whether the mesh hands out IPv6 overlay addresses.
+func (s *Store) v6Enabled() bool { return s.Network6.IsValid() }
+
 type PeerRow struct {
-	ID         int64
-	PublicKey  string
-	AssignedIP string
+	ID          int64
+	PublicKey   string
+	AssignedIP  string
+	AssignedIP6 string // "" when the IPv6 overlay is disabled
 
 	// Endpoint hint material, in preference order.
 	PublicEndpoint string // STUN-discovered ip:port, "" if unknown
@@ -118,14 +127,27 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 5
+const schemaVersion = 6
 
 var migrations = map[int]string{
 	2: migrationV2,
 	3: migrationV3,
 	4: migrationV4,
 	5: migrationV5,
+	6: migrationV6,
 }
+
+// migrationV6 adds the optional IPv6 overlay address. It is NULL for
+// peers on an IPv4-only mesh and backfilled on the next re-enroll once
+// the operator turns on --network6. A partial unique index enforces
+// one v6 address per peer without constraining the NULLs (SQLite can't
+// add a UNIQUE column via ALTER TABLE, so the index is separate).
+const migrationV6 = `
+ALTER TABLE peers ADD COLUMN assigned_ip6 TEXT;
+
+CREATE UNIQUE INDEX idx_peers_assigned_ip6
+    ON peers(assigned_ip6) WHERE assigned_ip6 IS NOT NULL;
+`
 
 // migrationV5 adds a durable audit log for security-relevant events
 // and records when each peer's auth token was issued, so tokens can
@@ -317,11 +339,11 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 	)
 
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, assigned_ip, setup_key_id,
+		`SELECT id, assigned_ip, COALESCE(assigned_ip6, ''), setup_key_id,
 		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0)
 		 FROM peers WHERE public_key = ?`,
 		publicKey,
-	).Scan(&existing.ID, &existing.AssignedIP, &enrolledKeyID,
+	).Scan(&existing.ID, &existing.AssignedIP, &existing.AssignedIP6, &enrolledKeyID,
 		&existing.PublicEndpoint, &existing.ObservedIP, &existing.ListenPort)
 
 	switch {
@@ -369,6 +391,14 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 		return nil, err
 	}
 
+	var ip6 string
+	if s.v6Enabled() {
+		ip6, err = s.allocateIP6(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var host sql.NullString
 	if hostname != "" {
 		host = sql.NullString{String: hostname, Valid: true}
@@ -385,9 +415,9 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 	}
 
 	insert, err := tx.ExecContext(ctx,
-		`INSERT INTO peers (public_key, assigned_ip, hostname, listen_port, setup_key_id, auth_token_hash, auth_token_issued_at, observed_ip, public_endpoint)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		publicKey, ip, host, port, keyID, tokenHash, now,
+		`INSERT INTO peers (public_key, assigned_ip, assigned_ip6, hostname, listen_port, setup_key_id, auth_token_hash, auth_token_issued_at, observed_ip, public_endpoint)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		publicKey, ip, nullable(ip6), host, port, keyID, tokenHash, now,
 		nullable(observedIP), nullable(publicEndpoint),
 	)
 	if err != nil {
@@ -413,6 +443,7 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 			ID:             peerID,
 			PublicKey:      publicKey,
 			AssignedIP:     ip,
+			AssignedIP6:    ip6,
 			PublicEndpoint: publicEndpoint,
 			ObservedIP:     observedIP,
 			ListenPort:     listenPort,
@@ -453,6 +484,19 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 		return nil, err
 	}
 
+	// Backfill an IPv6 overlay address if the operator turned on the v6
+	// overlay after this peer first enrolled. Agents re-enroll at every
+	// startup, so existing peers pick up a v6 address on their next
+	// launch without any explicit migration sweep. "" leaves the column
+	// untouched via COALESCE below.
+	var ip6Backfill string
+	if s.v6Enabled() && existing.AssignedIP6 == "" {
+		ip6Backfill, err = s.allocateIP6(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Refresh endpoint material along with the token: agents may come
 	// back with a different listen port or address, and stale values
 	// here become bad hints handed to every other peer.
@@ -464,11 +508,12 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE peers SET auth_token_hash = ?,
 		        auth_token_issued_at = ?,
+		        assigned_ip6 = COALESCE(?, assigned_ip6),
 		        observed_ip = COALESCE(?, observed_ip),
 		        public_endpoint = COALESCE(?, public_endpoint),
 		        listen_port = COALESCE(?, listen_port)
 		 WHERE id = ?`,
-		tokenHash, time.Now().UTC().Format(timeFormat),
+		tokenHash, time.Now().UTC().Format(timeFormat), nullable(ip6Backfill),
 		nullable(observedIP), nullable(publicEndpoint), port, existing.ID,
 	); err != nil {
 		return nil, fmt.Errorf("rotate auth token: %w", err)
@@ -499,19 +544,39 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 		existing.ListenPort = listenPort
 	}
 
+	if ip6Backfill != "" {
+		existing.AssignedIP6 = ip6Backfill
+	}
+
 	return &EnrollResult{Peer: existing, Others: others, Created: false, AuthToken: token}, nil
 }
 
-// allocateIP returns the lowest free host address in the overlay
-// network. Revoked peers keep their rows, so their IPs stay reserved;
-// an IP is only ever reused after a hard DELETE. That is deliberate:
-// cryptokey routing means a reused IP cannot impersonate the old
-// peer, but holding IPs of revoked peers avoids confusing any state
-// (monitoring, logs, ACLs later) that still references them.
+// allocateIP returns the lowest free IPv4 host address in the overlay.
 func (s *Store) allocateIP(ctx context.Context, tx *sql.Tx) (string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT assigned_ip FROM peers`)
+	return allocateAddr(ctx, tx, s.network, "assigned_ip")
+}
+
+// allocateIP6 returns the lowest free IPv6 overlay host address. Only
+// called when the v6 overlay is enabled.
+func (s *Store) allocateIP6(ctx context.Context, tx *sql.Tx) (string, error) {
+	return allocateAddr(ctx, tx, s.Network6, "assigned_ip6")
+}
+
+// allocateAddr returns the lowest free host address in prefix, treating
+// every non-NULL value already in column as taken. Revoked peers keep
+// their rows, so their addresses stay reserved; an address is only ever
+// reused after a hard DELETE. That is deliberate: cryptokey routing
+// means a reused address cannot impersonate the old peer, but holding
+// addresses of revoked peers avoids confusing state (monitoring, logs,
+// ACLs) that still references them.
+//
+// column is one of two compile-time constants, never user input. The
+// walk is O(N) in the number of peers regardless of prefix size — it
+// returns the first gap, so a sparse /64 never iterates its full range.
+func allocateAddr(ctx context.Context, tx *sql.Tx, prefix netip.Prefix, column string) (string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT `+column+` FROM peers WHERE `+column+` IS NOT NULL`)
 	if err != nil {
-		return "", fmt.Errorf("list assigned ips: %w", err)
+		return "", fmt.Errorf("list %s: %w", column, err)
 	}
 	defer rows.Close()
 
@@ -520,29 +585,29 @@ func (s *Store) allocateIP(ctx context.Context, tx *sql.Tx) (string, error) {
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
-			return "", fmt.Errorf("scan assigned ip: %w", err)
+			return "", fmt.Errorf("scan %s: %w", column, err)
 		}
 
 		addr, err := netip.ParseAddr(raw)
 		if err != nil {
-			return "", fmt.Errorf("parse assigned ip %q from database: %w", raw, err)
+			return "", fmt.Errorf("parse %s %q from database: %w", column, raw, err)
 		}
 
 		used[addr] = true
 	}
 
 	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("list assigned ips: %w", err)
+		return "", fmt.Errorf("list %s: %w", column, err)
 	}
 
 	// Skip the network address itself; start at the first host.
-	for ip := s.network.Addr().Next(); s.network.Contains(ip); ip = ip.Next() {
+	for ip := prefix.Addr().Next(); prefix.Contains(ip); ip = ip.Next() {
 		if !used[ip] {
 			return ip.String(), nil
 		}
 	}
 
-	return "", fmt.Errorf("network %s has no free addresses", s.network)
+	return "", fmt.Errorf("overlay network %s has no free addresses", prefix)
 }
 
 // querier lets peer-list queries run inside or outside a transaction.
@@ -559,7 +624,7 @@ type querier interface {
 // learns the other's key, overlay IP, or endpoint.
 func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool) ([]PeerRow, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT p.id, p.public_key, p.assigned_ip,
+		`SELECT p.id, p.public_key, p.assigned_ip, COALESCE(p.assigned_ip6, ''),
 		        COALESCE(p.public_endpoint, ''), COALESCE(p.observed_ip, ''), COALESCE(p.listen_port, 0)
 		 FROM peers p
 		 WHERE p.revoked_at IS NULL AND p.id != ?
@@ -580,7 +645,7 @@ func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool
 
 	for rows.Next() {
 		var p PeerRow
-		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP,
+		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6,
 			&p.PublicEndpoint, &p.ObservedIP, &p.ListenPort); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
@@ -601,10 +666,10 @@ func (s *Store) PeersForID(ctx context.Context, id int64) (PeerRow, []PeerRow, e
 	self := PeerRow{ID: id}
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key, assigned_ip,
+		`SELECT public_key, assigned_ip, COALESCE(assigned_ip6, ''),
 		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0)
 		 FROM peers WHERE id = ?`, id,
-	).Scan(&self.PublicKey, &self.AssignedIP,
+	).Scan(&self.PublicKey, &self.AssignedIP, &self.AssignedIP6,
 		&self.PublicEndpoint, &self.ObservedIP, &self.ListenPort)
 	if err != nil {
 		return PeerRow{}, nil, fmt.Errorf("look up peer %d: %w", id, err)

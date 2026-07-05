@@ -129,12 +129,12 @@ func protocolName(p int) string {
 // the reporter means something reached in to it (ingress). Ingress and
 // egress ports are labeled from the reporter's own vantage: the port
 // on its side that traffic arrives at vs. leaves from.
-func flowDirection(peerIP, srcIP string, srcPort int, dstIP string, dstPort int) (dir string, ingressPort, egressPort int) {
-	switch peerIP {
-	case srcIP:
+func flowDirection(peerIP, peerIP6, srcIP string, srcPort int, dstIP string, dstPort int) (dir string, ingressPort, egressPort int) {
+	switch {
+	case srcIP == peerIP || (peerIP6 != "" && srcIP == peerIP6):
 		// Reporter initiated: it sends from srcPort, replies arrive there.
 		return "egress", srcPort, dstPort
-	case dstIP:
+	case dstIP == peerIP || (peerIP6 != "" && dstIP == peerIP6):
 		// Reporter received: traffic arrives on dstPort, it replies from dstPort.
 		return "ingress", dstPort, srcPort
 	default:
@@ -180,7 +180,7 @@ func (s *server) handleListFlows(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]flowJSON, 0, len(flows))
 	for _, f := range flows {
-		dir, ingressPort, egressPort := flowDirection(f.PeerIP, f.SrcIP, f.SrcPort, f.DstIP, f.DstPort)
+		dir, ingressPort, egressPort := flowDirection(f.PeerIP, f.PeerIP6, f.SrcIP, f.SrcPort, f.DstIP, f.DstPort)
 
 		out = append(out, flowJSON{
 			ID:           f.ID,

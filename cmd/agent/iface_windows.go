@@ -88,6 +88,32 @@ func assignIPAddress(ifaceName, cidr string) error {
 		return fmt.Errorf("parse CIDR %q: %w", cidr, err)
 	}
 
+	if ip.To4() == nil {
+		ones, _ := ipnet.Mask.Size()
+		out, err := exec.Command(
+			"netsh",
+			"interface",
+			"ipv6",
+			"add",
+			"address",
+			"interface="+ifaceName,
+			fmt.Sprintf("%s/%d", ip.String(), ones),
+		).CombinedOutput()
+
+		if err != nil {
+			return fmt.Errorf(
+				"assign address %q via netsh: %w: %s",
+				cidr,
+				err,
+				out,
+			)
+		}
+
+		fmt.Printf("Assigned %s to %s\n", cidr, ifaceName)
+
+		return nil
+	}
+
 	mask := net.IP(ipnet.Mask).String()
 
 	out, err := exec.Command(

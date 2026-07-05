@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import type { AclResponse, AuditRow, Flow, LinkStat, Peer, SetupKey } from "./types";
+import type {
+  AccessLogRow,
+  AclResponse,
+  AuditRow,
+  Flow,
+  LinkStat,
+  Peer,
+  SetupKey,
+} from "./types";
 
 function formatTime(iso?: string): string {
   return iso ? iso.replace("T", " ").replace(/\.\d+Z$/, "Z") : "";
@@ -93,7 +101,7 @@ function endpointOf(p: Peer): string {
   return "";
 }
 
-const TABS = ["peers", "traffic", "access", "audit"] as const;
+const TABS = ["peers", "traffic", "access", "audit", "admin"] as const;
 type Tab = (typeof TABS)[number];
 
 // flowMatches / auditMatches do free-text search across the fields an
@@ -115,6 +123,17 @@ function auditMatches(a: AuditRow, q: string): boolean {
   const hay = [
     a.event, a.detail, a.remote_ip, a.overlay_ip, a.peer_hostname,
     a.forwarded_for, a.method, a.path, a.status,
+  ]
+    .join(" ")
+    .toLowerCase();
+  return hay.includes(q.toLowerCase());
+}
+
+function accessMatches(a: AccessLogRow, q: string): boolean {
+  if (!q) return true;
+  const hay = [
+    a.method, a.path, a.status, a.remote_ip, a.forwarded_for, a.overlay_ip,
+    a.peer_id, a.user_agent, Object.entries(a.headers ?? {}).flat().join(" "),
   ]
     .join(" ")
     .toLowerCase();
@@ -255,6 +274,32 @@ function AuditEvent({ a }: { a: AuditRow }) {
   );
 }
 
+function AccessEvent({ a }: { a: AccessLogRow }) {
+  return (
+    <div className="activity-row">
+      <div className="event-cell">
+        <span className={`dot ${a.status >= 400 ? "bad" : "info"}`} />
+        <div>
+          <div className="event-time">{formatTime(a.time)}</div>
+          <div className="event-text">
+            <strong>{a.method}</strong> {a.path}
+            {a.user_agent ? <span className="muted"> — {a.user_agent}</span> : null}
+          </div>
+        </div>
+      </div>
+      <Endpoint name={a.remote_ip || "—"} ip={a.forwarded_for || undefined} />
+      <div className="pills">
+        <span className="pill">{a.duration_ms}ms</span>
+        {a.peer_id ? <span className="pill">peer {a.peer_id}</span> : null}
+      </div>
+      <Endpoint name={a.overlay_ip || "—"} />
+      <div className="traffic">
+        <span className={a.status >= 400 ? "up" : "down"}>{a.status}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [token, setToken] = useState(
     () => sessionStorage.getItem("wgmesh-token") ?? "",
@@ -267,13 +312,16 @@ export default function App() {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [acl, setAcl] = useState<AclResponse>({ default_policy: "allow", rules: [] });
   const [audit, setAudit] = useState<AuditRow[]>([]);
+  const [access, setAccess] = useState<AccessLogRow[]>([]);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
 
   // ipName resolves an overlay IP to a peer hostname (both sides of a
   // flow get named, like NetBird), falling back to the raw IP.
   const ipName = useCallback(
-    (ip: string) => peers.find((p) => p.assigned_ip === ip)?.hostname || ip,
+    (ip: string) =>
+      peers.find((p) => p.assigned_ip === ip || p.assigned_ip6 === ip)
+        ?.hostname || ip,
     [peers],
   );
   const [maxUses, setMaxUses] = useState(0);
@@ -285,13 +333,14 @@ export default function App() {
     if (!token) return;
     setError("");
     try {
-      const [p, k, l, f, a, au] = await Promise.all([
+      const [p, k, l, f, a, au, al] = await Promise.all([
         api<Peer[]>("/api/peers", token),
         api<SetupKey[]>("/api/setup-keys", token),
         api<LinkStat[]>("/api/link-stats", token),
         api<Flow[]>("/api/flows?limit=100", token),
         api<AclResponse>("/api/acl", token),
         api<AuditRow[]>("/api/audit?limit=200", token),
+        api<AccessLogRow[]>("/api/access-log?limit=200", token),
       ]);
       setPeers(p);
       setKeys(k);
@@ -299,6 +348,7 @@ export default function App() {
       setFlows(f);
       setAcl(a);
       setAudit(au);
+      setAccess(al);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -424,7 +474,12 @@ export default function App() {
                       <PeerBadge peer={p} />
                     </td>
                     <td>{p.hostname ?? ""}</td>
-                    <td>{p.assigned_ip}</td>
+                    <td>
+                      {p.assigned_ip}
+                      {p.assigned_ip6 && (
+                        <div className="muted">{p.assigned_ip6}</div>
+                      )}
+                    </td>
                     <td className="mono">
                       {p.public_key} <CopyButton text={p.public_key} />
                     </td>
@@ -577,8 +632,8 @@ export default function App() {
           </div>
           <p className="sub">
             security events — enrollment, revocation, ACL and key changes, relay
-            sessions, and auth failures. Full request tracing (every request with
-            headers and IPs) is in the server's stdout access log.
+            sessions, and auth failures. Full request tracing is available in the
+            Access tab when the server runs with the default in-memory access log.
           </p>
           <div className="panel tablewrap">
             <div className="activity">
@@ -605,6 +660,42 @@ export default function App() {
       )}
 
       {tab === "access" && (
+        <>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <h2 style={{ margin: 0 }}>Request log</h2>
+            <input
+              type="search"
+              placeholder="filter by method, path, ip, status…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              style={{ width: 320 }}
+            />
+          </div>
+          <div className="panel tablewrap">
+            <div className="activity">
+              <div className="activity-head">
+                <span>request</span>
+                <span>source</span>
+                <span>trace</span>
+                <span>peer</span>
+                <span className="right">status</span>
+              </div>
+              {(() => {
+                const shown = access.filter((a) => accessMatches(a, filter));
+                if (shown.length === 0)
+                  return (
+                    <div className="activity-row muted">
+                      {access.length ? "no matching requests" : "no request log entries"}
+                    </div>
+                  );
+                return shown.map((a, i) => <AccessEvent key={`${a.time}-${i}`} a={a} />);
+              })()}
+            </div>
+          </div>
+        </>
+      )}
+
+      {tab === "admin" && (
         <>
           <h2>ACL rules</h2>
           <div className="panel">

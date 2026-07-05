@@ -67,6 +67,7 @@ type peerJSON struct {
 	ID             int64  `json:"id"`
 	PublicKey      string `json:"public_key"`
 	AssignedIP     string `json:"assigned_ip"`
+	AssignedIP6    string `json:"assigned_ip6,omitempty"`
 	Hostname       string `json:"hostname,omitempty"`
 	ListenPort     int    `json:"listen_port,omitempty"`
 	ObservedIP     string `json:"observed_ip,omitempty"`

@@ -65,6 +65,7 @@ type telemetryReporter struct {
 	authToken string
 	iface     string
 	network   netip.Prefix
+	network6  netip.Prefix
 	interval  time.Duration
 
 	ct flowDumper // nil when the platform has no flow source
@@ -100,6 +101,7 @@ func newTelemetryReporter(
 	wg *wgctrl.Client,
 	serverURL, authToken, serverCA, iface string,
 	network netip.Prefix,
+	network6 netip.Prefix,
 	interval time.Duration,
 	transport relayTransport,
 ) (*telemetryReporter, error) {
@@ -115,6 +117,7 @@ func newTelemetryReporter(
 		authToken:       authToken,
 		iface:           iface,
 		network:         network,
+		network6:        network6,
 		interval:        interval,
 		relayTransport:  transport,
 		prevLink:        make(map[wgtypes.Key]linkCounters),
@@ -237,7 +240,7 @@ func (t *telemetryReporter) collectFlows() {
 	for _, f := range flows {
 		// Overlay traffic only: everything else on the box is none of
 		// the mesh's business.
-		if !t.network.Contains(f.src) && !t.network.Contains(f.dst) {
+		if !t.overlayContains(f.src) && !t.overlayContains(f.dst) {
 			continue
 		}
 
@@ -297,6 +300,10 @@ func (t *telemetryReporter) collectFlows() {
 			delete(t.prevFlow, key)
 		}
 	}
+}
+
+func (t *telemetryReporter) overlayContains(addr netip.Addr) bool {
+	return t.network.Contains(addr) || (t.network6.IsValid() && t.network6.Contains(addr))
 }
 
 // counterDelta handles both new flows (count everything) and conntrack

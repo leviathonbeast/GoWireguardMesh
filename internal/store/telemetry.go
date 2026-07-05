@@ -192,7 +192,8 @@ type FlowRow struct {
 	ID           int64
 	PeerID       int64
 	PeerHostname string
-	PeerIP       string // reporter's overlay IP, for direction labeling
+	PeerIP       string // reporter's IPv4 overlay IP, for direction labeling
+	PeerIP6      string // reporter's IPv6 overlay IP, "" when disabled
 	Protocol     int
 	SrcIP        string
 	SrcPort      int
@@ -208,7 +209,7 @@ type FlowRow struct {
 // RecentFlows returns the newest flow rows, most recent first.
 func (s *Store) RecentFlows(ctx context.Context, limit int) ([]FlowRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT f.id, f.peer_id, COALESCE(p.hostname, ''), p.assigned_ip, f.protocol,
+		`SELECT f.id, f.peer_id, COALESCE(p.hostname, ''), p.assigned_ip, COALESCE(p.assigned_ip6, ''), f.protocol,
 		        f.src_ip, f.src_port, f.dst_ip, f.dst_port,
 		        f.tx_bytes, f.rx_bytes, f.tx_packets, f.rx_packets, f.reported_at
 		 FROM flows f
@@ -226,7 +227,7 @@ func (s *Store) RecentFlows(ctx context.Context, limit int) ([]FlowRow, error) {
 
 	for rows.Next() {
 		var f FlowRow
-		if err := rows.Scan(&f.ID, &f.PeerID, &f.PeerHostname, &f.PeerIP, &f.Protocol,
+		if err := rows.Scan(&f.ID, &f.PeerID, &f.PeerHostname, &f.PeerIP, &f.PeerIP6, &f.Protocol,
 			&f.SrcIP, &f.SrcPort, &f.DstIP, &f.DstPort,
 			&f.TxBytes, &f.RxBytes, &f.TxPackets, &f.RxPackets, &f.ReportedAt); err != nil {
 			return nil, fmt.Errorf("scan flow: %w", err)
