@@ -14,7 +14,7 @@ import (
 	"flag"
 	"fmt"
 	iofs "io/fs"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -59,11 +59,20 @@ type server struct {
 // plane. Behind a TLS-terminating proxy (Traefik) every request comes
 // from the proxy, so --trust-proxy switches to X-Forwarded-For —
 // trusting that header from direct clients would let them spoof it.
+//
+// The RIGHTMOST X-Forwarded-For entry is used, never the first: a
+// proxy APPENDS the address it observed to whatever the client sent,
+// so the last entry is the only one the trusted proxy vouches for.
+// Taking the first would let any client choose its own logged and
+// rate-limited identity by sending a forged X-Forwarded-For. This
+// assumes exactly one trusted proxy in front (the supported
+// topology); the full header chain is still recorded in the access
+// and audit logs for forensics.
 func (s *server) clientIP(r *http.Request) string {
 	if s.trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first, _, _ := strings.Cut(xff, ",")
-			return strings.TrimSpace(first)
+			parts := strings.Split(xff, ",")
+			return strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 
@@ -150,8 +159,13 @@ func runServe(args []string) error {
 	rateBurst := fs.Float64("rate-burst", 40, "per-source burst allowance on public endpoints")
 	accessLogRaw := fs.String("access-log", "memory", "request access log mode: memory, stdout, or off")
 	accessLogSize := fs.Int("access-log-size", 1000, "request access log ring size when --access-log=memory")
+	logLevel := fs.String("log-level", "info", "minimum log level: debug, info, warn, or error")
 
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if err := setupLogging(*logLevel); err != nil {
 		return err
 	}
 
@@ -160,7 +174,7 @@ func runServe(args []string) error {
 		// it when a proxy terminates in front. Binding non-loopback
 		// with trust-proxy means the proxy MUST be the only reachable
 		// front door — warn loudly so a misconfig is visible.
-		log.Printf("WARNING: --trust-proxy is set while listening on %s (not loopback). Ensure a reverse proxy is the ONLY thing that can reach this port, or clients can spoof X-Forwarded-For.", *listen)
+		slog.Warn("--trust-proxy is set on a non-loopback listener: ensure a reverse proxy is the ONLY thing that can reach this port, or clients can spoof X-Forwarded-For", "listen", *listen)
 	}
 
 	accessMode, err := parseAccessLogMode(*accessLogRaw)
@@ -215,16 +229,16 @@ func runServe(args []string) error {
 			if port, err := strconv.Atoi(portStr); err == nil {
 				fw, ferr := firewall.OpenWithReconcile("wgmesh-server", *dbPath+".server.fw")
 				if ferr != nil {
-					log.Printf("firewall: %v; open tcp %d yourself if needed", ferr, port)
+					slog.Warn("firewall unavailable; open the API port yourself if needed", "error", ferr, "tcp", port)
 				} else if err := fw.AllowTCP(port); err != nil {
 					// Common when running unprivileged; the API port
 					// then needs opening by hand.
-					log.Printf("firewall (%s): %v", fw.Backend(), err)
+					slog.Warn("firewall rule failed", "backend", fw.Backend(), "error", err)
 				} else {
-					log.Printf("firewall (%s): opened tcp %d", fw.Backend(), port)
+					slog.Info("firewall opened api port", "backend", fw.Backend(), "tcp", port)
 					defer func() {
 						if err := fw.Close(); err != nil {
-							log.Printf("firewall cleanup: %v", err)
+							slog.Warn("firewall cleanup failed", "error", err)
 						}
 					}()
 				}
@@ -268,20 +282,20 @@ func runServe(args []string) error {
 		if *manageFirewall {
 			fw, ferr := firewall.OpenWithReconcile("wgmesh-server-relay", *dbPath+".relay.fw")
 			if ferr != nil {
-				log.Printf("firewall: %v; open udp %d-%d yourself if needed", ferr, *relayPortMin, *relayPortMax)
+				slog.Warn("firewall unavailable; open the relay range yourself if needed", "error", ferr, "udp_min", *relayPortMin, "udp_max", *relayPortMax)
 			} else if err := fw.AllowUDPRange(*relayPortMin, *relayPortMax); err != nil {
-				log.Printf("firewall (%s): %v", fw.Backend(), err)
+				slog.Warn("firewall rule failed", "backend", fw.Backend(), "error", err)
 			} else {
-				log.Printf("firewall (%s): opened udp %d-%d", fw.Backend(), *relayPortMin, *relayPortMax)
+				slog.Info("firewall opened relay range", "backend", fw.Backend(), "udp_min", *relayPortMin, "udp_max", *relayPortMax)
 				defer func() {
 					if err := fw.Close(); err != nil {
-						log.Printf("firewall cleanup: %v", err)
+						slog.Warn("firewall cleanup failed", "error", err)
 					}
 				}()
 			}
 		}
 
-		log.Printf("embedded relay on udp %d-%d, agents dial %s", *relayPortMin, *relayPortMax, *relayHost)
+		slog.Info("embedded relay enabled", "udp_min", *relayPortMin, "udp_max", *relayPortMax, "relay_host", *relayHost)
 
 	case *relayHost != "":
 		rc, err := newRelayClient(*relayControl, *relaySecretFile)
@@ -292,7 +306,7 @@ func runServe(args []string) error {
 		srv.relay = rc
 		srv.relayHost = *relayHost
 
-		log.Printf("standalone relay fallback via %s (control %s)", *relayHost, *relayControl)
+		slog.Info("standalone relay fallback enabled", "relay_host", *relayHost, "control", *relayControl)
 	}
 
 	ui, err := iofs.Sub(gowireguard.WebUI, "web/dist")
@@ -335,9 +349,10 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /api/audit", srv.requireAdmin(srv.handleListAudit))
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 
-	// Every request gets a structured access-log line with the
-	// original IP, proxy chain, overlay IP, and redacted headers.
-	handler := srv.logRequests(mux)
+	// Every request gets security headers and a structured access-log
+	// line with the original IP, proxy chain, overlay IP, and redacted
+	// headers.
+	handler := srv.logRequests(securityHeaders(mux))
 
 	pruneCtx, cancelPrune := context.WithCancel(context.Background())
 	defer cancelPrune()
@@ -345,19 +360,22 @@ func runServe(args []string) error {
 	go srv.pruneFlowsLoop(pruneCtx, *flowRetention)
 	go srv.pruneAuditLoop(pruneCtx, *auditRetention)
 
+	if srv.relay == nil {
+		slog.Info("relay fallback disabled; direct UDP connectivity between peers is required")
+	}
+
+	httpSrv := newHTTPServer(*listen, handler)
+
 	if *noTLS {
 		if !isLoopback(*listen) && !*trustProxy {
-			log.Printf("WARNING: serving plain HTTP on %s with no TLS. Setup keys, the admin token, and peer tokens cross the wire in cleartext. Use only on a trusted network, or put TLS in front (Traefik) and set --trust-proxy.", *listen)
+			slog.Warn("serving plain HTTP with no TLS: setup keys, the admin token, and peer tokens cross the wire in cleartext; use only on a trusted network, or put TLS in front (Traefik) and set --trust-proxy", "listen", *listen)
 		}
 
-		log.Printf("control plane on http://%s (network %s%s, db %s) — plain HTTP; terminate TLS upstream (e.g. Traefik) or use for dev only", *listen, srv.networkCIDR, srv.network6LogSuffix(), *dbPath)
-		log.Printf("web UI at http://%s/ (token in %s)", *listen, *adminTokenFile)
+		slog.Info("control plane up (plain HTTP; terminate TLS upstream or use for dev only)",
+			"url", "http://"+*listen, "network", srv.networkCIDR+srv.network6LogSuffix(), "db", *dbPath)
+		slog.Info("web ui ready", "url", "http://"+*listen+"/", "token_file", *adminTokenFile)
 
-		if err := http.ListenAndServe(*listen, handler); err != nil {
-			return fmt.Errorf("http server: %w", err)
-		}
-
-		return nil
+		return runHTTPServer(httpSrv, false, "", "")
 	}
 
 	hosts := strings.Split(*tlsHosts, ",")
@@ -369,20 +387,12 @@ func runServe(args []string) error {
 		return err
 	}
 
-	log.Printf("[server] control plane on https://%s (network %s%s, db %s)", *listen, srv.networkCIDR, srv.network6LogSuffix(), *dbPath)
-	log.Printf("[server] web UI at https://%s/ (token in %s)", *listen, *adminTokenFile)
-	log.Printf("[server] agents should pin the certificate: --server-ca %s", *tlsCert)
-	if srv.relay == nil {
-		log.Printf("[server] relay fallback disabled; direct UDP connectivity between peers is required")
-	} else {
-		log.Printf("[server] relay fallback enabled for NATed peers")
-	}
+	slog.Info("control plane up",
+		"url", "https://"+*listen, "network", srv.networkCIDR+srv.network6LogSuffix(), "db", *dbPath)
+	slog.Info("web ui ready", "url", "https://"+*listen+"/", "token_file", *adminTokenFile)
+	slog.Info("agents should pin the certificate", "server_ca", *tlsCert)
 
-	if err := http.ListenAndServeTLS(*listen, *tlsCert, *tlsKey, handler); err != nil {
-		return fmt.Errorf("https server: %w", err)
-	}
-
-	return nil
+	return runHTTPServer(httpSrv, true, *tlsCert, *tlsKey)
 }
 
 func network6CIDR(prefix netip.Prefix) string {
@@ -447,8 +457,9 @@ func (s *server) setNetworkConfig(cfg store.NetworkConfig) {
 func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	var req proto.EnrollRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	// 64KB is generous for a key + hostname + endpoint; /enroll is
+	// public, so an unbounded decode here would be a memory-DoS vector.
+	if !decodeJSON(w, r, 64<<10, &req) {
 		return
 	}
 
@@ -474,12 +485,12 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		// Uniform 401: invalid, expired, revoked, and exhausted are
 		// indistinguishable on the wire. The real reason goes to the
 		// server log and audit trail only.
-		log.Printf("[server] enroll rejected for %s (listen_port=%d): %v", req.PublicKey, req.ListenPort, err)
+		slog.Warn("enroll rejected", "public_key", req.PublicKey, "listen_port", req.ListenPort, "error", err)
 		s.audit(r, "enroll_rejected", http.StatusUnauthorized, err.Error())
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	case err != nil:
-		log.Printf("[server] enroll failed for %s (listen_port=%d): %v", req.PublicKey, req.ListenPort, err)
+		slog.Error("enroll failed", "public_key", req.PublicKey, "listen_port", req.ListenPort, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -487,16 +498,16 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	enrichRequest(r, res.Peer.ID, res.Peer.AssignedIP)
 
 	if res.Created {
-		log.Printf("[server] enrolled peer %d (%s) at %s (listen_port=%d, endpoint=%s)", res.Peer.ID, req.PublicKey, res.Peer.AssignedIP, req.ListenPort, req.PublicEndpoint)
+		slog.Info("enrolled peer", "peer_id", res.Peer.ID, "public_key", req.PublicKey, "assigned_ip", res.Peer.AssignedIP, "listen_port", req.ListenPort, "endpoint", req.PublicEndpoint)
 		s.audit(r, "enroll", http.StatusOK, fmt.Sprintf("new peer %s (%s)", res.Peer.AssignedIP, req.Hostname))
 	} else {
-		log.Printf("[server] idempotent re-enroll of peer %d (%s) (listen_port=%d, endpoint=%s)", res.Peer.ID, req.PublicKey, req.ListenPort, req.PublicEndpoint)
+		slog.Info("idempotent re-enroll", "peer_id", res.Peer.ID, "public_key", req.PublicKey, "listen_port", req.ListenPort, "endpoint", req.PublicEndpoint)
 		s.audit(r, "re_enroll", http.StatusOK, fmt.Sprintf("peer %s (%s)", res.Peer.AssignedIP, req.Hostname))
 	}
 
 	out, err := s.buildResponse(res)
 	if err != nil {
-		log.Printf("build enroll response for %s: %v", req.PublicKey, err)
+		slog.Error("build enroll response failed", "public_key", req.PublicKey, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 
 		return
@@ -637,7 +648,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("write response: %v", err)
+		slog.Debug("write response failed", "error", err)
 	}
 }
 

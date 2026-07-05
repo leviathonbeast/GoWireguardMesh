@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -150,7 +150,7 @@ func newTelemetryReporter(
 
 	dumper, err := newFlowDumper()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: %v; flow logs disabled\n", err)
+		slog.Warn("flow logs disabled", "error", err)
 		return t, nil
 	}
 
@@ -196,7 +196,7 @@ func (t *telemetryReporter) collect() {
 func (t *telemetryReporter) collectLinkCounters() {
 	device, err := t.wg.Device(t.iface)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: read device: %v\n", err)
+		slog.Debug("telemetry read device failed", "error", err)
 		return
 	}
 
@@ -250,7 +250,7 @@ func (t *telemetryReporter) collectFlows() {
 
 	flows, err := t.ct.Dump()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: flow dump: %v\n", err)
+		slog.Debug("telemetry flow dump failed", "error", err)
 		return
 	}
 
@@ -424,13 +424,13 @@ func endpointCandidatesFromProto(p proto.PeerConfigResponse, fallback *net.UDPAd
 func (t *telemetryReporter) post(report *proto.ReportRequest) bool {
 	body, err := json.Marshal(report)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: encode report: %v\n", err)
+		slog.Error("encode report failed", "error", err)
 		return false
 	}
 
 	req, err := http.NewRequest(http.MethodPost, t.serverURL+"/report", bytes.NewReader(body))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: build report request: %v\n", err)
+		slog.Error("build report request failed", "error", err)
 		return false
 	}
 
@@ -439,14 +439,14 @@ func (t *telemetryReporter) post(report *proto.ReportRequest) bool {
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: send report: %v\n", err)
+		slog.Warn("send report failed", "error", err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		fmt.Fprintf(os.Stderr, "telemetry: report rejected: %s\n", resp.Status)
+		slog.Warn("report rejected", "status", resp.Status)
 
 		return false
 	}
@@ -454,7 +454,7 @@ func (t *telemetryReporter) post(report *proto.ReportRequest) bool {
 	var sync proto.ReportResponse
 
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&sync); err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: decode sync payload: %v\n", err)
+		slog.Warn("decode sync payload failed", "error", err)
 		return true // report was accepted; only the sync failed
 	}
 
@@ -469,7 +469,7 @@ func (t *telemetryReporter) post(report *proto.ReportRequest) bool {
 // process restart.
 func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 	if err := t.applySelfAssignment(sync); err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: %v\n", err)
+		slog.Warn("telemetry sync failed", "error", err)
 		return
 	}
 
@@ -478,7 +478,7 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 	for _, e := range sync.Peers {
 		cfg, err := peerConfigFromProto(e)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "telemetry: bad peer in sync payload: %v\n", err)
+			slog.Warn("bad peer in sync payload", "error", err)
 			return // don't apply a partial view
 		}
 
@@ -488,7 +488,7 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 	}
 
 	if err := syncPeers(t.wg, t.iface, desired); err != nil {
-		fmt.Fprintf(os.Stderr, "telemetry: %v\n", err)
+		slog.Warn("telemetry sync failed", "error", err)
 	}
 }
 

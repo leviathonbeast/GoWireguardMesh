@@ -9,31 +9,36 @@
 package psk
 
 import (
+	"crypto/hkdf"
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
-	"golang.org/x/crypto/hkdf"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 // DerivePairKey computes the preshared key for the (pubA, pubB) pair.
 // Argument order does not matter.
+//
+// Uses the standard library's crypto/hkdf (Go 1.24+); the derivation
+// is RFC 5869 HKDF-SHA256 and byte-identical to the previous
+// golang.org/x/crypto/hkdf implementation, so existing meshes keep
+// their PSKs (pinned by TestDerivePairKeyMatchesXCryptoHKDF).
 func DerivePairKey(master wgtypes.Key, pubA, pubB string) (wgtypes.Key, error) {
 	lo, hi := pubA, pubB
 	if lo > hi {
 		lo, hi = hi, lo
 	}
 
-	r := hkdf.New(sha256.New, master[:], nil, []byte("wgmesh-pair-psk:"+lo+"|"+hi))
-
-	var key wgtypes.Key
-	if _, err := io.ReadFull(r, key[:]); err != nil {
+	raw, err := hkdf.Key(sha256.New, master[:], nil, "wgmesh-pair-psk:"+lo+"|"+hi, len(wgtypes.Key{}))
+	if err != nil {
 		return wgtypes.Key{}, fmt.Errorf("derive pair psk: %w", err)
 	}
+
+	var key wgtypes.Key
+	copy(key[:], raw)
 
 	return key, nil
 }

@@ -63,77 +63,100 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 		return fmt.Errorf("update last_seen_at: %w", err)
 	}
 
-	for _, c := range report.Counters {
-		var remoteID int64
-
-		err := tx.QueryRowContext(ctx,
-			`SELECT id FROM peers WHERE public_key = ?`, c.PeerPublicKey,
-		).Scan(&remoteID)
-
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			// The reporter may know peers the server has since hard-
-			// deleted; skip rather than reject the whole report.
-			continue
-		case err != nil:
-			return fmt.Errorf("look up remote peer %q: %w", c.PeerPublicKey, err)
+	// This is the hottest write path (every agent, every interval), so
+	// avoid per-row work: one key→id map instead of a SELECT per
+	// counter/path row, and statements prepared once per report instead
+	// of re-parsed per row (Tx.ExecContext has no statement cache in
+	// modernc/sqlite).
+	if len(report.Counters) > 0 || len(report.PathStates) > 0 {
+		idByKey, err := peerIDsByPublicKey(ctx, tx)
+		if err != nil {
+			return err
 		}
 
-		var handshake sql.NullString
-		if c.LastHandshakeAt != "" {
-			handshake = sql.NullString{String: c.LastHandshakeAt, Valid: true}
+		if len(report.Counters) > 0 {
+			stmt, err := tx.PrepareContext(ctx,
+				`INSERT INTO link_stats (peer_id, remote_peer_id, rx_bytes, tx_bytes, last_handshake_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?)
+				 ON CONFLICT (peer_id, remote_peer_id) DO UPDATE SET
+				   rx_bytes = rx_bytes + excluded.rx_bytes,
+				   tx_bytes = tx_bytes + excluded.tx_bytes,
+				   last_handshake_at = COALESCE(excluded.last_handshake_at, last_handshake_at),
+				   updated_at = excluded.updated_at`,
+			)
+			if err != nil {
+				return fmt.Errorf("prepare link stats upsert: %w", err)
+			}
+			defer stmt.Close()
+
+			for _, c := range report.Counters {
+				remoteID, known := idByKey[c.PeerPublicKey]
+				if !known {
+					// The reporter may know peers the server has since
+					// hard-deleted; skip rather than reject the report.
+					continue
+				}
+
+				var handshake sql.NullString
+				if c.LastHandshakeAt != "" {
+					handshake = sql.NullString{String: c.LastHandshakeAt, Valid: true}
+				}
+
+				if _, err := stmt.ExecContext(ctx,
+					peerID, remoteID, c.RxBytes, c.TxBytes, handshake, now,
+				); err != nil {
+					return fmt.Errorf("accumulate link stats: %w", err)
+				}
+			}
 		}
 
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO link_stats (peer_id, remote_peer_id, rx_bytes, tx_bytes, last_handshake_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?)
-			 ON CONFLICT (peer_id, remote_peer_id) DO UPDATE SET
-			   rx_bytes = rx_bytes + excluded.rx_bytes,
-			   tx_bytes = tx_bytes + excluded.tx_bytes,
-			   last_handshake_at = COALESCE(excluded.last_handshake_at, last_handshake_at),
-			   updated_at = excluded.updated_at`,
-			peerID, remoteID, c.RxBytes, c.TxBytes, handshake, now,
-		); err != nil {
-			return fmt.Errorf("accumulate link stats: %w", err)
+		if len(report.PathStates) > 0 {
+			stmt, err := tx.PrepareContext(ctx,
+				`INSERT INTO peer_paths (peer_id, remote_peer_id, state, endpoint, updated_at)
+				 VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT (peer_id, remote_peer_id) DO UPDATE SET
+				   state = excluded.state,
+				   endpoint = excluded.endpoint,
+				   updated_at = excluded.updated_at`,
+			)
+			if err != nil {
+				return fmt.Errorf("prepare path state upsert: %w", err)
+			}
+			defer stmt.Close()
+
+			for _, p := range report.PathStates {
+				remoteID, known := idByKey[p.PeerPublicKey]
+				if !known {
+					continue
+				}
+
+				if _, err := stmt.ExecContext(ctx,
+					peerID, remoteID, p.State, nullable(p.Endpoint), now,
+				); err != nil {
+					return fmt.Errorf("upsert path state: %w", err)
+				}
+			}
 		}
 	}
 
-	for _, f := range report.Flows {
-		if _, err := tx.ExecContext(ctx,
+	if len(report.Flows) > 0 {
+		stmt, err := tx.PrepareContext(ctx,
 			`INSERT INTO flows (peer_id, protocol, src_ip, src_port, dst_ip, dst_port,
 			                    tx_bytes, rx_bytes, tx_packets, rx_packets, reported_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			peerID, f.Protocol, f.SrcIP, f.SrcPort, f.DstIP, f.DstPort,
-			f.TxBytes, f.RxBytes, f.TxPackets, f.RxPackets, now,
-		); err != nil {
-			return fmt.Errorf("insert flow: %w", err)
+		)
+		if err != nil {
+			return fmt.Errorf("prepare flow insert: %w", err)
 		}
-	}
+		defer stmt.Close()
 
-	for _, p := range report.PathStates {
-		var remoteID int64
-
-		err := tx.QueryRowContext(ctx,
-			`SELECT id FROM peers WHERE public_key = ?`, p.PeerPublicKey,
-		).Scan(&remoteID)
-
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			continue
-		case err != nil:
-			return fmt.Errorf("look up path peer %q: %w", p.PeerPublicKey, err)
-		}
-
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO peer_paths (peer_id, remote_peer_id, state, endpoint, updated_at)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON CONFLICT (peer_id, remote_peer_id) DO UPDATE SET
-			   state = excluded.state,
-			   endpoint = excluded.endpoint,
-			   updated_at = excluded.updated_at`,
-			peerID, remoteID, p.State, nullable(p.Endpoint), now,
-		); err != nil {
-			return fmt.Errorf("upsert path state: %w", err)
+		for _, f := range report.Flows {
+			if _, err := stmt.ExecContext(ctx,
+				peerID, f.Protocol, f.SrcIP, f.SrcPort, f.DstIP, f.DstPort,
+				f.TxBytes, f.RxBytes, f.TxPackets, f.RxPackets, now,
+			); err != nil {
+				return fmt.Errorf("insert flow: %w", err)
+			}
 		}
 	}
 
@@ -142,6 +165,38 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 	}
 
 	return nil
+}
+
+// peerIDsByPublicKey loads the full key→id map once, replacing a
+// SELECT per report row. The peers table is small (one row per node)
+// while reports can carry hundreds of rows.
+func peerIDsByPublicKey(ctx context.Context, tx *sql.Tx) (map[string]int64, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT public_key, id FROM peers`)
+	if err != nil {
+		return nil, fmt.Errorf("list peer ids: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]int64)
+
+	for rows.Next() {
+		var (
+			key string
+			id  int64
+		)
+
+		if err := rows.Scan(&key, &id); err != nil {
+			return nil, fmt.Errorf("scan peer id: %w", err)
+		}
+
+		out[key] = id
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list peer ids: %w", err)
+	}
+
+	return out, nil
 }
 
 // RelayPairKeys resolves the requesting peer's public key and checks

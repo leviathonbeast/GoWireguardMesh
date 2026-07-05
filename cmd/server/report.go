@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,7 +25,7 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 	peerID, overlayIP, err := s.store.AuthenticatePeer(r.Context(), token)
 	if err != nil {
 		if errors.Is(err, store.ErrUnauthorized) {
-			log.Printf("[server] report rejected: %v", err)
+			slog.Warn("report rejected", "error", err)
 			// Auth failures are audited (routine successful reports
 			// are not — they would flood the log every 30s).
 			s.audit(r, "report_rejected", http.StatusUnauthorized, err.Error())
@@ -34,7 +33,7 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("[server] report auth failed: %v", err)
+		slog.Error("report auth failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -43,13 +42,13 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 
 	var report proto.ReportRequest
 
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&report); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	// 4MB bounds a burst of buffered flow records from a busy agent.
+	if !decodeJSON(w, r, 4<<20, &report) {
 		return
 	}
 
 	if err := s.store.ApplyReport(r.Context(), peerID, s.clientIP(r), &report); err != nil {
-		log.Printf("[server] apply report from peer %d: %v", peerID, err)
+		slog.Error("apply report failed", "peer_id", peerID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -59,14 +58,14 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 	// propagate within one report interval.
 	self, others, err := s.store.PeersForID(r.Context(), peerID)
 	if err != nil {
-		log.Printf("[server] build sync payload for peer %d: %v", peerID, err)
+		slog.Error("build sync payload failed", "peer_id", peerID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
 	entries, err := s.buildPeerEntries(self, others)
 	if err != nil {
-		log.Printf("[server] build sync payload for peer %d: %v", peerID, err)
+		slog.Error("build sync payload failed", "peer_id", peerID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -155,7 +154,7 @@ func flowDirection(peerIP, peerIP6, srcIP string, srcPort int, dstIP string, dst
 func (s *server) handleListLinkStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := s.store.ListLinkStats(r.Context())
 	if err != nil {
-		log.Printf("list link stats: %v", err)
+		slog.Error("list link stats failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -183,7 +182,7 @@ func (s *server) handleListFlows(w http.ResponseWriter, r *http.Request) {
 
 	flows, err := s.store.RecentFlows(r.Context(), limit)
 	if err != nil {
-		log.Printf("list flows: %v", err)
+		slog.Error("list flows failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -224,9 +223,9 @@ func (s *server) pruneFlowsLoop(ctx context.Context, retention time.Duration) {
 	for {
 		n, err := s.store.PruneFlows(ctx, retention)
 		if err != nil {
-			log.Printf("prune flows: %v", err)
+			slog.Error("prune flows failed", "error", err)
 		} else if n > 0 {
-			log.Printf("pruned %d flow rows older than %s", n, retention)
+			slog.Debug("pruned flow rows", "count", n, "retention", retention)
 		}
 
 		select {

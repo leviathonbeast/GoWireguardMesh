@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"io"
 	"net"
 	"net/http"
@@ -108,7 +109,7 @@ func (t *telemetryReporter) maybeRetryDirect(peer wgtypes.Key, candidates []*net
 			Endpoint:   endpoint,
 		}},
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "[agent] direct retry for %s: %v\n", peer, err)
+		slog.Debug("direct retry failed", "peer", peer, "error", err)
 		return
 	}
 
@@ -161,7 +162,7 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 				Endpoint:   next,
 			}},
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "[agent] relay: direct candidate %s for %s: %v\n", next, peer.PublicKey, err)
+			slog.Debug("direct candidate failed", "candidate", next, "peer", peer.PublicKey, "error", err)
 			return
 		}
 
@@ -178,7 +179,7 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 			Endpoint:   probe.relayEndpoint,
 		}},
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "[agent] relay: restore relay endpoint for %s: %v\n", peer.PublicKey, err)
+		slog.Warn("restore relay endpoint failed", "peer", peer.PublicKey, "error", err)
 		return
 	}
 
@@ -202,7 +203,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 				return false
 			}
 
-			fmt.Fprintf(os.Stderr, "[agent] relay ws for %s: %v\n", peer, err)
+			slog.Warn("websocket relay failed", "peer", peer, "error", err)
 
 			return false
 		}
@@ -218,7 +219,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 	default: // relayUDP
 		endpoint, err := t.requestRelayEndpoint(peer)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[agent] relay request failed for %s: %v\n", peer, err)
+			slog.Warn("relay request failed", "peer", peer, "error", err)
 			return false
 		}
 
@@ -231,7 +232,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 
 		udpAddr, err := net.ResolveUDPAddr("udp", endpoint)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[agent] relay: resolve %q: %v\n", endpoint, err)
+			slog.Warn("relay endpoint resolve failed", "endpoint", endpoint, "error", err)
 			return false
 		}
 
@@ -242,7 +243,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 				Endpoint:   udpAddr,
 			}},
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "[agent] relay: set endpoint for %s: %v\n", peer, err)
+			slog.Warn("relay set endpoint failed", "peer", peer, "error", err)
 			return false
 		}
 		t.relayEndpoints[peer] = udpAddr

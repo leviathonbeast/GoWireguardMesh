@@ -5,10 +5,9 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"os"
@@ -108,7 +107,7 @@ type peerPingJSON struct {
 func (s *server) handleListPeers(w http.ResponseWriter, r *http.Request) {
 	peers, err := s.store.ListPeers(r.Context())
 	if err != nil {
-		log.Printf("list peers: %v", err)
+		slog.Error("list peers failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -145,7 +144,7 @@ func (s *server) handlePingPeer(w http.ResponseWriter, r *http.Request) {
 
 	peers, err := s.store.ListPeers(r.Context())
 	if err != nil {
-		log.Printf("ping peer %d: %v", id, err)
+		slog.Error("ping peer failed", "peer_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -195,7 +194,7 @@ func peerHealth(lastSeenAt, revokedAt string) (string, int64) {
 func (s *server) handleListSetupKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := s.store.ListSetupKeys(r.Context())
 	if err != nil {
-		log.Printf("list setup keys: %v", err)
+		slog.Error("list setup keys failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -230,8 +229,7 @@ func (s *server) handlePreviewNetworkMigration(w http.ResponseWriter, r *http.Re
 
 func (s *server) handleApplyNetworkMigration(w http.ResponseWriter, r *http.Request) {
 	var req networkMigrationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !decodeJSON(w, r, 64<<10, &req) {
 		return
 	}
 	if req.Confirm != networkMigrationConfirm {
@@ -264,8 +262,7 @@ func (s *server) handleApplyNetworkMigration(w http.ResponseWriter, r *http.Requ
 
 func (s *server) parseNetworkMigrationRequest(w http.ResponseWriter, r *http.Request) (netip.Prefix, netip.Prefix, bool) {
 	var req networkMigrationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !decodeJSON(w, r, 64<<10, &req) {
 		return netip.Prefix{}, netip.Prefix{}, false
 	}
 
@@ -294,8 +291,7 @@ func (s *server) handleCreateSetupKey(w http.ResponseWriter, r *http.Request) {
 		ExpiresIn string `json:"expires_in,omitempty"` // Go duration, "" = never
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !decodeJSON(w, r, 64<<10, &req) {
 		return
 	}
 
@@ -313,12 +309,12 @@ func (s *server) handleCreateSetupKey(w http.ResponseWriter, r *http.Request) {
 
 	key, err := s.store.CreateSetupKey(r.Context(), req.MaxUses, expiresIn)
 	if err != nil {
-		log.Printf("create setup key: %v", err)
+		slog.Error("create setup key failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	log.Printf("admin created setup key (max_uses=%d, expires_in=%q)", req.MaxUses, req.ExpiresIn)
+	slog.Info("admin created setup key", "max_uses", req.MaxUses, "expires_in", req.ExpiresIn)
 	s.audit(r, "setup_key_create", http.StatusOK, fmt.Sprintf("max_uses=%d expires_in=%q", req.MaxUses, req.ExpiresIn))
 	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }
@@ -342,10 +338,10 @@ func (s *server) handleRevoke(w http.ResponseWriter, r *http.Request, revoke fun
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found or already revoked")
 	case err != nil:
-		log.Printf("revoke %s %d: %v", kind, id, err)
+		slog.Error("revoke failed", "kind", kind, "id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 	default:
-		log.Printf("admin revoked %s %d", kind, id)
+		slog.Info("admin revoked", "kind", kind, "id", id)
 		s.audit(r, "revoke", http.StatusOK, fmt.Sprintf("%s id=%d", kind, id))
 		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	}

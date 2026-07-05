@@ -1,10 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -23,7 +22,7 @@ type aclRuleJSON struct {
 func (s *server) handleListACL(w http.ResponseWriter, r *http.Request) {
 	rules, err := s.store.ListACLRules(r.Context())
 	if err != nil {
-		log.Printf("list acl rules: %v", err)
+		slog.Error("list acl rules failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -50,20 +49,19 @@ func (s *server) handleCreateACL(w http.ResponseWriter, r *http.Request) {
 		DstPeerID *int64 `json:"dst_peer_id"` // null = any
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !decodeJSON(w, r, 64<<10, &req) {
 		return
 	}
 
 	id, err := s.store.CreateACLRule(r.Context(), req.SrcPeerID, req.DstPeerID)
 	if err != nil {
-		log.Printf("create acl rule: %v", err)
+		slog.Warn("create acl rule failed", "error", err)
 		writeError(w, http.StatusBadRequest, "could not create rule (same peer twice, or unknown peer id?)")
 
 		return
 	}
 
-	log.Printf("admin created acl rule %d", id)
+	slog.Info("admin created acl rule", "rule_id", id)
 	s.audit(r, "acl_create", http.StatusOK, fmt.Sprintf("rule id=%d src=%v dst=%v", id, req.SrcPeerID, req.DstPeerID))
 	writeJSON(w, http.StatusOK, map[string]int64{"id": id})
 }
@@ -79,10 +77,10 @@ func (s *server) handleDeleteACL(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case err != nil:
-		log.Printf("delete acl rule %d: %v", id, err)
+		slog.Error("delete acl rule failed", "rule_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 	default:
-		log.Printf("admin deleted acl rule %d", id)
+		slog.Info("admin deleted acl rule", "rule_id", id)
 		s.audit(r, "acl_delete", http.StatusOK, fmt.Sprintf("rule id=%d", id))
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	}

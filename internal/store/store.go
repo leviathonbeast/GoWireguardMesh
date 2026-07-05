@@ -128,9 +128,13 @@ func nullable(s string) sql.NullString {
 // must ride in the DSN where it applies to every pooled connection.
 // _txlock=immediate makes BeginTx take the write lock up front,
 // serializing enrollments instead of failing them mid-transaction.
+// busy_timeout makes a second concurrent writer wait (up to 5s) for
+// the lock instead of failing instantly with SQLITE_BUSY — without
+// it, _txlock=immediate turns concurrent enroll/report bursts into
+// intermittent 500s.
 func Open(path string, network netip.Prefix, schemaSQL string) (*Store, error) {
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_txlock=immediate",
+		"file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate",
 		path,
 	)
 

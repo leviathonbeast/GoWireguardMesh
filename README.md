@@ -134,7 +134,7 @@ Flags for `server`:
 | `--tls-hosts` | `localhost,127.0.0.1` | SANs for a generated certificate |
 | `--admin-token-file` | `admin-token` | admin bearer token file |
 | `--default-policy` | `allow` | ACL default: `allow` (open mesh) or `deny` (rule-connected pairs only) |
-| `--trust-proxy` | off | trust `X-Forwarded-For` for client IPs (only behind a proxy) |
+| `--trust-proxy` | off | trust `X-Forwarded-For` for client IPs — uses the **rightmost** entry, i.e. the hop your (single) trusted proxy appended; only set behind a proxy |
 | `--manage-firewall` | on | open the API port on the host firewall; reconciles + removes on exit |
 | **Relay** | | |
 | `--relay-embedded` | off | run the relay in-process (single binary); needs `--relay-host` |
@@ -147,6 +147,7 @@ Flags for `server`:
 | `--rate-limit` / `--rate-burst` | `20` / `40` | per-source req/s + burst on public endpoints (0 = off) |
 | `--access-log` | `memory` | request tracing: `memory` for UI/API ring, `stdout` for JSONL shipping, `off` |
 | `--access-log-size` | `1000` | in-memory request ring size |
+| `--log-level` | `info` | minimum console log level: `debug`, `info`, `warn`, `error` (agent has the same flag) |
 | `--flow-retention` | `168h` | flow-log retention (pruned hourly) |
 | `--audit-retention` | `2160h` (90d) | audit-log retention (pruned daily) |
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -183,7 +183,7 @@ func (s *server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.store.ListAuditLog(r.Context(), limit)
 	if err != nil {
-		log.Printf("list audit log: %v", err)
+		slog.Error("list audit log failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -204,9 +204,9 @@ func (s *server) pruneAuditLoop(ctx context.Context, retention time.Duration) {
 	for {
 		n, err := s.store.PruneAuditLog(ctx, retention)
 		if err != nil {
-			log.Printf("prune audit log: %v", err)
+			slog.Error("prune audit log failed", "error", err)
 		} else if n > 0 {
-			log.Printf("pruned %d audit rows older than %s", n, retention)
+			slog.Debug("pruned audit rows", "count", n, "retention", retention)
 		}
 
 		select {
@@ -360,6 +360,6 @@ func (s *server) audit(r *http.Request, event string, status int, detail string)
 	}
 
 	if err := s.store.Audit(r.Context(), e); err != nil {
-		log.Printf("audit(%s): %v", event, err)
+		slog.Error("audit write failed", "event", event, "error", err)
 	}
 }

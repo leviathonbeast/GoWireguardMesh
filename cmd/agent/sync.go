@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strings"
@@ -45,7 +46,7 @@ func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig
 				Remove:    true,
 			})
 
-			fmt.Printf("[agent] sync remove peer %s\n", key)
+			slog.Debug("sync remove peer", "peer", key)
 		}
 	}
 
@@ -55,7 +56,7 @@ func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig
 		if !exists {
 			changes = append(changes, want)
 
-			fmt.Printf("[agent] sync add peer %s\n", key)
+			slog.Debug("sync add peer", "peer", key)
 
 			continue
 		}
@@ -87,8 +88,7 @@ func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig
 
 		changes = append(changes, update)
 
-		fmt.Printf("[agent] sync update peer %s (fields=%t endpoint %v -> %v)\n",
-			key, fieldsChanged, cur.Endpoint, update.Endpoint)
+		slog.Debug("sync update peer", "peer", key, "fields_changed", fieldsChanged, "endpoint_old", cur.Endpoint, "endpoint_new", update.Endpoint)
 	}
 
 	if len(changes) == 0 {

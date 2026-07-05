@@ -92,6 +92,22 @@ func (h *WSHub) leave(pairID, memberID string, conn FrameConn) {
 	}
 }
 
+// MemberCount reports how many members are currently joined to the
+// pair (0-2). Diagnostic: lets tests and operators distinguish "both
+// sides connected" from "first frame raced the second join" — frames
+// sent before both members join are dropped by design.
+func (h *WSHub) MemberCount(pairID string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	p := h.pairs[pairID]
+	if p == nil {
+		return 0
+	}
+
+	return len(p.members)
+}
+
 // peer returns the current other member of the pair, or nil.
 func (h *WSHub) peer(pairID, memberID string) FrameConn {
 	h.mu.Lock()

@@ -23,7 +23,7 @@ package relay
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -140,7 +140,7 @@ func (s *Server) Allocate(id string) (portA, portB int, err error) {
 	go p.forward(connA, connB, true)
 	go p.forward(connB, connA, false)
 
-	log.Printf("relay: allocated pair %q: ports %d/%d", id, p.portA(), p.portB())
+	slog.Info("relay allocated pair", "pair", id, "port_a", p.portA(), "port_b", p.portB())
 
 	return p.portA(), p.portB(), nil
 }
@@ -168,7 +168,7 @@ func (s *Server) cleanupLoop() {
 				p.connB.Close()
 				delete(s.pairs, id)
 
-				log.Printf("relay: expired idle pair %q", id)
+				slog.Debug("relay expired idle pair", "pair", id)
 			}
 		}
 
@@ -230,7 +230,7 @@ func (p *pair) forward(in, out *net.UDPConn, fromA bool) {
 		}
 
 		if _, err := out.WriteToUDP(buf[:n], dst); err != nil {
-			log.Printf("relay: pair %q: forward: %v", p.id, err)
+			slog.Debug("relay forward error", "pair", p.id, "error", err)
 		}
 	}
 }

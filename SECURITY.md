@@ -48,6 +48,40 @@ setup-key brute forcing and relay exhaustion. Keyed on the real client
 IP, so it works correctly behind a trusted proxy. Admin routes are
 gated by the admin token instead.
 
+With `--trust-proxy`, the client IP is the **rightmost**
+`X-Forwarded-For` entry — the one your proxy appended and vouches for.
+A client-supplied `X-Forwarded-For` prefix cannot spoof the
+rate-limiter key or the audit identity (the full header chain is still
+recorded for forensics). This assumes exactly **one** trusted proxy in
+front; a CDN-then-proxy chain would need a trusted-hop count this
+project deliberately doesn't grow.
+
+### 2b. Built-in HTTP hardening (no flags, always on)
+
+- **Server timeouts** — header 10s, read/write 60s, idle 120s, 64KB
+  header cap. A handful of slow-drip connections can no longer pin
+  goroutines forever (slowloris). Long-lived WebSocket relay sessions
+  are unaffected: `net/http` clears connection deadlines when the
+  upgrade hijacks the connection (a regression test pins this).
+- **Request body caps** — every JSON endpoint is size-bounded
+  (`/enroll` 64KB, `/report` 4MB, `/relay-pair` 4KB, admin 64KB);
+  oversized bodies get `413`. An unbounded decode on a public endpoint
+  is a memory-exhaustion vector.
+- **TLS 1.3 floor** — built-in TLS refuses anything older; every
+  legitimate client (our agents, modern browsers) speaks 1.3. When
+  Traefik terminates TLS this is the proxy's job instead.
+- **Security headers** — every response carries a same-origin
+  `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and (over
+  TLS) HSTS. The CSP is the backstop for the admin token in the UI's
+  sessionStorage: injected markup cannot load off-origin script.
+- **Graceful shutdown** — SIGINT/SIGTERM drains the server and runs
+  cleanup, so firewall rules the server opened are removed instead of
+  leaking until the next start's reconciliation.
+- **SQLite `busy_timeout`** — concurrent writers queue up to 5s
+  instead of failing instantly, so enroll/report bursts don't surface
+  as intermittent 500s.
+
 ### 3. Pin the agent's WireGuard port
 
 Run agents with `--listen-port 51820` (or any fixed port). Auto-selected
@@ -120,6 +154,12 @@ Agents also report per-peer path state (`direct`, `ws-relay`, `udp-relay`,
 `probing-direct`) so operators can see whether traffic is on the preferred
 direct path or temporarily riding a relay.
 
+Console logging is leveled (`--log-level` on both binaries, default
+`info`): rejections and auth failures log at `warn`, internal errors at
+`error`, per-tick chatter (agent sync diffs, prune counts) at `debug`.
+`--log-level=warn` gives a quiet console that still surfaces everything
+security-relevant; the access-log stream is independent of this level.
+
 ## Topology notes
 
 ### Control plane on a public VPS
@@ -189,6 +229,10 @@ Sidecar specifics:
 
 - Bearer tokens, not WireGuard-key signatures, authenticate reports; TTL
   mitigates leakage but signature auth would remove the bearer secret.
+- Setup keys are stored (and listed in the UI) in plaintext — a
+  deliberate UX tradeoff so keys stay copyable. Hash-at-rest with
+  show-once-at-creation was considered and deferred; treat the database
+  file's confidentiality accordingly.
 - No PSK-master rotation without re-enrolling the fleet.
 - Single-writer SQLite: fine for hundreds of peers, not thousands.
 - Relay is store-and-forward UDP/WebSocket with no bandwidth accounting.

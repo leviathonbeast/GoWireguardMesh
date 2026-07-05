@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -63,7 +63,7 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("relay-ws auth: %v", err)
+		slog.Error("relay-ws auth failed", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 
 		return
@@ -79,7 +79,7 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 
 	selfKey, targetOK, err := s.store.RelayPairKeys(r.Context(), peerID, target)
 	if err != nil {
-		log.Printf("relay-ws lookup for peer %d: %v", peerID, err)
+		slog.Error("relay-ws pair lookup failed", "peer_id", peerID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 
 		return
@@ -92,6 +92,11 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 
 	pairID := relayPairID(selfKey, target)
 
+	// Relay sessions are long-lived while the server arms per-request
+	// Read/WriteTimeout deadlines — but net/http clears both on Hijack
+	// (hijackLocked does SetDeadline(time.Time{})), so the upgraded
+	// connection is deliberately deadline-free from here on.
+	// TestRelayWSSurvivesServerTimeouts pins that behavior.
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		// Accept already wrote a response.
@@ -104,7 +109,7 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 
 	fc := wsFrameConn{conn: conn, ctx: context.Background()}
 
-	log.Printf("relay-ws: peer %d joined pair %s", peerID, pairID[:8])
+	slog.Info("relay-ws session opened", "peer_id", peerID, "pair", pairID[:8])
 	s.audit(r, "relay_ws_open", http.StatusOK, "websocket relay pair "+pairID[:8])
 
 	if err := s.wsHub.Serve(pairID, selfKey, fc); err != nil {
@@ -113,7 +118,7 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusNormalClosure, "")
 	}
 
-	log.Printf("relay-ws: peer %d left pair %s", peerID, pairID[:8])
+	slog.Info("relay-ws session closed", "peer_id", peerID, "pair", pairID[:8])
 	s.audit(r, "relay_ws_close", http.StatusOK, "websocket relay pair "+pairID[:8])
 }
 

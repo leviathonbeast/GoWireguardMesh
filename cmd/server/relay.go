@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -121,7 +121,7 @@ func (s *server) handleRelayPair(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("relay-pair auth: %v", err)
+		slog.Error("relay-pair auth failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 
 		return
@@ -138,14 +138,18 @@ func (s *server) handleRelayPair(w http.ResponseWriter, r *http.Request) {
 		PeerPublicKey string `json:"peer_public_key"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PeerPublicKey == "" {
+	if !decodeJSON(w, r, 4<<10, &req) {
+		return
+	}
+
+	if req.PeerPublicKey == "" {
 		writeError(w, http.StatusBadRequest, "peer_public_key is required")
 		return
 	}
 
 	selfKey, targetOK, err := s.store.RelayPairKeys(r.Context(), peerID, req.PeerPublicKey)
 	if err != nil {
-		log.Printf("relay-pair lookup for peer %d: %v", peerID, err)
+		slog.Error("relay-pair lookup failed", "peer_id", peerID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 
 		return
@@ -162,7 +166,7 @@ func (s *server) handleRelayPair(w http.ResponseWriter, r *http.Request) {
 
 	portA, portB, err := s.relay.allocate(pairID)
 	if err != nil {
-		log.Printf("relay allocate for peer %d: %v", peerID, err)
+		slog.Error("relay allocate failed", "peer_id", peerID, "error", err)
 
 		if errors.Is(err, relay.ErrPortsExhausted) {
 			writeError(w, http.StatusServiceUnavailable, "relay port range exhausted")
@@ -183,7 +187,7 @@ func (s *server) handleRelayPair(w http.ResponseWriter, r *http.Request) {
 
 	endpoint := net.JoinHostPort(s.relayHost, strconv.Itoa(port))
 
-	log.Printf("relay pair %s: peer %d gets %s", pairID[:8], peerID, endpoint)
+	slog.Info("relay pair provisioned", "pair", pairID[:8], "peer_id", peerID, "endpoint", endpoint)
 	s.audit(r, "relay_pair", http.StatusOK, "udp relay via "+endpoint)
 	writeJSON(w, http.StatusOK, map[string]string{"endpoint": endpoint})
 }

@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -55,7 +56,23 @@ var (
 	relayTransportFlag = flag.String("relay-transport", "websocket", "relay fallback transport: \"websocket\" (rides the control-plane port, needs no extra firewall holes) or \"udp\" (faster, needs the relay port range reachable)")
 	manageFirewallFlag = flag.Bool("manage-firewall", true, "open the WireGuard listen port on the host firewall (removed again on shutdown)")
 	keyFileFlag        = flag.String("key-file", "wgkey.key", "path to private key file")
+	logLevelFlag       = flag.String("log-level", "info", "minimum log level: debug, info, warn, or error")
 )
+
+// setupLogging installs the process-wide slog handler. Human status
+// output (public key, enrollment result) stays on stdout via
+// fmt.Printf; slog carries warnings, errors, and per-tick debug
+// chatter on stderr.
+func setupLogging(level string) error {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		return fmt.Errorf(`log-level must be "debug", "info", "warn", or "error", got %q`, level)
+	}
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
+
+	return nil
+}
 
 func waitForShutdown() {
 	sigCh := make(chan os.Signal, 1)
@@ -370,6 +387,10 @@ func effectiveListenPort(flagPort, resolvedPort int) int {
 func run() error {
 	flag.Parse()
 
+	if err := setupLogging(*logLevelFlag); err != nil {
+		return err
+	}
+
 	if err := ensurePrivileged(); err != nil {
 		return err
 	}
@@ -395,17 +416,17 @@ func run() error {
 	if *manageFirewallFlag {
 		fw, err := firewall.OpenWithReconcile("wgmesh-agent", *keyFileFlag+".fw")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[agent] firewall: %v; open udp %d yourself if needed\n", err, listenPort)
+			slog.Warn("firewall unavailable; open the port yourself if needed", "error", err, "udp", listenPort)
 		} else {
 			if err := fw.AllowUDP(listenPort); err != nil {
-				fmt.Fprintf(os.Stderr, "[agent] firewall (%s): %v\n", fw.Backend(), err)
+				slog.Warn("firewall rule failed", "backend", fw.Backend(), "error", err)
 			} else {
 				fmt.Printf("[agent] firewall (%s): opened udp %d\n", fw.Backend(), listenPort)
 			}
 
 			defer func() {
 				if err := fw.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "[agent] firewall cleanup: %v\n", err)
+					slog.Warn("firewall cleanup failed", "error", err)
 				}
 			}()
 		}
@@ -441,11 +462,7 @@ func run() error {
 			)
 
 			if err != nil {
-				fmt.Fprintf(
-					os.Stderr,
-					"[agent] stun discovery failed: %v (continuing without public endpoint)\n",
-					err,
-				)
+				slog.Warn("stun discovery failed; continuing without public endpoint", "error", err)
 			} else {
 				fmt.Printf(
 					"[agent] stun public endpoint: %s\n",
@@ -518,11 +535,7 @@ func run() error {
 
 	defer func() {
 		if err := deleteInterface(ifaceName); err != nil {
-			fmt.Fprintf(
-				os.Stderr,
-				"cleanup error: %v\n",
-				err,
-			)
+			slog.Error("interface cleanup failed", "error", err)
 		}
 	}()
 
@@ -588,7 +601,7 @@ func run() error {
 	if authToken != "" {
 		wgClient, err := wgctrl.New()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[agent] wgctrl init failed: %v\n", err)
+			slog.Error("wgctrl init failed", "error", err)
 		} else {
 			defer wgClient.Close()
 		}
@@ -612,7 +625,7 @@ func run() error {
 			transport,
 		)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[agent] telemetry init failed: %v\n", err)
+			slog.Error("telemetry init failed", "error", err)
 		} else {
 			reporterStop = make(chan struct{})
 			go reporter.run(reporterStop)
