@@ -7,62 +7,66 @@ paywalls.
 Peers get stable identities (WireGuard keypairs), enroll against a central
 control plane with setup keys, receive an overlay IP from CGNAT space
 (`100.64.0.0/16` by default), and configure their WireGuard interface with the
-full peer list automatically.
+peers they are allowed to reach — automatically, and kept in sync.
+
+For production hardening and the VPS + per-service-sidecar deployment model,
+see [SECURITY.md](SECURITY.md).
 
 ## Status
 
-Working today:
-
 - **Agent** — creates the WireGuard interface, assigns the overlay address,
-  configures peers, tears down cleanly on SIGINT/SIGTERM. Verified end-to-end
-  between two VMs (pings both ways, endpoint roaming observed).
-- **Control plane** — HTTPS enrollment with setup keys (expiry, max uses,
-  revocation), atomic IP allocation, idempotent re-enroll, network-wide
-  preshared key distribution. Backed by SQLite.
-- **Web UI** — React + TypeScript admin interface (embedded in the server
-  binary): list/revoke peers and setup keys, mint new setup keys. Protected
-  by a bearer token.
-- **TLS** — built-in self-signed certificates for standalone use (agents pin
-  the cert), or plain HTTP behind a TLS-terminating reverse proxy (Traefik).
-- **Telemetry** — agents report per-peer WireGuard transfer counters and
-  conntrack-based overlay flow logs (5-tuple, bytes, packets — headers only,
-  never payloads) every 30s. The server accumulates link stats, tracks peer
-  liveness (`last_seen_at`), stores flows with configurable retention, and
-  shows both in the web UI.
+  configures peers, and keeps them synced; tears down cleanly on
+  SIGINT/SIGTERM. Verified end-to-end between two VMs (pings both ways,
+  endpoint roaming and relay fallback observed).
+- **Control plane** — HTTP(S) enrollment with setup keys (expiry, max uses,
+  revocation), atomic IP allocation, idempotent re-enroll. Backed by SQLite
+  with versioned migrations.
+- **Config sync** — every telemetry report returns the peer list the caller
+  is allowed to see; the agent applies it as an incremental diff. New peers,
+  endpoint changes, ACL changes, and PSK rotations propagate mesh-wide within
+  one report interval, no restarts.
+- **NAT traversal** — STUN discovery, endpoint hints distributed at
+  enrollment and via sync (with a same-NAT hairpin fallback to LAN
+  addresses), and a relay fallback (WebSocket over the API port, or raw UDP)
+  that agents switch to automatically when a direct handshake never forms.
+- **Per-pair preshared keys** — every peer pair gets a unique PSK derived
+  server-side with HKDF from a master secret. No O(n²) key storage;
+  compromising one pair reveals nothing about another.
+- **ACLs** — `--default-policy deny` segments the mesh; peers only ever
+  receive config for peers a rule connects them to (visibility *is* the
+  enforcement). Managed in the web UI, propagate within one report interval.
+- **Telemetry** — per-peer transfer counters, liveness, and conntrack flow
+  logs (5-tuple, bytes, packets, direction — headers only, never payloads),
+  with configurable retention.
+- **Security & auditing** — TLS (built-in self-signed or behind a proxy),
+  per-source rate limiting, optional peer-token expiry, a durable audit log
+  and a redacted JSON access log, and automatic host-firewall management
+  with startup reconciliation. See [SECURITY.md](SECURITY.md).
+- **Web UI** — React + TypeScript, embedded in the server binary: peers,
+  a NetBird-style traffic/activity feed with search, ACL and setup-key
+  management, and the audit log. Bearer-token protected.
+- **Platforms** — Linux (kernel WireGuard). The agent also cross-compiles
+  for Windows (embedded userspace wireguard-go + Wintun), experimental.
 
-- **Config sync** — every telemetry report returns the current peer list;
-  agents apply it as an incremental diff. New peers propagate to the whole
-  mesh within one report interval, no restarts.
-- **NAT traversal** — STUN discovery of each peer's public endpoint,
-  endpoint hints distributed at enrollment and via sync, and a relay
-  fallback (dumb UDP forwarder, sees only WireGuard ciphertext) that agents
-  switch to automatically when a direct path never produces a handshake.
-
-- **Per-pair preshared keys** — every peer pair gets a unique PSK, derived
-  server-side with HKDF from a master secret keyed on the pair's public
-  keys. No O(n²) key storage; compromising one pair reveals nothing about
-  another. Agents pick up their pair keys automatically via config sync.
-- **ACLs** — with `--default-policy deny`, peers only see the peers an ACL
-  rule connects them to. Enforcement is visibility: an unauthorized peer
-  never receives the other's key, overlay IP, or endpoint. Rules (with
-  "any" wildcards) are managed in the web UI and propagate within one
-  report interval.
-
-Not built yet (roadmap): DNS.
+Not built yet (roadmap): DNS, relay→direct downgrade, WireGuard-key
+signature auth, PSK-master rotation.
 
 ## Layout
 
 ```
-cmd/agent/       node agent (runs on every machine in the mesh, needs root)
-cmd/server/      control plane (enrollment API + admin API + web UI)
-cmd/relay/       NAT-traversal fallback: UDP pair forwarder + control API
-internal/proto/  JSON wire structs shared by agent and server
-internal/store/  all SQLite access (schema, setup keys, atomic enrollment)
-internal/psk/    network-wide preshared key load-or-generate
+cmd/agent/        node agent (runs on every machine in the mesh, needs root)
+cmd/server/       control plane (enrollment + admin API + web UI + embedded relay)
+cmd/relay/        standalone relay (UDP forwarder + control API), for a separate host
+internal/proto/   JSON wire structs shared by agent and server
+internal/store/   all SQLite access (schema+migrations, enrollment, telemetry, acl, audit)
+internal/psk/     PSK master load-or-generate + HKDF pair-key derivation
+internal/relay/   relay core: UDP pair forwarder + WebSocket hub
 internal/tlsutil/ self-signed certificate load-or-generate
-web/             admin web UI (React + TypeScript, Vite)
-deploy/          systemd units for server, agent, and relay
-schema.sql       canonical database schema (embedded into the server binary)
+internal/firewall/ host firewall management (firewalld/ufw/nftables/iptables/netsh)
+web/              admin web UI (React + TypeScript, Vite)
+deploy/           systemd units for server, agent, and relay
+schema.sql        canonical database schema (embedded into the server binary)
+SECURITY.md       production hardening + deployment topology
 ```
 
 ## Requirements
@@ -91,7 +95,7 @@ cd web && npm install && npm run build
 ## Setting up the control plane
 
 Start the server (creates `mesh.db`, the schema, a self-signed TLS
-certificate, the network PSK, and the admin token on first run):
+certificate, the PSK master, and the admin token on first run):
 
 ```sh
 ./bin/server --listen 0.0.0.0:8443 --tls-hosts "localhost,127.0.0.1,192.168.1.10"
@@ -122,17 +126,25 @@ Flags for `server`:
 | `--listen` | `127.0.0.1:8080` | listen address |
 | `--db` | `mesh.db` | SQLite database path |
 | `--network` | `100.64.0.0/16` | overlay network; peers get the lowest free IP |
-| `--psk-file` | `mesh-psk.key` | network preshared key file |
-| `--no-tls` | off | plain HTTP: behind a TLS-terminating proxy, or dev |
+| `--psk-file` | `mesh-psk.key` | PSK master file (never distributed; per-pair keys derive from it) |
+| `--no-tls` | off | plain HTTP: behind a TLS-terminating proxy, or dev (warns if exposed) |
 | `--tls-cert` / `--tls-key` | `cert.pem` / `key.pem` | TLS cert/key; self-signed pair generated if missing |
 | `--tls-hosts` | `localhost,127.0.0.1` | SANs for a generated certificate |
 | `--admin-token-file` | `admin-token` | admin bearer token file |
-| `--flow-retention` | `168h` | how long flow log rows are kept (pruned hourly) |
-| `--trust-proxy` | off | trust `X-Forwarded-For` (only behind a reverse proxy) |
-| `--relay-host` | — | public address of the relay data plane (enables relay fallback) |
-| `--relay-control` | `http://127.0.0.1:8081` | relay control API URL |
-| `--relay-secret-file` | `relay-secret` | shared secret for the relay control API |
 | `--default-policy` | `allow` | ACL default: `allow` (open mesh) or `deny` (rule-connected pairs only) |
+| `--trust-proxy` | off | trust `X-Forwarded-For` for client IPs (only behind a proxy) |
+| `--manage-firewall` | on | open the API port on the host firewall; reconciles + removes on exit |
+| **Relay** | | |
+| `--relay-embedded` | off | run the relay in-process (single binary); needs `--relay-host` |
+| `--relay-host` | — | address agents dial for relayed traffic (enables relay fallback) |
+| `--relay-port-min`/`-max` | `51900`/`51999` | embedded relay UDP forwarding range |
+| `--relay-control` | `http://127.0.0.1:8081` | standalone relay control API URL |
+| `--relay-secret-file` | `relay-secret` | standalone relay shared secret |
+| **Telemetry & security** | | |
+| `--token-ttl` | `0` (never) | peer auth-token lifetime; agents re-enroll to refresh |
+| `--rate-limit` / `--rate-burst` | `20` / `40` | per-source req/s + burst on public endpoints (0 = off) |
+| `--flow-retention` | `168h` | flow-log retention (pruned hourly) |
+| `--audit-retention` | `2160h` (90d) | audit-log retention (pruned daily) |
 
 ### Deploying behind Traefik (or another TLS-terminating proxy)
 
@@ -168,22 +180,34 @@ cleartext.
 ## Web UI
 
 The server serves the admin interface at `/` (same port as the API). Open
-it, paste the contents of `admin-token`, and you can list peers, mint setup
-keys with max-uses/expiry, and revoke peers or keys. The UI lives in `web/`
-(React + TypeScript); `npm run dev` starts a Vite dev server that proxies
-API calls to a locally running control plane on `127.0.0.1:8080`.
+it, paste the contents of `admin-token`, and use the tabs:
+
+- **Peers** — registered peers with status, overlay IP, endpoint, last seen;
+  revoke inline.
+- **Traffic** — liveness, per-link totals, and a NetBird-style traffic-event
+  feed (both peer names resolved, protocol/port, ingress/egress ports, and
+  `↓ rx / ↑ tx`) with a **search box** (ip / port / hostname / protocol).
+- **Access** — ACL rules (with the default policy shown) and setup-key
+  management.
+- **Audit** — the security activity log (colored by outcome) with search.
+
+The UI lives in `web/` (React + TypeScript); `npm run dev` starts a Vite dev
+server that proxies API calls to a control plane on `127.0.0.1:8080`.
 
 The admin API behind it (all require `Authorization: Bearer <admin-token>`):
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/peers` | list all peers, including revoked |
-| `POST /api/peers/{id}/revoke` | revoke a peer (kept out of future enrollment responses; IP stays reserved) |
-| `GET /api/setup-keys` | list all setup keys |
-| `POST /api/setup-keys` | create a key: `{"max_uses": 0, "expires_in": "24h"}` |
+| `POST /api/peers/{id}/revoke` | revoke a peer (kept out of enrollment responses; IP stays reserved) |
+| `GET /api/setup-keys` · `POST /api/setup-keys` | list / create (`{"max_uses":0,"expires_in":"24h"}`) |
 | `POST /api/setup-keys/{id}/revoke` | revoke a key (also blocks re-enroll with it) |
+| `GET /api/acl` · `POST /api/acl` · `POST /api/acl/{id}/delete` | list / create / delete ACL rules |
 | `GET /api/link-stats` | accumulated per-link transfer totals + last handshake |
-| `GET /api/flows?limit=100` | recent overlay flow log entries |
+| `GET /api/flows?limit=100` | recent flow log entries (direction, protocol, ports, bytes) |
+| `GET /api/audit?limit=200` | security audit log |
+
+`GET /healthz` is unauthenticated, for liveness probes.
 
 ## Telemetry
 
@@ -294,21 +318,25 @@ privileges is a warning, never fatal.
 
 - **systemd**: units for all three binaries in [deploy/](deploy/), with
   install steps in each file's header comment.
-- **Docker**: `docker-compose.yml` runs server + relay (`RELAY_PUBLIC_IP`
-  required; relay uses host networking because its forwarding ports are
-  allocated dynamically). The Dockerfile has separate `server`, `relay`,
-  and `agent` targets; agents usually run directly on hosts instead.
-- Back up the server's state directory: `mesh.db`, `mesh-psk.key`,
-  `admin-token`, and (standalone TLS) `key.pem`.
+- **Docker**: `docker-compose.yml` runs the control plane with the embedded
+  relay as a single service (`RELAY_PUBLIC_IP` required). The Dockerfile has
+  separate `server`, `relay`, and `agent` targets; the `agent` target is
+  meant to be sidecar'd next to a service (`network_mode: service:<svc>`,
+  `NET_ADMIN`) — see the sidecar example in [SECURITY.md](SECURITY.md).
+- **Back up** `mesh.db`, `mesh-psk.key` (the PSK master — losing it strands
+  every peer), `admin-token`, and (built-in TLS) `key.pem`. Details and a
+  cron sketch in [SECURITY.md](SECURITY.md).
 
 ### Honest production status
 
-Suitable today: trusted-LAN and public-endpoint meshes, homelab scale.
-Known limits: no DNS, single-writer SQLite control plane (fine for
-hundreds of peers, not thousands), relay pairs are per-peer-pair UDP
-forwarding sessions with no bandwidth accounting, symmetric-NAT-to-
-symmetric-NAT traffic always relays, and the Windows agent has not been
-exercised on real hardware.
+Suitable today: trusted-LAN, public-endpoint, and VPS-fronted meshes at
+homelab scale. See [SECURITY.md](SECURITY.md) for the hardening checklist
+before exposing the control plane. Known limits: no DNS; single-writer
+SQLite (fine for hundreds of peers, not thousands); bearer-token (not
+key-signature) peer auth; no PSK-master rotation; relay is store-and-forward
+with no bandwidth accounting and no relay→direct downgrade; symmetric-to-
+symmetric NAT always relays; the Windows agent is unvalidated on real
+hardware.
 
 ## ACLs
 
@@ -354,30 +382,29 @@ sudo ./bin/agent --server https://192.168.1.10:8443 --setup-key <token> \
   --server-ca cert.pem
 ```
 
+Useful agent flags: `--listen-port 51820` (pin the WireGuard port — strongly
+recommended so the firewall rule is stable across restarts), `--server-ca`
+(pin a self-signed server cert), `--relay-transport websocket|udp`,
+`--stun-server`, `--key-file`, `--manage-firewall`.
+
 The agent will:
 
 1. Load or generate its private key (`--key-file`, default `wgkey.key`,
    0600). The keypair is the node's permanent identity — created once,
    reused forever. Never delete it casually.
-2. POST its **public** key to `/enroll` (the private key never leaves the
-   machine).
-3. Receive its assigned overlay IP and the current peer list, including the
-   network PSK and keepalive interval.
-4. Create the `wg-int` interface, assign the address, configure all peers,
-   and block until SIGINT/SIGTERM, then tear the interface down.
+2. Discover its public endpoint via STUN, then POST its **public** key to
+   `/enroll` (the private key never leaves the machine).
+3. Receive its assigned overlay IP, an auth token, and the peers it may
+   reach — each with its per-pair PSK, endpoint hint, and keepalive.
+4. Create the `wg-int` interface, assign the address, configure peers, and
+   report telemetry every 30s. Each report response re-syncs the peer list,
+   so membership/endpoint/ACL/PSK changes land within one interval. Blocks
+   until SIGINT/SIGTERM, then tears the interface down.
 
 Re-running the agent is safe: enrollment is idempotent, so a node that
 re-enrolls with the same public key and its original setup key gets its
-existing assignment back — even if that key has since expired or been
-exhausted.
-
-**Current limitation:** peers learn about each other at enrollment time only.
-A node enrolled *before* you does not hear about you until it re-enrolls
-(restart its agent). Live config sync is the next roadmap item. Peer
-endpoints are also not distributed yet — until STUN lands, at least one side
-of each pair must be able to reach the other (e.g. same LAN or a public IP),
-and WireGuard's endpoint roaming takes over from the first authenticated
-packet.
+existing assignment back (a fresh auth token each time) — even if that key
+has since expired or been exhausted.
 
 ### Standalone mode (no control plane)
 
@@ -396,7 +423,13 @@ sudo ./bin/agent --addr 100.64.0.1/16 \
 `POST /enroll`
 
 ```json
-{ "setup_key": "…", "public_key": "…", "hostname": "…", "listen_port": 51820 }
+{
+  "setup_key": "…",
+  "public_key": "…",
+  "hostname": "…",
+  "listen_port": 51820,
+  "public_endpoint": "203.0.113.10:51820"
+}
 ```
 
 Success (`200`):
@@ -406,22 +439,28 @@ Success (`200`):
   "peer_id": 2,
   "assigned_ip": "100.64.0.2",
   "network_cidr": "100.64.0.0/16",
+  "auth_token": "…",
   "peers": [
     {
       "public_key": "…",
       "preshared_key": "…",
       "persistent_keepalive_interval": 25,
       "allowed_ips": ["100.64.0.1/32"],
-      "endpoint": null
+      "endpoint": "203.0.113.11:51820"
     }
   ]
 }
 ```
 
+`auth_token` authenticates the agent's subsequent `/report`, `/relay-pair`,
+and `/relay-ws` calls (rotated on every enrollment; only its hash is stored).
+`endpoint` is the server's best hint for that peer and may be null when
+unknown. `peers` contains only the peers this node is allowed to reach.
+
 Every setup-key failure — unknown, expired, revoked, exhausted, or a
 re-enroll with the wrong key — returns a uniform `401
-{"error":"unauthorized"}`. The real reason is only written to the server log,
-so the wire leaks nothing about which keys exist or their state.
+{"error":"unauthorized"}`. The real reason goes to the server log and the
+audit trail only, so the wire leaks nothing about which keys exist.
 
 ## Design decisions worth knowing
 

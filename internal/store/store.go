@@ -36,6 +36,11 @@ type Store struct {
 	// sees every peer unless the operator adds rules; false means
 	// only rule-connected pairs see each other. Set once at startup.
 	DefaultAllow bool
+
+	// TokenTTL bounds how long a peer auth token stays valid after
+	// issue. Agents re-enroll (rotating the token) at startup and on
+	// expiry. Zero means no expiry. Set once at startup.
+	TokenTTL time.Duration
 }
 
 type PeerRow struct {
@@ -113,13 +118,40 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 4
+const schemaVersion = 5
 
 var migrations = map[int]string{
 	2: migrationV2,
 	3: migrationV3,
 	4: migrationV4,
+	5: migrationV5,
 }
+
+// migrationV5 adds a durable audit log for security-relevant events
+// and records when each peer's auth token was issued, so tokens can
+// expire.
+const migrationV5 = `
+ALTER TABLE peers ADD COLUMN auth_token_issued_at TEXT;
+
+CREATE TABLE audit_log (
+    id            INTEGER PRIMARY KEY,
+    at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    event         TEXT NOT NULL,
+    peer_id       INTEGER REFERENCES peers(id) ON DELETE SET NULL,
+    overlay_ip    TEXT,          -- the peer's WireGuard overlay IP, when known
+    remote_ip     TEXT,          -- underlay source as the server saw it
+    forwarded_for TEXT,          -- raw X-Forwarded-For chain (proxy hops)
+    user_agent    TEXT,
+    method        TEXT,
+    path          TEXT,
+    status        INTEGER,
+    detail        TEXT           -- event-specific note; never a secret
+);
+
+CREATE INDEX idx_audit_log_at ON audit_log(at);
+CREATE INDEX idx_audit_log_event ON audit_log(event);
+CREATE INDEX idx_audit_log_peer ON audit_log(peer_id);
+`
 
 // migrationV2 adds telemetry: per-peer auth tokens (issued at
 // enrollment, hash only), accumulated per-link WireGuard counters,
@@ -353,9 +385,9 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 	}
 
 	insert, err := tx.ExecContext(ctx,
-		`INSERT INTO peers (public_key, assigned_ip, hostname, listen_port, setup_key_id, auth_token_hash, observed_ip, public_endpoint)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		publicKey, ip, host, port, keyID, tokenHash,
+		`INSERT INTO peers (public_key, assigned_ip, hostname, listen_port, setup_key_id, auth_token_hash, auth_token_issued_at, observed_ip, public_endpoint)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		publicKey, ip, host, port, keyID, tokenHash, now,
 		nullable(observedIP), nullable(publicEndpoint),
 	)
 	if err != nil {
@@ -431,11 +463,13 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE peers SET auth_token_hash = ?,
+		        auth_token_issued_at = ?,
 		        observed_ip = COALESCE(?, observed_ip),
 		        public_endpoint = COALESCE(?, public_endpoint),
 		        listen_port = COALESCE(?, listen_port)
 		 WHERE id = ?`,
-		tokenHash, nullable(observedIP), nullable(publicEndpoint), port, existing.ID,
+		tokenHash, time.Now().UTC().Format(timeFormat),
+		nullable(observedIP), nullable(publicEndpoint), port, existing.ID,
 	); err != nil {
 		return nil, fmt.Errorf("rotate auth token: %w", err)
 	}

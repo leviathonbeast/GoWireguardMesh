@@ -375,7 +375,7 @@ func run() error {
 	fmt.Printf("[agent] using listen port: %d\n", listenPort)
 
 	if *manageFirewallFlag {
-		fw, err := firewall.Open("wgmesh-agent")
+		fw, err := firewall.OpenWithReconcile("wgmesh-agent", *keyFileFlag+".fw")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[agent] firewall: %v; open udp %d yourself if needed\n", err, listenPort)
 		} else {

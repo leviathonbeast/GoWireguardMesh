@@ -3,6 +3,7 @@ module gowireguard
 go 1.26.4
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/pion/stun/v3 v3.1.6
 	github.com/ti-mo/conntrack v0.6.0
 	github.com/vishvananda/netlink v1.3.1
@@ -13,7 +14,6 @@ require (
 )
 
 require (
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect

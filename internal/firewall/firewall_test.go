@@ -93,6 +93,36 @@ func TestNftablesTeardownDeletesOwnTableOnly(t *testing.T) {
 	}
 }
 
+func TestReconcileRemovesLeakedRules(t *testing.T) {
+	dir := t.TempDir()
+	state := dir + "/wgmesh.fw"
+
+	// First run: open a port, then simulate a crash by NOT calling
+	// Close — the state file survives with the rule recorded.
+	f1 := &fakeRunner{}
+	m1 := &Manager{tag: "wgmesh-test", backend: iptablesBackend{}, run: f1.run, stateFile: state}
+	if err := m1.AllowUDP(51820); err != nil {
+		t.Fatalf("AllowUDP: %v", err)
+	}
+
+	// Second run: reconcile must issue the delete for the leaked port
+	// before anything else.
+	f2 := &fakeRunner{}
+	m2 := &Manager{tag: "wgmesh-test", backend: iptablesBackend{}, run: f2.run, stateFile: state}
+	m2.reconcile()
+
+	found := false
+	for _, c := range f2.cmds {
+		if strings.Contains(c, "-D INPUT -p udp --dport 51820") {
+			found = true
+		}
+	}
+
+	if !found {
+		t.Fatalf("reconcile did not remove the leaked rule; ran: %v", f2.cmds)
+	}
+}
+
 func TestNoBackendIsSafeNoop(t *testing.T) {
 	m := &Manager{tag: "wgmesh-test", run: nil} // backend nil, runner unused
 

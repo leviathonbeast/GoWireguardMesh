@@ -10,5 +10,8 @@ mesh-psk.key
 admin-token
 cert.pem
 key.pem
+relay-secret
+*.fw
+*.port
 node_modules/
 *.exe

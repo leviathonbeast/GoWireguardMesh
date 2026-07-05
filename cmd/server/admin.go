@@ -149,6 +149,7 @@ func (s *server) handleCreateSetupKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("admin created setup key (max_uses=%d, expires_in=%q)", req.MaxUses, req.ExpiresIn)
+	s.audit(r, "setup_key_create", http.StatusOK, fmt.Sprintf("max_uses=%d expires_in=%q", req.MaxUses, req.ExpiresIn))
 	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }
 
@@ -175,6 +176,7 @@ func (s *server) handleRevoke(w http.ResponseWriter, r *http.Request, revoke fun
 		writeError(w, http.StatusInternalServerError, "internal error")
 	default:
 		log.Printf("admin revoked %s %d", kind, id)
+		s.audit(r, "revoke", http.StatusOK, fmt.Sprintf("%s id=%d", kind, id))
 		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	}
 }

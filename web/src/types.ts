@@ -55,13 +55,33 @@ export interface Flow {
   peer_id: number;
   peer_hostname?: string;
   protocol: number;
+  protocol_name: string;
+  direction: string; // egress | ingress | transit
   src_ip: string;
   src_port: number;
   dst_ip: string;
   dst_port: number;
+  ingress_port: number;
+  egress_port: number;
   tx_bytes: number;
   rx_bytes: number;
   tx_packets: number;
   rx_packets: number;
   reported_at: string;
+}
+
+export interface AuditRow {
+  id: number;
+  at: string;
+  event: string;
+  peer_id?: number;
+  peer_hostname?: string;
+  overlay_ip?: string;
+  remote_ip?: string;
+  forwarded_for?: string;
+  user_agent?: string;
+  method?: string;
+  path?: string;
+  status?: number;
+  detail?: string;
 }

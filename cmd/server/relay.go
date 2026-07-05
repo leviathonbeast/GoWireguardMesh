@@ -113,9 +113,10 @@ func (s *server) handleRelayPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerID, err := s.store.AuthenticatePeer(r.Context(), token)
+	peerID, overlayIP, err := s.store.AuthenticatePeer(r.Context(), token)
 	if err != nil {
 		if errors.Is(err, store.ErrUnauthorized) {
+			s.audit(r, "relay_pair_rejected", http.StatusUnauthorized, err.Error())
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -125,6 +126,8 @@ func (s *server) handleRelayPair(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	enrichRequest(r, peerID, overlayIP)
 
 	if s.relay == nil {
 		writeError(w, http.StatusServiceUnavailable, "no relay configured")
@@ -181,5 +184,6 @@ func (s *server) handleRelayPair(w http.ResponseWriter, r *http.Request) {
 	endpoint := net.JoinHostPort(s.relayHost, strconv.Itoa(port))
 
 	log.Printf("relay pair %s: peer %d gets %s", pairID[:8], peerID, endpoint)
+	s.audit(r, "relay_pair", http.StatusOK, "udp relay via "+endpoint)
 	writeJSON(w, http.StatusOK, map[string]string{"endpoint": endpoint})
 }

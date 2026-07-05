@@ -59,7 +59,7 @@ func run() error {
 	defer rs.Close()
 
 	if *manageFirewall && *portMin > 0 {
-		fw, ferr := firewall.Open("wgmesh-relay")
+		fw, ferr := firewall.OpenWithReconcile("wgmesh-relay", *secretFile+".fw")
 		if ferr != nil {
 			log.Printf("firewall: %v; open udp %d-%d yourself if needed", ferr, *portMin, *portMax)
 		} else if err := fw.AllowUDPRange(*portMin, *portMax); err != nil {

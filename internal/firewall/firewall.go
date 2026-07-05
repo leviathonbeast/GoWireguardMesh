@@ -12,8 +12,10 @@
 package firewall
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -50,10 +52,11 @@ type backend interface {
 // Manager tracks the rules one component added so Close can undo
 // exactly those and nothing else.
 type Manager struct {
-	tag     string
-	backend backend
-	run     runner
-	rules   []Rule
+	tag       string
+	backend   backend
+	run       runner
+	rules     []Rule
+	stateFile string // persisted open rules, for startup reconciliation
 }
 
 // Open detects the active firewall and returns a manager tagged with
@@ -69,6 +72,62 @@ func Open(tag string) (*Manager, error) {
 	}
 
 	return m, nil
+}
+
+// OpenWithReconcile is Open plus a state file. On startup it removes
+// any rules a previous run left behind (crash, kill -9, or a rule the
+// backend cannot self-identify — firewalld ports have no owner tag),
+// then tracks new rules there. This closes the leak where an
+// ungraceful exit left ports open forever.
+func OpenWithReconcile(tag, stateFile string) (*Manager, error) {
+	m, err := Open(tag)
+	m.stateFile = stateFile
+
+	if m.backend != nil {
+		m.reconcile()
+	}
+
+	return m, err
+}
+
+// reconcile removes rules recorded in the state file from a prior run.
+func (m *Manager) reconcile() {
+	data, rerr := os.ReadFile(m.stateFile)
+	if rerr != nil {
+		return // no prior state, nothing to clean
+	}
+
+	var prior []Rule
+	if err := json.Unmarshal(data, &prior); err != nil {
+		return
+	}
+
+	for _, r := range prior {
+		for _, cmd := range m.backend.removeCmds(m.tag, r) {
+			// Best effort: a rule already gone (e.g. after a reboot
+			// that cleared runtime rules) just errors harmlessly.
+			m.run(cmd[0], cmd[1:]...)
+		}
+	}
+
+	if teardown := m.backend.teardownCmds(m.tag); teardown != nil {
+		for _, cmd := range teardown {
+			m.run(cmd[0], cmd[1:]...)
+		}
+	}
+
+	os.Remove(m.stateFile)
+}
+
+// persist writes the current rule set so a future run can reconcile.
+func (m *Manager) persist() {
+	if m.stateFile == "" {
+		return
+	}
+
+	if data, err := json.Marshal(m.rules); err == nil {
+		os.WriteFile(m.stateFile, data, 0600)
+	}
 }
 
 // Backend names the detected firewall, or "none".
@@ -105,6 +164,7 @@ func (m *Manager) allow(r Rule) error {
 	}
 
 	m.rules = append(m.rules, r)
+	m.persist()
 
 	return nil
 }
@@ -125,7 +185,7 @@ func (m *Manager) Close() error {
 			}
 		}
 
-		m.rules = nil
+		m.clearState()
 
 		return errors.Join(errs...)
 	}
@@ -139,7 +199,15 @@ func (m *Manager) Close() error {
 		}
 	}
 
-	m.rules = nil
+	m.clearState()
 
 	return errors.Join(errs...)
+}
+
+func (m *Manager) clearState() {
+	m.rules = nil
+
+	if m.stateFile != "" {
+		os.Remove(m.stateFile)
+	}
 }

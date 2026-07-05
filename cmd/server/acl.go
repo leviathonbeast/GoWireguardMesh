@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -63,6 +64,7 @@ func (s *server) handleCreateACL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("admin created acl rule %d", id)
+	s.audit(r, "acl_create", http.StatusOK, fmt.Sprintf("rule id=%d src=%v dst=%v", id, req.SrcPeerID, req.DstPeerID))
 	writeJSON(w, http.StatusOK, map[string]int64{"id": id})
 }
 
@@ -81,6 +83,7 @@ func (s *server) handleDeleteACL(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 	default:
 		log.Printf("admin deleted acl rule %d", id)
+		s.audit(r, "acl_delete", http.StatusOK, fmt.Sprintf("rule id=%d", id))
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	}
 }

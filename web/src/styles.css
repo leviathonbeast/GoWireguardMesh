@@ -195,6 +195,126 @@ td.mono {
   color: var(--muted);
 }
 
+/* Activity feed — NetBird-style traffic/audit event rows. */
+.activity {
+  display: flex;
+  flex-direction: column;
+  min-width: 720px;
+}
+
+.activity-head,
+.activity-row {
+  display: grid;
+  grid-template-columns: 2.4fr 1.5fr 1.1fr 1.5fr 0.9fr;
+  gap: 16px;
+  align-items: center;
+}
+
+.activity-head {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.activity-head .right,
+.activity-row .traffic {
+  justify-self: end;
+  text-align: right;
+}
+
+.activity-row {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.activity-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.event-cell {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex: none;
+}
+
+.dot.ok {
+  background: var(--ok);
+}
+.dot.bad {
+  background: var(--bad);
+}
+.dot.warn {
+  background: var(--warn);
+}
+.dot.info {
+  background: var(--accent);
+}
+
+.event-time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.event-text {
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.event-text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.endpoint-name {
+  color: var(--text);
+}
+
+.endpoint-ip {
+  color: var(--muted);
+  font-size: 12px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+.pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pill {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.traffic {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.traffic .down {
+  color: var(--accent);
+}
+
+.traffic .up {
+  color: var(--warn);
+}
+
 .error {
   color: var(--bad);
   margin: 12px 0;

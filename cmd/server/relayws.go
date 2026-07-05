@@ -55,9 +55,10 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerID, err := s.store.AuthenticatePeer(r.Context(), token)
+	peerID, overlayIP, err := s.store.AuthenticatePeer(r.Context(), token)
 	if err != nil {
 		if errors.Is(err, store.ErrUnauthorized) {
+			s.audit(r, "relay_ws_rejected", http.StatusUnauthorized, err.Error())
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -67,6 +68,8 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	enrichRequest(r, peerID, overlayIP)
 
 	target := r.URL.Query().Get("peer")
 	if target == "" {
@@ -102,6 +105,7 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 	fc := wsFrameConn{conn: conn, ctx: context.Background()}
 
 	log.Printf("relay-ws: peer %d joined pair %s", peerID, pairID[:8])
+	s.audit(r, "relay_ws_open", http.StatusOK, "websocket relay pair "+pairID[:8])
 
 	if err := s.wsHub.Serve(pairID, selfKey, fc); err != nil {
 		conn.Close(websocket.StatusInternalError, "relay closed")
@@ -110,6 +114,7 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("relay-ws: peer %d left pair %s", peerID, pairID[:8])
+	s.audit(r, "relay_ws_close", http.StatusOK, "websocket relay pair "+pairID[:8])
 }
 
 // relayPairID derives the shared pair identifier from two public keys,

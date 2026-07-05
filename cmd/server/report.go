@@ -23,10 +23,13 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerID, err := s.store.AuthenticatePeer(r.Context(), token)
+	peerID, overlayIP, err := s.store.AuthenticatePeer(r.Context(), token)
 	if err != nil {
 		if errors.Is(err, store.ErrUnauthorized) {
 			log.Printf("[server] report rejected: %v", err)
+			// Auth failures are audited (routine successful reports
+			// are not — they would flood the log every 30s).
+			s.audit(r, "report_rejected", http.StatusUnauthorized, err.Error())
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -35,6 +38,8 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+
+	enrichRequest(r, peerID, overlayIP)
 
 	var report proto.ReportRequest
 
@@ -87,15 +92,54 @@ type flowJSON struct {
 	PeerID       int64  `json:"peer_id"`
 	PeerHostname string `json:"peer_hostname,omitempty"`
 	Protocol     int    `json:"protocol"`
+	ProtocolName string `json:"protocol_name"` // tcp/udp/icmp/...
+	Direction    string `json:"direction"`     // egress/ingress/transit, from the reporter's view
 	SrcIP        string `json:"src_ip"`
 	SrcPort      int    `json:"src_port"`
 	DstIP        string `json:"dst_ip"`
 	DstPort      int    `json:"dst_port"`
+	IngressPort  int    `json:"ingress_port"` // port traffic arrives on at the reporter
+	EgressPort   int    `json:"egress_port"`  // port traffic leaves from at the reporter
 	TxBytes      int64  `json:"tx_bytes"`
 	RxBytes      int64  `json:"rx_bytes"`
 	TxPackets    int64  `json:"tx_packets"`
 	RxPackets    int64  `json:"rx_packets"`
 	ReportedAt   string `json:"reported_at"`
+}
+
+// protocolName maps IP protocol numbers to names.
+func protocolName(p int) string {
+	switch p {
+	case 1:
+		return "icmp"
+	case 6:
+		return "tcp"
+	case 17:
+		return "udp"
+	case 58:
+		return "icmpv6"
+	default:
+		return strconv.Itoa(p)
+	}
+}
+
+// flowDirection classifies a flow relative to the reporting peer's
+// overlay IP. Conntrack's original tuple is initiator->responder, so
+// src == the reporter means it opened the connection (egress); dst ==
+// the reporter means something reached in to it (ingress). Ingress and
+// egress ports are labeled from the reporter's own vantage: the port
+// on its side that traffic arrives at vs. leaves from.
+func flowDirection(peerIP, srcIP string, srcPort int, dstIP string, dstPort int) (dir string, ingressPort, egressPort int) {
+	switch peerIP {
+	case srcIP:
+		// Reporter initiated: it sends from srcPort, replies arrive there.
+		return "egress", srcPort, dstPort
+	case dstIP:
+		// Reporter received: traffic arrives on dstPort, it replies from dstPort.
+		return "ingress", dstPort, srcPort
+	default:
+		return "transit", dstPort, srcPort
+	}
 }
 
 func (s *server) handleListLinkStats(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +180,27 @@ func (s *server) handleListFlows(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]flowJSON, 0, len(flows))
 	for _, f := range flows {
-		out = append(out, flowJSON(f))
+		dir, ingressPort, egressPort := flowDirection(f.PeerIP, f.SrcIP, f.SrcPort, f.DstIP, f.DstPort)
+
+		out = append(out, flowJSON{
+			ID:           f.ID,
+			PeerID:       f.PeerID,
+			PeerHostname: f.PeerHostname,
+			Protocol:     f.Protocol,
+			ProtocolName: protocolName(f.Protocol),
+			Direction:    dir,
+			SrcIP:        f.SrcIP,
+			SrcPort:      f.SrcPort,
+			DstIP:        f.DstIP,
+			DstPort:      f.DstPort,
+			IngressPort:  ingressPort,
+			EgressPort:   egressPort,
+			TxBytes:      f.TxBytes,
+			RxBytes:      f.RxBytes,
+			TxPackets:    f.TxPackets,
+			RxPackets:    f.RxPackets,
+			ReportedAt:   f.ReportedAt,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, out)

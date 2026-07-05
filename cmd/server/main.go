@@ -76,19 +76,6 @@ func main() {
 	}
 }
 
-func overlayAddress(addr string) (string, error) {
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		return "", fmt.Errorf("parse overlay address %q", addr)
-	}
-
-	if ip.To4() != nil {
-		return fmt.Sprintf("%s/32", ip.String()), nil
-	}
-
-	return fmt.Sprintf("%s/128", ip.String()), nil
-}
-
 func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "newkey" {
 		return runNewKey(os.Args[2:])
@@ -150,9 +137,21 @@ func runServe(args []string) error {
 	relaySecretFile := fs.String("relay-secret-file", "relay-secret", "standalone relay: path to the control shared secret")
 	defaultPolicy := fs.String("default-policy", "allow", "ACL default: \"allow\" (open mesh) or \"deny\" (only rule-connected pairs see each other)")
 	manageFirewall := fs.Bool("manage-firewall", true, "open the API port on the host firewall (removed again on shutdown)")
+	tokenTTL := fs.Duration("token-ttl", 0, "peer auth token lifetime (0 = never expires); agents re-enroll to refresh")
+	auditRetention := fs.Duration("audit-retention", 90*24*time.Hour, "how long to keep audit-log rows")
+	rateLimit := fs.Float64("rate-limit", 20, "per-source requests/second on public endpoints (0 = disabled)")
+	rateBurst := fs.Float64("rate-burst", 40, "per-source burst allowance on public endpoints")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if *trustProxy && !isLoopback(*listen) {
+		// XFF from a direct client is attacker-controlled; only trust
+		// it when a proxy terminates in front. Binding non-loopback
+		// with trust-proxy means the proxy MUST be the only reachable
+		// front door — warn loudly so a misconfig is visible.
+		log.Printf("WARNING: --trust-proxy is set while listening on %s (not loopback). Ensure a reverse proxy is the ONLY thing that can reach this port, or clients can spoof X-Forwarded-For.", *listen)
 	}
 
 	prefix, err := netip.ParsePrefix(*network)
@@ -175,6 +174,8 @@ func runServe(args []string) error {
 		return fmt.Errorf("default-policy must be \"allow\" or \"deny\", got %q", *defaultPolicy)
 	}
 
+	st.TokenTTL = *tokenTTL
+
 	networkPSK, err := psk.LoadOrGenerate(*pskFile)
 	if err != nil {
 		return err
@@ -188,7 +189,7 @@ func runServe(args []string) error {
 	if *manageFirewall {
 		if _, portStr, err := net.SplitHostPort(*listen); err == nil {
 			if port, err := strconv.Atoi(portStr); err == nil {
-				fw, ferr := firewall.Open("wgmesh-server")
+				fw, ferr := firewall.OpenWithReconcile("wgmesh-server", *dbPath+".server.fw")
 				if ferr != nil {
 					log.Printf("firewall: %v; open tcp %d yourself if needed", ferr, port)
 				} else if err := fw.AllowTCP(port); err != nil {
@@ -239,7 +240,7 @@ func runServe(args []string) error {
 		srv.wsHub = relay.NewWSHub()
 
 		if *manageFirewall {
-			fw, ferr := firewall.Open("wgmesh-server-relay")
+			fw, ferr := firewall.OpenWithReconcile("wgmesh-server-relay", *dbPath+".relay.fw")
 			if ferr != nil {
 				log.Printf("firewall: %v; open udp %d-%d yourself if needed", ferr, *relayPortMin, *relayPortMax)
 			} else if err := fw.AllowUDPRange(*relayPortMin, *relayPortMax); err != nil {
@@ -273,11 +274,22 @@ func runServe(args []string) error {
 		return fmt.Errorf("locate embedded web ui: %w", err)
 	}
 
+	// publicLimit throttles the unauthenticated / peer-facing routes,
+	// which are the ones exposed to the internet on a VPS control
+	// plane. Admin routes are already gated by the admin token.
+	publicLimit := func(h http.HandlerFunc) http.HandlerFunc {
+		if *rateLimit <= 0 {
+			return h
+		}
+
+		return newRateLimiter(*rateLimit, *rateBurst).middleware(srv.clientIP, h)
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /enroll", srv.handleEnroll)
-	mux.HandleFunc("POST /report", srv.handleReport)
-	mux.HandleFunc("POST /relay-pair", srv.handleRelayPair)
-	mux.HandleFunc("GET /relay-ws", srv.handleRelayWS)
+	mux.HandleFunc("POST /enroll", publicLimit(srv.handleEnroll))
+	mux.HandleFunc("POST /report", publicLimit(srv.handleReport))
+	mux.HandleFunc("POST /relay-pair", publicLimit(srv.handleRelayPair))
+	mux.HandleFunc("GET /relay-ws", publicLimit(srv.handleRelayWS))
 	mux.Handle("GET /", http.FileServerFS(ui))
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))
@@ -289,17 +301,28 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /api/acl", srv.requireAdmin(srv.handleListACL))
 	mux.HandleFunc("POST /api/acl", srv.requireAdmin(srv.handleCreateACL))
 	mux.HandleFunc("POST /api/acl/{id}/delete", srv.requireAdmin(srv.handleDeleteACL))
+	mux.HandleFunc("GET /api/audit", srv.requireAdmin(srv.handleListAudit))
+	mux.HandleFunc("GET /healthz", srv.handleHealthz)
+
+	// Every request gets a structured access-log line with the
+	// original IP, proxy chain, overlay IP, and redacted headers.
+	handler := srv.logRequests(mux)
 
 	pruneCtx, cancelPrune := context.WithCancel(context.Background())
 	defer cancelPrune()
 
 	go srv.pruneFlowsLoop(pruneCtx, *flowRetention)
+	go srv.pruneAuditLoop(pruneCtx, *auditRetention)
 
 	if *noTLS {
+		if !isLoopback(*listen) && !*trustProxy {
+			log.Printf("WARNING: serving plain HTTP on %s with no TLS. Setup keys, the admin token, and peer tokens cross the wire in cleartext. Use only on a trusted network, or put TLS in front (Traefik) and set --trust-proxy.", *listen)
+		}
+
 		log.Printf("control plane on http://%s (network %s, db %s) — plain HTTP; terminate TLS upstream (e.g. Traefik) or use for dev only", *listen, srv.networkCIDR, *dbPath)
 		log.Printf("web UI at http://%s/ (token in %s)", *listen, *adminTokenFile)
 
-		if err := http.ListenAndServe(*listen, mux); err != nil {
+		if err := http.ListenAndServe(*listen, handler); err != nil {
 			return fmt.Errorf("http server: %w", err)
 		}
 
@@ -324,7 +347,7 @@ func runServe(args []string) error {
 		log.Printf("[server] relay fallback enabled for NATed peers")
 	}
 
-	if err := http.ListenAndServeTLS(*listen, *tlsCert, *tlsKey, mux); err != nil {
+	if err := http.ListenAndServeTLS(*listen, *tlsCert, *tlsKey, handler); err != nil {
 		return fmt.Errorf("https server: %w", err)
 	}
 
@@ -360,8 +383,9 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrUnauthorized):
 		// Uniform 401: invalid, expired, revoked, and exhausted are
 		// indistinguishable on the wire. The real reason goes to the
-		// server log only.
+		// server log and audit trail only.
 		log.Printf("[server] enroll rejected for %s (listen_port=%d): %v", req.PublicKey, req.ListenPort, err)
+		s.audit(r, "enroll_rejected", http.StatusUnauthorized, err.Error())
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	case err != nil:
@@ -370,10 +394,14 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	enrichRequest(r, res.Peer.ID, res.Peer.AssignedIP)
+
 	if res.Created {
 		log.Printf("[server] enrolled peer %d (%s) at %s (listen_port=%d, endpoint=%s)", res.Peer.ID, req.PublicKey, res.Peer.AssignedIP, req.ListenPort, req.PublicEndpoint)
+		s.audit(r, "enroll", http.StatusOK, fmt.Sprintf("new peer %s (%s)", res.Peer.AssignedIP, req.Hostname))
 	} else {
 		log.Printf("[server] idempotent re-enroll of peer %d (%s) (listen_port=%d, endpoint=%s)", res.Peer.ID, req.PublicKey, req.ListenPort, req.PublicEndpoint)
+		s.audit(r, "re_enroll", http.StatusOK, fmt.Sprintf("peer %s (%s)", res.Peer.AssignedIP, req.Hostname))
 	}
 
 	out, err := s.buildResponse(res)

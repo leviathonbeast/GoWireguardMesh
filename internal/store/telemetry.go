@@ -10,24 +10,34 @@ import (
 	"gowireguard/internal/proto"
 )
 
-// AuthenticatePeer resolves a peer auth token to the peer's id.
-// Returns ErrUnauthorized for unknown tokens and revoked peers alike.
-func (s *Store) AuthenticatePeer(ctx context.Context, token string) (int64, error) {
-	var id int64
+// AuthenticatePeer resolves a peer auth token to the peer's id and
+// overlay IP. Returns ErrUnauthorized for unknown tokens, revoked
+// peers, and (when TokenTTL is set) tokens older than the TTL — all
+// indistinguishable to the caller; the wrapped detail is for logs.
+func (s *Store) AuthenticatePeer(ctx context.Context, token string) (id int64, overlayIP string, err error) {
+	var issuedAt sql.NullString
 
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM peers WHERE auth_token_hash = ? AND revoked_at IS NULL`,
+	err = s.db.QueryRowContext(ctx,
+		`SELECT id, assigned_ip, auth_token_issued_at
+		 FROM peers WHERE auth_token_hash = ? AND revoked_at IS NULL`,
 		HashToken(token),
-	).Scan(&id)
+	).Scan(&id, &overlayIP, &issuedAt)
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return 0, fmt.Errorf("%w: unknown or revoked peer token", ErrUnauthorized)
+		return 0, "", fmt.Errorf("%w: unknown or revoked peer token", ErrUnauthorized)
 	case err != nil:
-		return 0, fmt.Errorf("authenticate peer: %w", err)
+		return 0, "", fmt.Errorf("authenticate peer: %w", err)
 	}
 
-	return id, nil
+	if s.TokenTTL > 0 && issuedAt.Valid {
+		issued, perr := time.Parse(timeFormat, issuedAt.String)
+		if perr == nil && time.Since(issued) > s.TokenTTL {
+			return 0, "", fmt.Errorf("%w: token expired (issued %s, ttl %s)", ErrUnauthorized, issuedAt.String, s.TokenTTL)
+		}
+	}
+
+	return id, overlayIP, nil
 }
 
 // ApplyReport ingests one telemetry report from peerID: bumps
@@ -182,6 +192,7 @@ type FlowRow struct {
 	ID           int64
 	PeerID       int64
 	PeerHostname string
+	PeerIP       string // reporter's overlay IP, for direction labeling
 	Protocol     int
 	SrcIP        string
 	SrcPort      int
@@ -197,7 +208,7 @@ type FlowRow struct {
 // RecentFlows returns the newest flow rows, most recent first.
 func (s *Store) RecentFlows(ctx context.Context, limit int) ([]FlowRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT f.id, f.peer_id, COALESCE(p.hostname, ''), f.protocol,
+		`SELECT f.id, f.peer_id, COALESCE(p.hostname, ''), p.assigned_ip, f.protocol,
 		        f.src_ip, f.src_port, f.dst_ip, f.dst_port,
 		        f.tx_bytes, f.rx_bytes, f.tx_packets, f.rx_packets, f.reported_at
 		 FROM flows f
@@ -215,7 +226,7 @@ func (s *Store) RecentFlows(ctx context.Context, limit int) ([]FlowRow, error) {
 
 	for rows.Next() {
 		var f FlowRow
-		if err := rows.Scan(&f.ID, &f.PeerID, &f.PeerHostname, &f.Protocol,
+		if err := rows.Scan(&f.ID, &f.PeerID, &f.PeerHostname, &f.PeerIP, &f.Protocol,
 			&f.SrcIP, &f.SrcPort, &f.DstIP, &f.DstPort,
 			&f.TxBytes, &f.RxBytes, &f.TxPackets, &f.RxPackets, &f.ReportedAt); err != nil {
 			return nil, fmt.Errorf("scan flow: %w", err)

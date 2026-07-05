@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import type { AclResponse, Flow, LinkStat, Peer, SetupKey } from "./types";
+import type { AclResponse, AuditRow, Flow, LinkStat, Peer, SetupKey } from "./types";
 
 function formatTime(iso?: string): string {
   return iso ? iso.replace("T", " ").replace(/\.\d+Z$/, "Z") : "";
@@ -16,12 +16,6 @@ function humanBytes(n: number): string {
     u++;
   } while (v >= 1024 && u < units.length - 1);
   return `${v.toFixed(1)} ${units[u]}`;
-}
-
-const PROTOCOLS: Record<number, string> = { 1: "icmp", 6: "tcp", 17: "udp", 58: "icmpv6" };
-
-function protocolName(p: number): string {
-  return PROTOCOLS[p] ?? String(p);
 }
 
 function peerLabel(hostname: string | undefined, ip: string): string {
@@ -99,8 +93,167 @@ function endpointOf(p: Peer): string {
   return "";
 }
 
-const TABS = ["peers", "traffic", "access"] as const;
+const TABS = ["peers", "traffic", "access", "audit"] as const;
 type Tab = (typeof TABS)[number];
+
+// flowMatches / auditMatches do free-text search across the fields an
+// operator would filter on: ip, port, hostname, protocol, direction,
+// event, detail. Case-insensitive substring.
+function flowMatches(f: Flow, q: string, srcName: string, dstName: string): boolean {
+  if (!q) return true;
+  const hay = [
+    f.src_ip, f.src_port, f.dst_ip, f.dst_port,
+    f.protocol_name, f.direction, f.peer_hostname, srcName, dstName,
+  ]
+    .join(" ")
+    .toLowerCase();
+  return hay.includes(q.toLowerCase());
+}
+
+function auditMatches(a: AuditRow, q: string): boolean {
+  if (!q) return true;
+  const hay = [
+    a.event, a.detail, a.remote_ip, a.overlay_ip, a.peer_hostname,
+    a.forwarded_for, a.method, a.path, a.status,
+  ]
+    .join(" ")
+    .toLowerCase();
+  return hay.includes(q.toLowerCase());
+}
+
+function Endpoint({ name, ip }: { name: string; ip?: string }) {
+  return (
+    <div>
+      <div className="endpoint-name">{name}</div>
+      {ip ? <div className="endpoint-ip">{ip}</div> : null}
+    </div>
+  );
+}
+
+// FlowEvent renders one observed flow as a NetBird-style traffic
+// event: a sentence, both peer endpoints, protocol/port, and
+// directional byte counts from the reporting peer's vantage.
+function FlowEvent({ f, ipName }: { f: Flow; ipName: (ip: string) => string }) {
+  const srcName = ipName(f.src_ip);
+  const dstName = ipName(f.dst_ip);
+
+  const subject = f.direction === "ingress" ? dstName : srcName;
+  const other = f.direction === "ingress" ? srcName : dstName;
+  const verb = f.direction === "ingress" ? "received a" : "opened a";
+  const prep = f.direction === "ingress" ? "from" : "to";
+
+  return (
+    <div className="activity-row">
+      <div className="event-cell">
+        <span className="dot ok" />
+        <div>
+          <div className="event-time">{formatTime(f.reported_at)}</div>
+          <div className="event-text">
+            Peer <strong>{subject}</strong> {verb}{" "}
+            {f.protocol_name.toUpperCase()} connection {prep} Peer{" "}
+            <strong>{other}</strong>
+          </div>
+        </div>
+      </div>
+      <Endpoint name={srcName} ip={`${f.src_ip}:${f.src_port}`} />
+      <div className="pills">
+        <span className="pill">{f.protocol_name.toUpperCase()}</span>
+        <span className="pill">{f.dst_port}</span>
+      </div>
+      <Endpoint name={dstName} ip={`${f.dst_ip}:${f.dst_port}`} />
+      <div className="traffic">
+        <div>
+          <span className="down">↓</span> {humanBytes(f.rx_bytes)}
+        </div>
+        <div>
+          <span className="up">↑</span> {humanBytes(f.tx_bytes)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const ADMIN_EVENTS = new Set([
+  "setup_key_create",
+  "acl_create",
+  "acl_delete",
+  "revoke",
+]);
+
+const EVENT_PHRASE: Record<string, string> = {
+  enroll: "enrolled",
+  re_enroll: "re-enrolled",
+  enroll_rejected: "was rejected at enrollment",
+  report_rejected: "had a telemetry report rejected",
+  relay_pair: "requested a UDP relay path",
+  relay_pair_rejected: "was rejected requesting a relay",
+  relay_ws_open: "opened a WebSocket relay",
+  relay_ws_close: "closed a WebSocket relay",
+  relay_ws_rejected: "was rejected opening a relay",
+  setup_key_create: "created a setup key",
+  acl_create: "added an ACL rule",
+  acl_delete: "deleted an ACL rule",
+  revoke: "revoked",
+};
+
+function auditDot(a: AuditRow): string {
+  if (a.event.endsWith("rejected") || (a.status ?? 0) >= 400) return "bad";
+  if (ADMIN_EVENTS.has(a.event)) return "warn";
+  if (a.event.includes("relay")) return "info";
+  return "ok";
+}
+
+function AuditEvent({ a }: { a: AuditRow }) {
+  const phrase = EVENT_PHRASE[a.event] ?? a.event;
+  const who = a.peer_hostname || a.overlay_ip || "";
+
+  let subject;
+  if (ADMIN_EVENTS.has(a.event)) subject = <>Admin </>;
+  else if (who)
+    subject = (
+      <>
+        Peer <strong>{who}</strong>{" "}
+      </>
+    );
+  else if (a.remote_ip)
+    subject = (
+      <>
+        <strong>{a.remote_ip}</strong>{" "}
+      </>
+    );
+  else subject = null;
+
+  return (
+    <div className="activity-row">
+      <div className="event-cell">
+        <span className={`dot ${auditDot(a)}`} />
+        <div>
+          <div className="event-time">{formatTime(a.at)}</div>
+          <div className="event-text">
+            {subject}
+            {phrase}
+            {a.detail ? <span className="muted"> — {a.detail}</span> : null}
+          </div>
+        </div>
+      </div>
+      <Endpoint name={a.remote_ip || "—"} ip={a.forwarded_for || undefined} />
+      <div className="pills">
+        {a.method ? <span className="pill">{a.method}</span> : null}
+        {a.path ? <span className="pill">{a.path}</span> : null}
+      </div>
+      <Endpoint name={a.peer_hostname || "—"} ip={a.overlay_ip || undefined} />
+      <div className="traffic">
+        {a.status ? (
+          <span className={(a.status ?? 0) >= 400 ? "up" : "down"}>
+            {a.status}
+          </span>
+        ) : (
+          ""
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [token, setToken] = useState(
@@ -113,7 +266,16 @@ export default function App() {
   const [links, setLinks] = useState<LinkStat[]>([]);
   const [flows, setFlows] = useState<Flow[]>([]);
   const [acl, setAcl] = useState<AclResponse>({ default_policy: "allow", rules: [] });
+  const [audit, setAudit] = useState<AuditRow[]>([]);
+  const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
+
+  // ipName resolves an overlay IP to a peer hostname (both sides of a
+  // flow get named, like NetBird), falling back to the raw IP.
+  const ipName = useCallback(
+    (ip: string) => peers.find((p) => p.assigned_ip === ip)?.hostname || ip,
+    [peers],
+  );
   const [maxUses, setMaxUses] = useState(0);
   const [expiresIn, setExpiresIn] = useState("");
   const [aclSrc, setAclSrc] = useState("any");
@@ -123,18 +285,20 @@ export default function App() {
     if (!token) return;
     setError("");
     try {
-      const [p, k, l, f, a] = await Promise.all([
+      const [p, k, l, f, a, au] = await Promise.all([
         api<Peer[]>("/api/peers", token),
         api<SetupKey[]>("/api/setup-keys", token),
         api<LinkStat[]>("/api/link-stats", token),
         api<Flow[]>("/api/flows?limit=100", token),
         api<AclResponse>("/api/acl", token),
+        api<AuditRow[]>("/api/audit?limit=200", token),
       ]);
       setPeers(p);
       setKeys(k);
       setLinks(l);
       setFlows(f);
       setAcl(a);
+      setAudit(au);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -361,45 +525,81 @@ export default function App() {
             </table>
           </div>
 
-          <h2>Recent flows</h2>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <h2 style={{ margin: 0 }}>Traffic events</h2>
+            <input
+              type="search"
+              placeholder="filter by ip, port, hostname, protocol…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              style={{ width: 320 }}
+            />
+          </div>
+          <div className="panel tablewrap" style={{ marginTop: 12 }}>
+            <div className="activity">
+              <div className="activity-head">
+                <span>event</span>
+                <span>source</span>
+                <span>protocol &amp; port</span>
+                <span>destination</span>
+                <span className="right">traffic</span>
+              </div>
+              {(() => {
+                const shown = flows.filter((f) =>
+                  flowMatches(f, filter, ipName(f.src_ip), ipName(f.dst_ip)),
+                );
+                if (shown.length === 0)
+                  return (
+                    <div className="activity-row muted">
+                      {flows.length ? "no matching flows" : "no flows recorded"}
+                    </div>
+                  );
+                return shown.map((f) => (
+                  <FlowEvent key={f.id} f={f} ipName={ipName} />
+                ));
+              })()}
+            </div>
+          </div>
+        </>
+      )}
+
+      {tab === "audit" && (
+        <>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <h2 style={{ margin: 0 }}>Activity log</h2>
+            <input
+              type="search"
+              placeholder="filter by event, ip, hostname, path…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              style={{ width: 320 }}
+            />
+          </div>
+          <p className="sub">
+            security events — enrollment, revocation, ACL and key changes, relay
+            sessions, and auth failures. Full request tracing (every request with
+            headers and IPs) is in the server's stdout access log.
+          </p>
           <div className="panel tablewrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>reported</th>
-                  <th>reporter</th>
-                  <th>proto</th>
-                  <th>flow</th>
-                  <th>tx</th>
-                  <th>rx</th>
-                  <th>pkts</th>
-                </tr>
-              </thead>
-              <tbody>
-                {flows.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="muted">
-                      no flows recorded
-                    </td>
-                  </tr>
-                )}
-                {flows.map((f) => (
-                  <tr key={f.id}>
-                    <td className="muted">{formatTime(f.reported_at)}</td>
-                    <td>{f.peer_hostname || f.peer_id}</td>
-                    <td>{protocolName(f.protocol)}</td>
-                    <td className="mono">
-                      {f.src_ip}:{f.src_port} → {f.dst_ip}:{f.dst_port}
-                    </td>
-                    <td>{humanBytes(f.tx_bytes)}</td>
-                    <td>{humanBytes(f.rx_bytes)}</td>
-                    <td className="muted">
-                      {f.tx_packets}/{f.rx_packets}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="activity">
+              <div className="activity-head">
+                <span>event</span>
+                <span>source</span>
+                <span>request</span>
+                <span>peer</span>
+                <span className="right">status</span>
+              </div>
+              {(() => {
+                const shown = audit.filter((a) => auditMatches(a, filter));
+                if (shown.length === 0)
+                  return (
+                    <div className="activity-row muted">
+                      {audit.length ? "no matching events" : "no activity yet"}
+                    </div>
+                  );
+                return shown.map((a) => <AuditEvent key={a.id} a={a} />);
+              })()}
+            </div>
           </div>
         </>
       )}
