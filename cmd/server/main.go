@@ -41,6 +41,8 @@ const keepaliveSeconds = 25
 
 const defaultNetwork6CIDR = "fd00:100:64::/64"
 
+const punchCooldown = 2 * time.Minute
+
 type server struct {
 	store        *store.Store
 	networkMu    sync.RWMutex
@@ -53,6 +55,13 @@ type server struct {
 	relayHost    string         // public data-plane address agents dial
 	wsHub        *relay.WSHub   // nil unless the embedded WS relay is enabled
 	accessLog    *accessLogSink
+	punchMu      sync.Mutex
+	punchEpochs  map[string]punchEpoch
+}
+
+type punchEpoch struct {
+	epoch    int
+	bumpedAt time.Time
 }
 
 // clientIP is the peer's underlay address as seen by the control
@@ -254,6 +263,7 @@ func runServe(args []string) error {
 		adminToken:   adminToken,
 		trustProxy:   *trustProxy,
 		accessLog:    newAccessLogSink(accessMode, *accessLogSize),
+		punchEpochs:  make(map[string]punchEpoch),
 	}
 
 	switch {
@@ -607,12 +617,24 @@ func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([
 			PresharedKey:                &pairPSK,
 			Endpoint:                    endpointHint(self, o),
 			EndpointCandidates:          endpointCandidates(self, o),
+			PunchEpoch:                  s.punchEpoch(self.PublicKey, o.PublicKey),
 			PersistentKeepaliveInterval: &keepalive,
 			AllowedIPs:                  allowedIPsForPeer(o),
 		})
 	}
 
 	return peers, nil
+}
+
+func (s *server) punchEpoch(keyA, keyB string) int {
+	if s == nil {
+		return 0
+	}
+
+	s.punchMu.Lock()
+	defer s.punchMu.Unlock()
+
+	return s.punchEpochs[relayPairID(keyA, keyB)].epoch
 }
 
 func allowedIPsForPeer(p store.PeerRow) []string {

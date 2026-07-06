@@ -90,7 +90,7 @@ func (t *telemetryReporter) startWSRelay(peer wgtypes.Key) (*wsRelayProxy, error
 
 	local := udp.LocalAddr().(*net.UDPAddr)
 
-	if err := t.wg.ConfigureDevice(t.iface, wgtypes.Config{
+	if err := t.wg.ConfigureDevice(wgtypes.Config{
 		Peers: []wgtypes.PeerConfig{{
 			PublicKey:  peer,
 			UpdateOnly: true,

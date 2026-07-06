@@ -3,16 +3,13 @@
 package main
 
 import (
-	"encoding/hex"
 	"fmt"
 	"net"
 	"os/exec"
-	"strings"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 // Windows has no kernel WireGuard netlink interface.
@@ -197,89 +194,6 @@ func deleteInterface(ifaceName string) error {
 
 		fmt.Printf("Deleted interface %s\n", ifaceName)
 	}
-
-	return nil
-}
-
-func buildIPCConfig(
-	privateKey wgtypes.Key,
-	listenPort int,
-	peers []wgtypes.PeerConfig,
-) string {
-	var b strings.Builder
-
-	fmt.Fprintf(
-		&b,
-		"private_key=%s\n",
-		hex.EncodeToString(privateKey[:]),
-	)
-
-	fmt.Fprintf(
-		&b,
-		"listen_port=%d\n",
-		listenPort,
-	)
-
-	for _, p := range peers {
-		fmt.Fprintf(
-			&b,
-			"public_key=%s\n",
-			hex.EncodeToString(p.PublicKey[:]),
-		)
-
-		if p.Endpoint != nil {
-			fmt.Fprintf(
-				&b,
-				"endpoint=%s\n",
-				p.Endpoint.String(),
-			)
-		}
-
-		for _, ip := range p.AllowedIPs {
-			fmt.Fprintf(
-				&b,
-				"allowed_ip=%s\n",
-				ip.String(),
-			)
-		}
-
-		if p.PersistentKeepaliveInterval != nil {
-			fmt.Fprintf(
-				&b,
-				"persistent_keepalive_interval=%d\n",
-				int(p.PersistentKeepaliveInterval.Seconds()),
-			)
-		}
-
-		fmt.Fprintf(&b, "\n")
-	}
-
-	return b.String()
-}
-
-func configureWireGuardWindows(
-	privateKey wgtypes.Key,
-	listenPort int,
-	peers []wgtypes.PeerConfig,
-) error {
-	if wgDevice == nil {
-		return fmt.Errorf("wireguard device not initialized")
-	}
-
-	cfg := buildIPCConfig(
-		privateKey,
-		listenPort,
-		peers,
-	)
-
-	if err := wgDevice.IpcSet(cfg); err != nil {
-		return fmt.Errorf(
-			"configure embedded wireguard-go device: %w",
-			err,
-		)
-	}
-
-	fmt.Println("Configured embedded WireGuard device")
 
 	return nil
 }

@@ -41,6 +41,11 @@ type PeerConfigResponse struct {
 
 	EndpointCandidates []EndpointCandidate `json:"endpoint_candidates,omitempty"`
 
+	// PunchEpoch is a control-plane coordination hint. When it
+	// increases, relayed agents probe direct candidates immediately
+	// instead of waiting for their normal retry cooldown.
+	PunchEpoch int `json:"punch_epoch,omitempty"`
+
 	// Seconds.
 	PersistentKeepaliveInterval *int `json:"persistent_keepalive_interval,omitempty"`
 

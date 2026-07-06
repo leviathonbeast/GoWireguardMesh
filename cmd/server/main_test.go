@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
+	"gowireguard/internal/proto"
 	"gowireguard/internal/store"
 )
 
@@ -109,5 +114,126 @@ func TestPeerHealthClassifiesLastSeen(t *testing.T) {
 	revoked, _ := peerHealth(time.Now().UTC().Format(time.RFC3339Nano), "revoked")
 	if revoked != "revoked" {
 		t.Fatalf("peerHealth(revoked) = %q, want revoked", revoked)
+	}
+}
+
+func TestShouldBumpPunchEpoch(t *testing.T) {
+	tests := []struct {
+		name string
+		in   punchDecision
+		want bool
+	}{
+		{
+			name: "relayed online with candidates",
+			in: punchDecision{
+				state:            "ws-relay",
+				remoteOnline:     true,
+				selfCandidates:   1,
+				remoteCandidates: 1,
+			},
+			want: true,
+		},
+		{
+			name: "direct",
+			in: punchDecision{
+				state:            "direct",
+				remoteOnline:     true,
+				selfCandidates:   1,
+				remoteCandidates: 1,
+			},
+		},
+		{
+			name: "offline remote",
+			in: punchDecision{
+				state:            "udp-relay",
+				remoteOnline:     false,
+				selfCandidates:   1,
+				remoteCandidates: 1,
+			},
+		},
+		{
+			name: "missing candidate",
+			in: punchDecision{
+				state:            "ws-relay",
+				remoteOnline:     true,
+				selfCandidates:   1,
+				remoteCandidates: 0,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldBumpPunchEpoch(tt.in); got != tt.want {
+				t.Fatalf("shouldBumpPunchEpoch() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPunchEpochCooldown(t *testing.T) {
+	srv := &server{punchEpochs: make(map[string]punchEpoch)}
+	keyA := "a"
+	keyB := "b"
+	now := time.Now()
+
+	srv.bumpPunchEpoch(keyA, keyB, now)
+	srv.bumpPunchEpoch(keyA, keyB, now.Add(punchCooldown-time.Second))
+
+	if got := srv.punchEpoch(keyA, keyB); got != 1 {
+		t.Fatalf("epoch during cooldown = %d, want 1", got)
+	}
+
+	srv.bumpPunchEpoch(keyA, keyB, now.Add(punchCooldown+time.Second))
+	if got := srv.punchEpoch(keyA, keyB); got != 2 {
+		t.Fatalf("epoch after cooldown = %d, want 2", got)
+	}
+}
+
+func TestRelayedReportEmitsPunchEpoch(t *testing.T) {
+	srv, ts := newTestServer(t)
+	setupKey, err := srv.store.CreateSetupKey(t.Context(), 0, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+	self, _ := enrollPeerKey(t, ts, setupKey, "self")
+	remote, remoteKey := enrollPeerKey(t, ts, setupKey, "remote")
+
+	reportAs(t, ts, remote.AuthToken)
+
+	report := proto.ReportRequest{
+		PathStates: []proto.PeerPathState{{
+			PeerPublicKey: remoteKey.PublicKey().String(),
+			State:         "ws-relay",
+		}},
+	}
+	body, _ := json.Marshal(report)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/report", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build report: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+self.AuthToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /report: %v", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("report status %d: %s", resp.StatusCode, raw)
+	}
+
+	var out proto.ReportResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode report response: %v", err)
+	}
+	if len(out.Peers) != 1 {
+		t.Fatalf("sync peers = %d, want 1", len(out.Peers))
+	}
+	if out.Peers[0].PunchEpoch == 0 {
+		t.Fatalf("PunchEpoch = 0, want nonzero in peer config: %+v", out.Peers[0])
 	}
 }

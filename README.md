@@ -29,7 +29,8 @@ see [SECURITY.md](SECURITY.md).
 - **NAT traversal** — STUN discovery, endpoint hints distributed at
   enrollment and via sync (with a same-NAT hairpin fallback to LAN
   addresses), and a relay fallback (WebSocket over the API port, or raw UDP)
-  that agents switch to automatically when a direct handshake never forms.
+  that agents switch to automatically when direct traffic goes genuinely
+  silent. Working direct paths stay sticky while keepalives or traffic arrive.
 - **Per-pair preshared keys** — every peer pair gets a unique PSK derived
   server-side with HKDF from a master secret. No O(n²) key storage;
   compromising one pair reveals nothing about another.
@@ -49,8 +50,8 @@ see [SECURITY.md](SECURITY.md).
 - **Platforms** — Linux (kernel WireGuard). The agent also cross-compiles
   for Windows (embedded userspace wireguard-go + Wintun), experimental.
 
-Not built yet (roadmap): DNS, relay→direct downgrade, WireGuard-key
-signature auth, PSK-master rotation.
+Not built yet (roadmap): DNS, WireGuard-key signature auth,
+PSK-master rotation.
 
 ## Layout
 
@@ -261,8 +262,10 @@ Connectivity is attempted in this order, all automatic:
    IP plus listen port, and same-NAT LAN preference when both peers report the
    same public endpoint. Candidates are priority ordered, but still just hints:
    WireGuard roaming overrides them as soon as real traffic arrives.
-3. **Relay fallback.** If a peer has produced no handshake for 60s, the
-   agent moves it onto a relay. The relay is a deliberately dumb
+3. **Relay fallback.** If a direct peer goes silent (no inbound bytes and no
+   fresh handshake) for 90s, the agent moves it onto a relay. This avoids
+   abandoning healthy links just because WireGuard's normal rekey interval is
+   longer than the old fallback timer. The relay is a deliberately dumb
    forwarder: it never parses what it carries — all traffic is WireGuard
    ciphertext, so it can drop packets but not read or forge them. This
    replaces TURN, which kernel WireGuard cannot speak (the kernel owns
@@ -283,12 +286,14 @@ Connectivity is attempted in this order, all automatic:
      needs the relay's port range reachable. Works with both embedded
    and standalone relays.
 
-Relayed peers periodically retry direct candidates from config sync. The relay
-stays alive while a direct candidate is probed, so traffic has a fallback path
-during the test. If WireGuard handshakes from a non-relay endpoint, the agent
-closes the relay and marks the path `direct`; if the probe stays silent, it
-tries the next candidate, then restores the relay endpoint after the normal
-handshake timeout.
+Relayed peers periodically retry direct candidates from config sync. When the
+control plane sees a relayed pair where both peers are online and both have
+direct candidates, it bumps a per-pair punch epoch so both agents enter a
+short coordinated probe window at roughly the same time. The relay stays alive
+while direct candidates are probed, so traffic has a fallback path during the
+test. If WireGuard handshakes from a non-relay endpoint, the agent closes the
+relay and marks the path `direct`; if the probe stays silent, it restores the
+relay endpoint.
 
 Relay setup, two shapes:
 
@@ -402,9 +407,8 @@ homelab scale. See [SECURITY.md](SECURITY.md) for the hardening checklist
 before exposing the control plane. Known limits: no DNS; single-writer
 SQLite (fine for hundreds of peers, not thousands); bearer-token (not
 key-signature) peer auth; no PSK-master rotation; relay is store-and-forward
-with no bandwidth accounting and no relay→direct downgrade; symmetric-to-
-symmetric NAT always relays; the Windows agent is unvalidated on real
-hardware.
+with no bandwidth accounting; symmetric-to-symmetric NAT may still relay; the
+Windows agent is unvalidated on real hardware.
 
 ## ACLs
 

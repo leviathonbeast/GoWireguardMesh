@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"gowireguard/internal/firewall"
@@ -557,6 +556,15 @@ func run() error {
 		return err
 	}
 
+	// One WireGuard backend serves both the initial configuration and
+	// the reporter loop: kernel WireGuard via wgctrl on Linux, the
+	// embedded wireguard-go device via its in-process UAPI on Windows.
+	backend, err := newWGBackend(ifaceName)
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+
 	peers := enrolledPeers
 
 	if *peerKeyFlag != "" {
@@ -580,39 +588,35 @@ func run() error {
 		peers = append(peers, peerCfg)
 	}
 
-	// WINDOWS:
-	// Configure embedded wireguard-go directly.
-	if err := configureWireGuard(
-		ifaceName,
-		privateKey,
-		listenPort,
-		peers,
-	); err != nil {
+	// Apply the full initial configuration — private key, listen port,
+	// and the peer set — through the backend (ReplacePeers clears any
+	// stale peers from a previous device).
+	if err := backend.ConfigureDevice(wgtypes.Config{
+		PrivateKey:   &privateKey,
+		ListenPort:   &listenPort,
+		ReplacePeers: true,
+		Peers:        peers,
+	}); err != nil {
 		return err
 	}
 
 	fmt.Println("[agent] wireguard interface setup complete")
 	fmt.Println("[agent] direct peer connectivity requires each peer to reach the configured endpoint over UDP")
 
-	// Telemetry/reporting keeps the mesh converged and drives relay fallback.
-	// On Windows the embedded backend does not yet expose wgctrl telemetry,
-	// so only the Linux path starts the reporter loop.
+	// Telemetry/reporting keeps the mesh converged and drives relay
+	// fallback. It runs on both platforms: the backend abstracts kernel
+	// WireGuard (Linux) and the embedded device (Windows), so config
+	// sync and relay fallback now work on Windows too. Conntrack flow
+	// telemetry stays Linux-only (newFlowDumper returns nil elsewhere).
 	var reporterStop chan struct{}
 	if authToken != "" {
-		wgClient, err := wgctrl.New()
-		if err != nil {
-			slog.Error("wgctrl init failed", "error", err)
-		} else {
-			defer wgClient.Close()
-		}
-
 		transport, err := parseRelayTransport(*relayTransportFlag)
 		if err != nil {
 			return err
 		}
 
 		reporter, err := newTelemetryReporter(
-			wgClient,
+			backend,
 			*serverFlag,
 			authToken,
 			*serverCAFlag,

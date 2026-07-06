@@ -11,7 +11,6 @@ import (
 	"net/netip"
 	"time"
 
-	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"gowireguard/internal/proto"
@@ -60,6 +59,9 @@ type directProbe struct {
 	candidates    []*net.UDPAddr
 	index         int
 	relayEndpoint *net.UDPAddr
+	interval      time.Duration
+	deadline      time.Time
+	epoch         int
 }
 
 // telemetryReporter periodically collects WireGuard link counters and
@@ -67,7 +69,7 @@ type directProbe struct {
 // control plane. Deltas survive failed reports: pending data is only
 // cleared after the server accepts it.
 type telemetryReporter struct {
-	wg        *wgctrl.Client
+	wg        wgBackend
 	client    *http.Client
 	serverURL string
 	authToken string
@@ -89,10 +91,12 @@ type telemetryReporter struct {
 	// Relay fallback state.
 	relayTransport relayTransport
 	firstSeen      map[wgtypes.Key]time.Time
+	lastInbound    map[wgtypes.Key]time.Time // last tick a peer's rx grew (keepalives count)
 	relayed        map[wgtypes.Key]bool
 	relayedAt      map[wgtypes.Key]time.Time
 	relayEndpoints map[wgtypes.Key]*net.UDPAddr
 	directProbes   map[wgtypes.Key]directProbe
+	lastPunchEpoch map[wgtypes.Key]int
 	wsProxies      map[wgtypes.Key]*wsRelayProxy
 	relayBroken    bool // control plane said no relay; stop asking
 }
@@ -111,7 +115,7 @@ const (
 )
 
 func newTelemetryReporter(
-	wg *wgctrl.Client,
+	wg wgBackend,
 	serverURL, authToken, serverCA, iface string,
 	selfAddr, selfAddr6 string,
 	network netip.Prefix,
@@ -141,10 +145,12 @@ func newTelemetryReporter(
 		pendingCounters: make(map[wgtypes.Key]*proto.PeerCounter),
 		pendingFlows:    make(map[flowKey]*proto.FlowRecord),
 		firstSeen:       make(map[wgtypes.Key]time.Time),
+		lastInbound:     make(map[wgtypes.Key]time.Time),
 		relayed:         make(map[wgtypes.Key]bool),
 		relayedAt:       make(map[wgtypes.Key]time.Time),
 		relayEndpoints:  make(map[wgtypes.Key]*net.UDPAddr),
 		directProbes:    make(map[wgtypes.Key]directProbe),
+		lastPunchEpoch:  make(map[wgtypes.Key]int),
 		wsProxies:       make(map[wgtypes.Key]*wsRelayProxy),
 	}
 
@@ -194,7 +200,7 @@ func (t *telemetryReporter) collect() {
 }
 
 func (t *telemetryReporter) collectLinkCounters() {
-	device, err := t.wg.Device(t.iface)
+	device, err := t.wg.Device()
 	if err != nil {
 		slog.Debug("telemetry read device failed", "error", err)
 		return
@@ -218,6 +224,10 @@ func (t *telemetryReporter) collectLinkCounters() {
 		}
 
 		t.prevLink[peer.PublicKey] = cur
+
+		if deltaRx > 0 {
+			t.lastInbound[peer.PublicKey] = time.Now()
+		}
 
 		var handshake string
 		if !peer.LastHandshakeTime.IsZero() {
@@ -364,7 +374,7 @@ func (t *telemetryReporter) send() {
 }
 
 func (t *telemetryReporter) currentPathStates() []proto.PeerPathState {
-	device, err := t.wg.Device(t.iface)
+	device, err := t.wg.Device()
 	if err != nil {
 		return nil
 	}
@@ -482,12 +492,12 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 			return // don't apply a partial view
 		}
 
-		t.maybeRetryDirect(cfg.PublicKey, endpointCandidatesFromProto(e, cfg.Endpoint))
+		t.maybeRetryDirect(cfg.PublicKey, endpointCandidatesFromProto(e, cfg.Endpoint), e.PunchEpoch)
 
 		desired = append(desired, cfg)
 	}
 
-	if err := syncPeers(t.wg, t.iface, desired); err != nil {
+	if err := syncPeers(t.wg, desired); err != nil {
 		slog.Warn("telemetry sync failed", "error", err)
 	}
 }

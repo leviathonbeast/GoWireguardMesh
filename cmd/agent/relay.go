@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -14,24 +14,34 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-// relayFallbackAfter is how long a peer may sit without a handshake
-// (from when we first saw it, or since its last one) before the agent
-// gives up on the direct path and asks the control plane for a relay.
-// Comfortably longer than a keepalive interval plus WireGuard's
-// handshake retries, so working paths never get downgraded.
-const relayFallbackAfter = 60 * time.Second
+// directStaleAfter is how long a direct peer may be silent before the
+// agent gives up and asks for a relay. It keys off inbound bytes too:
+// WireGuard rekeys roughly every 120s, but persistent keepalives arrive
+// every 25s and bump rx_bytes, so a healthy direct path stays sticky.
+const directStaleAfter = 90 * time.Second
+
+// directProbeInterval is the normal candidate dwell time during an
+// uncoordinated relay->direct retry.
+const directProbeInterval = 60 * time.Second
+
+// coordinatedProbeInterval gives WireGuard's ~5s handshake retry a real
+// chance on each candidate while still rotating fast enough for NAT
+// hole-punch attempts to overlap between peers.
+const coordinatedProbeInterval = 8 * time.Second
+
+const coordinatedProbeWindow = 45 * time.Second
 
 // directRetryAfter is how often a relayed peer gets a fresh chance to
 // use the control plane's direct endpoint hint. If the probe does not
-// handshake, relayFallbackAfter moves it back to the relay.
+// handshake, directProbeInterval moves it back to the relay.
 const directRetryAfter = 5 * time.Minute
 
-// checkHandshakes finds peers whose direct path never came up (or
-// died) and moves them to a relayed endpoint. Runs on the telemetry
-// tick. syncPeers never rewrites endpoints of existing peers, so a
-// relayed endpoint sticks once set.
+// checkHandshakes finds peers whose direct path never came up or has
+// gone genuinely silent and moves them to a relayed endpoint. A direct
+// peer that is still receiving keepalives stays direct even when its
+// last handshake is older than the normal WireGuard rekey interval.
 func (t *telemetryReporter) checkHandshakes() {
-	device, err := t.wg.Device(t.iface)
+	device, err := t.wg.Device()
 	if err != nil {
 		return
 	}
@@ -62,17 +72,8 @@ func (t *telemetryReporter) checkHandshakes() {
 			continue
 		}
 
-		// No endpoint at all means we have no address to try; the
-		// relay gives us one, so those peers qualify too.
-		var silentFor time.Duration
-
-		if peer.LastHandshakeTime.IsZero() {
-			silentFor = now.Sub(t.firstSeen[peer.PublicKey])
-		} else {
-			silentFor = now.Sub(peer.LastHandshakeTime)
-		}
-
-		if silentFor < relayFallbackAfter {
+		silentFor := t.directSilentFor(peer, now)
+		if silentFor < directStaleAfter {
 			continue
 		}
 
@@ -83,43 +84,81 @@ func (t *telemetryReporter) checkHandshakes() {
 	}
 }
 
-func (t *telemetryReporter) maybeRetryDirect(peer wgtypes.Key, candidates []*net.UDPAddr) {
+func (t *telemetryReporter) directSilentFor(peer wgtypes.Peer, now time.Time) time.Duration {
+	last := t.firstSeen[peer.PublicKey]
+
+	if inbound := t.lastInbound[peer.PublicKey]; inbound.After(last) {
+		last = inbound
+	}
+
+	if !peer.LastHandshakeTime.IsZero() && peer.LastHandshakeTime.After(last) {
+		last = peer.LastHandshakeTime
+	}
+
+	if last.IsZero() {
+		return 0
+	}
+
+	return now.Sub(last)
+}
+
+func (t *telemetryReporter) maybeRetryDirect(peer wgtypes.Key, candidates []*net.UDPAddr, punchEpoch int) {
 	if len(candidates) == 0 || !t.relayed[peer] {
 		return
 	}
 
-	if _, probing := t.directProbes[peer]; probing {
+	fast := false
+	if punchEpoch > 0 && punchEpoch > t.lastPunchEpoch[peer] {
+		if t.lastPunchEpoch == nil {
+			t.lastPunchEpoch = make(map[wgtypes.Key]int)
+		}
+		t.lastPunchEpoch[peer] = punchEpoch
+		fast = true
+	}
+
+	if _, probing := t.directProbes[peer]; probing && !fast {
 		return
 	}
 
-	if time.Since(t.relayedAt[peer]) < directRetryAfter {
+	if !fast && time.Since(t.relayedAt[peer]) < directRetryAfter {
 		return
 	}
 
+	interval := directProbeInterval
+	window := time.Duration(0)
+	if fast {
+		interval = coordinatedProbeInterval
+		window = coordinatedProbeWindow
+	}
+
+	t.startDirectProbe(peer, candidates, interval, window, punchEpoch)
+}
+
+func (t *telemetryReporter) startDirectProbe(peer wgtypes.Key, candidates []*net.UDPAddr, interval, window time.Duration, epoch int) {
 	relayEndpoint := t.relayEndpoints[peer]
 	if relayEndpoint == nil {
 		return
 	}
 
-	endpoint := candidates[0]
-	if err := t.wg.ConfigureDevice(t.iface, wgtypes.Config{
-		Peers: []wgtypes.PeerConfig{{
-			PublicKey:  peer,
-			UpdateOnly: true,
-			Endpoint:   endpoint,
-		}},
-	}); err != nil {
-		slog.Debug("direct retry failed", "peer", peer, "error", err)
-		return
-	}
-
-	t.directProbes[peer] = directProbe{
-		started:       time.Now(),
+	now := time.Now()
+	probe := directProbe{
+		started:       now,
 		candidates:    candidates,
 		relayEndpoint: relayEndpoint,
+		interval:      interval,
+		epoch:         epoch,
+	}
+	if window > 0 {
+		probe.deadline = now.Add(window)
 	}
 
-	fmt.Printf("[agent] relay: retrying direct endpoint for %s via %s\n", peer, endpoint)
+	if t.applyDirectProbeEndpoint(peer, candidates[0]) {
+		if t.directProbes == nil {
+			t.directProbes = make(map[wgtypes.Key]directProbe)
+		}
+		t.directProbes[peer] = probe
+		fmt.Printf("[agent] relay: retrying direct endpoint for %s via %s\n", peer, candidates[0])
+	}
 }
 
 func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
@@ -146,23 +185,26 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 		return
 	}
 
-	if now.Sub(probe.started) < relayFallbackAfter {
+	if now.Sub(probe.started) < probe.interval {
 		return
 	}
 
-	if probe.index+1 < len(probe.candidates) {
+	canRotate := false
+	if probe.deadline.IsZero() {
+		canRotate = probe.index+1 < len(probe.candidates)
+	} else {
+		canRotate = now.Before(probe.deadline)
+	}
+
+	if canRotate {
 		probe.index++
+		if probe.index >= len(probe.candidates) {
+			probe.index = 0
+		}
 		probe.started = now
 		next := probe.candidates[probe.index]
 
-		if err := t.wg.ConfigureDevice(t.iface, wgtypes.Config{
-			Peers: []wgtypes.PeerConfig{{
-				PublicKey:  peer.PublicKey,
-				UpdateOnly: true,
-				Endpoint:   next,
-			}},
-		}); err != nil {
-			slog.Debug("direct candidate failed", "candidate", next, "peer", peer.PublicKey, "error", err)
+		if !t.applyDirectProbeEndpoint(peer.PublicKey, next) {
 			return
 		}
 
@@ -172,7 +214,7 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 		return
 	}
 
-	if err := t.wg.ConfigureDevice(t.iface, wgtypes.Config{
+	if err := t.wg.ConfigureDevice(wgtypes.Config{
 		Peers: []wgtypes.PeerConfig{{
 			PublicKey:  peer.PublicKey,
 			UpdateOnly: true,
@@ -187,6 +229,21 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 	t.relayedAt[peer.PublicKey] = now
 
 	fmt.Printf("[agent] relay: direct probe for %s failed; staying on relay\n", peer.PublicKey)
+}
+
+func (t *telemetryReporter) applyDirectProbeEndpoint(peer wgtypes.Key, endpoint *net.UDPAddr) bool {
+	if err := t.wg.ConfigureDevice(wgtypes.Config{
+		Peers: []wgtypes.PeerConfig{{
+			PublicKey:  peer,
+			UpdateOnly: true,
+			Endpoint:   endpoint,
+		}},
+	}); err != nil {
+		slog.Debug("direct candidate failed", "candidate", endpoint, "peer", peer, "error", err)
+		return false
+	}
+
+	return true
 }
 
 // switchToRelay moves one peer onto the configured relay transport.
@@ -236,7 +293,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 			return false
 		}
 
-		if err := t.wg.ConfigureDevice(t.iface, wgtypes.Config{
+		if err := t.wg.ConfigureDevice(wgtypes.Config{
 			Peers: []wgtypes.PeerConfig{{
 				PublicKey:  peer,
 				UpdateOnly: true,

@@ -56,6 +56,7 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 		adminToken:   "test-admin",
 		accessLog:    newAccessLogSink(accessLogMemory, 100),
 		wsHub:        relay.NewWSHub(),
+		punchEpochs:  make(map[string]punchEpoch),
 	}
 
 	mux := http.NewServeMux()

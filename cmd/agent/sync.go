@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -21,10 +20,10 @@ import (
 // Existing peers' endpoints are NEVER touched: WireGuard roaming owns
 // them once traffic flows, and re-applying a stale server hint every
 // interval would break a connection that roaming already fixed.
-func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig) error {
-	device, err := client.Device(iface)
+func syncPeers(backend wgBackend, desired []wgtypes.PeerConfig) error {
+	device, err := backend.Device()
 	if err != nil {
-		return fmt.Errorf("read device %q: %w", iface, err)
+		return fmt.Errorf("read device: %w", err)
 	}
 
 	current := make(map[wgtypes.Key]wgtypes.Peer, len(device.Peers))
@@ -95,8 +94,8 @@ func syncPeers(client *wgctrl.Client, iface string, desired []wgtypes.PeerConfig
 		return nil
 	}
 
-	if err := client.ConfigureDevice(iface, wgtypes.Config{Peers: changes}); err != nil {
-		return fmt.Errorf("apply peer sync to %q: %w", iface, err)
+	if err := backend.ConfigureDevice(wgtypes.Config{Peers: changes}); err != nil {
+		return fmt.Errorf("apply peer sync: %w", err)
 	}
 
 	return nil

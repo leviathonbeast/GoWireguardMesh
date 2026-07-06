@@ -63,6 +63,10 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.coordinatePunches(r.Context(), self, others, report.PathStates); err != nil {
+		slog.Debug("coordinate punch failed", "peer_id", peerID, "error", err)
+	}
+
 	entries, err := s.buildPeerEntries(self, others)
 	if err != nil {
 		slog.Error("build sync payload failed", "peer_id", peerID, "error", err)
@@ -78,6 +82,100 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 		NetworkCIDR6: cfg.NetworkCIDR6,
 		Peers:        entries,
 	})
+}
+
+func (s *server) coordinatePunches(ctx context.Context, self store.PeerRow, others []store.PeerRow, paths []proto.PeerPathState) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	visible := make(map[string]store.PeerRow, len(others))
+	for _, p := range others {
+		visible[p.PublicKey] = p
+	}
+
+	online, err := s.onlinePeers(ctx, 2*time.Minute)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	for _, p := range paths {
+		remote, ok := visible[p.PeerPublicKey]
+		if !ok {
+			continue
+		}
+
+		if shouldBumpPunchEpoch(punchDecision{
+			state:            p.State,
+			remoteOnline:     online[p.PeerPublicKey],
+			selfCandidates:   len(endpointCandidates(remote, self)),
+			remoteCandidates: len(endpointCandidates(self, remote)),
+		}) {
+			s.bumpPunchEpoch(self.PublicKey, remote.PublicKey, now)
+		}
+	}
+
+	return nil
+}
+
+func (s *server) onlinePeers(ctx context.Context, maxAge time.Duration) (map[string]bool, error) {
+	peers, err := s.store.ListPeers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	out := make(map[string]bool, len(peers))
+	for _, p := range peers {
+		if p.RevokedAt != "" || p.LastSeenAt == "" {
+			continue
+		}
+		seen, err := time.Parse(time.RFC3339Nano, p.LastSeenAt)
+		if err != nil {
+			continue
+		}
+		out[p.PublicKey] = now.Sub(seen) <= maxAge
+	}
+
+	return out, nil
+}
+
+type punchDecision struct {
+	state            string
+	remoteOnline     bool
+	selfCandidates   int
+	remoteCandidates int
+}
+
+func shouldBumpPunchEpoch(d punchDecision) bool {
+	switch d.state {
+	case "ws-relay", "udp-relay":
+	default:
+		return false
+	}
+
+	return d.remoteOnline && d.selfCandidates > 0 && d.remoteCandidates > 0
+}
+
+func (s *server) bumpPunchEpoch(keyA, keyB string, now time.Time) {
+	pairID := relayPairID(keyA, keyB)
+
+	s.punchMu.Lock()
+	defer s.punchMu.Unlock()
+
+	if s.punchEpochs == nil {
+		s.punchEpochs = make(map[string]punchEpoch)
+	}
+
+	cur := s.punchEpochs[pairID]
+	if !cur.bumpedAt.IsZero() && now.Sub(cur.bumpedAt) < punchCooldown {
+		return
+	}
+
+	cur.epoch++
+	cur.bumpedAt = now
+	s.punchEpochs[pairID] = cur
 }
 
 type linkStatJSON struct {
