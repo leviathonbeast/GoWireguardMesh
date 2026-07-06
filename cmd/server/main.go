@@ -43,6 +43,12 @@ const defaultNetwork6CIDR = "fd00:100:64::/64"
 
 const punchCooldown = 2 * time.Minute
 
+// maxPunchAttempts caps how many coordinated hole-punch epochs the control
+// plane emits for one continuous relay episode. A pair that cannot punch
+// (e.g. firewall-blocked inbound) then rests on relay instead of being told
+// to tear it down forever; the count resets once the pair reaches direct.
+const maxPunchAttempts = 3
+
 type server struct {
 	store        *store.Store
 	networkMu    sync.RWMutex
@@ -62,6 +68,7 @@ type server struct {
 type punchEpoch struct {
 	epoch    int
 	bumpedAt time.Time
+	attempts int // coordinated tries this relay episode; reset on reaching direct
 }
 
 // clientIP is the peer's underlay address as seen by the control

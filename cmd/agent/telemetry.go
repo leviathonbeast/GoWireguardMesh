@@ -97,6 +97,8 @@ type telemetryReporter struct {
 	relayEndpoints map[wgtypes.Key]*net.UDPAddr
 	directProbes   map[wgtypes.Key]directProbe
 	lastPunchEpoch map[wgtypes.Key]int
+	directFailures map[wgtypes.Key]int    // consecutive failed direct-retry probes; backs off the uncoordinated retry
+	lastCandidates map[wgtypes.Key]string // digest of last candidate set; a change re-arms a prompt retry
 	wsProxies      map[wgtypes.Key]*wsRelayProxy
 	relayBroken    bool // control plane said no relay; stop asking
 }
@@ -151,6 +153,8 @@ func newTelemetryReporter(
 		relayEndpoints:  make(map[wgtypes.Key]*net.UDPAddr),
 		directProbes:    make(map[wgtypes.Key]directProbe),
 		lastPunchEpoch:  make(map[wgtypes.Key]int),
+		directFailures:  make(map[wgtypes.Key]int),
+		lastCandidates:  make(map[wgtypes.Key]string),
 		wsProxies:       make(map[wgtypes.Key]*wsRelayProxy),
 	}
 

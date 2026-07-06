@@ -192,3 +192,56 @@ func TestPunchEpochDoesNotStartWithoutBackendApply(t *testing.T) {
 		t.Fatal("direct probe was stored even though endpoint apply failed")
 	}
 }
+
+func TestDirectRetryIntervalBacksOff(t *testing.T) {
+	cases := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, directRetryAfter},
+		{1, 10 * time.Minute},
+		{2, 20 * time.Minute},
+		{3, 30 * time.Minute},
+		{9, 30 * time.Minute},
+	}
+
+	for _, c := range cases {
+		if got := directRetryInterval(c.failures); got != c.want {
+			t.Fatalf("directRetryInterval(%d) = %s, want %s", c.failures, got, c.want)
+		}
+	}
+}
+
+func TestMaybeRetryDirectBackoffAndCandidateReset(t *testing.T) {
+	key := wgtypes.Key{1}
+	cand := []*net.UDPAddr{{IP: net.ParseIP("192.0.2.1"), Port: 51820}}
+
+	// Two prior failures back the retry interval off to 20m; a peer relayed
+	// only 6m ago must therefore NOT be probed yet (the thrash fix).
+	tel := &telemetryReporter{
+		relayed:        map[wgtypes.Key]bool{key: true},
+		relayedAt:      map[wgtypes.Key]time.Time{key: time.Now().Add(-6 * time.Minute)},
+		directProbes:   map[wgtypes.Key]directProbe{},
+		directFailures: map[wgtypes.Key]int{key: 2},
+		lastCandidates: map[wgtypes.Key]string{key: candidateDigest(cand)},
+	}
+
+	tel.maybeRetryDirect(key, cand, 0)
+	if _, probing := tel.directProbes[key]; probing {
+		t.Fatal("backed-off peer was probed before its interval elapsed")
+	}
+
+	// A new candidate set clears the failure count, re-arming a prompt retry
+	// even though the relay is still recent.
+	tel.wg = &fakeWGBackend{}
+	tel.relayEndpoints = map[wgtypes.Key]*net.UDPAddr{key: {IP: net.ParseIP("127.0.0.1"), Port: 40000}}
+	newCand := []*net.UDPAddr{{IP: net.ParseIP("198.51.100.9"), Port: 51820}}
+
+	tel.maybeRetryDirect(key, newCand, 0)
+	if tel.directFailures[key] != 0 {
+		t.Fatalf("candidate change did not reset failures: got %d", tel.directFailures[key])
+	}
+	if _, probing := tel.directProbes[key]; !probing {
+		t.Fatal("new candidate set did not re-arm a prompt direct probe")
+	}
+}

@@ -171,22 +171,48 @@ func TestShouldBumpPunchEpoch(t *testing.T) {
 	}
 }
 
-func TestPunchEpochCooldown(t *testing.T) {
+func TestPunchEpochBackoffAndCap(t *testing.T) {
 	srv := &server{punchEpochs: make(map[string]punchEpoch)}
-	keyA := "a"
-	keyB := "b"
-	now := time.Now()
+	keyA, keyB := "a", "b"
+	t0 := time.Now()
 
-	srv.bumpPunchEpoch(keyA, keyB, now)
-	srv.bumpPunchEpoch(keyA, keyB, now.Add(punchCooldown-time.Second))
-
+	// First bump lands immediately (no prior bumpedAt).
+	srv.bumpPunchEpoch(keyA, keyB, t0)
 	if got := srv.punchEpoch(keyA, keyB); got != 1 {
-		t.Fatalf("epoch during cooldown = %d, want 1", got)
+		t.Fatalf("epoch after first bump = %d, want 1", got)
 	}
 
-	srv.bumpPunchEpoch(keyA, keyB, now.Add(punchCooldown+time.Second))
+	// After attempt 1 the cooldown grows to 4m; a bump inside it is ignored.
+	srv.bumpPunchEpoch(keyA, keyB, t0.Add(3*time.Minute))
+	if got := srv.punchEpoch(keyA, keyB); got != 1 {
+		t.Fatalf("epoch inside 4m cooldown = %d, want 1", got)
+	}
+
+	// Past 4m it bumps to 2 (next cooldown grows to 8m).
+	srv.bumpPunchEpoch(keyA, keyB, t0.Add(5*time.Minute))
 	if got := srv.punchEpoch(keyA, keyB); got != 2 {
-		t.Fatalf("epoch after cooldown = %d, want 2", got)
+		t.Fatalf("epoch after 4m cooldown = %d, want 2", got)
+	}
+
+	// Past 8m more it bumps to 3, spending the attempt budget.
+	srv.bumpPunchEpoch(keyA, keyB, t0.Add(14*time.Minute))
+	if got := srv.punchEpoch(keyA, keyB); got != 3 {
+		t.Fatalf("epoch after third attempt = %d, want 3", got)
+	}
+
+	// Further bumps are refused once maxPunchAttempts is reached, however
+	// long we wait — the pair settles on relay.
+	srv.bumpPunchEpoch(keyA, keyB, t0.Add(1*time.Hour))
+	if got := srv.punchEpoch(keyA, keyB); got != 3 {
+		t.Fatalf("epoch past attempt cap = %d, want 3 (capped)", got)
+	}
+
+	// Reaching direct re-arms the budget; the epoch stays monotonic so a
+	// stale high-water mark on an agent never suppresses the next signal.
+	srv.resetPunchAttempts(keyA, keyB)
+	srv.bumpPunchEpoch(keyA, keyB, t0.Add(2*time.Hour))
+	if got := srv.punchEpoch(keyA, keyB); got != 4 {
+		t.Fatalf("epoch after reset = %d, want 4", got)
 	}
 }
 

@@ -133,6 +133,35 @@ func aclRulesJSON(rules []store.ACLRule) []aclRuleJSON {
 	return out
 }
 
+// peerRef renders an optional ACL peer reference for audit detail:
+// "any" when the field is nil (wildcard), otherwise the peer id. The
+// fields are *int64, so %v would print <nil> or a pointer address.
+func peerRef(id *int64) string {
+	if id == nil {
+		return "any"
+	}
+	return strconv.FormatInt(*id, 10)
+}
+
+// portRange renders an optional ACL port range for audit detail.
+func portRange(portMin, portMax *int64) string {
+	switch {
+	case portMin == nil && portMax == nil:
+		return "any"
+	case portMin != nil && portMax != nil && *portMin == *portMax:
+		return strconv.FormatInt(*portMin, 10)
+	default:
+		lo, hi := "any", "any"
+		if portMin != nil {
+			lo = strconv.FormatInt(*portMin, 10)
+		}
+		if portMax != nil {
+			hi = strconv.FormatInt(*portMax, 10)
+		}
+		return lo + "-" + hi
+	}
+}
+
 func (s *server) handleCreateACL(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SrcPeerID *int64 `json:"src_peer_id"` // null = any
@@ -163,7 +192,12 @@ func (s *server) handleCreateACL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("admin created acl rule", "rule_id", id)
-	s.audit(r, "acl_create", http.StatusOK, fmt.Sprintf("rule id=%d name=%q src=%v dst=%v proto=%q ports=%v-%v", id, req.Name, req.SrcPeerID, req.DstPeerID, req.Protocol, req.PortMin, req.PortMax))
+	proto := req.Protocol
+	if proto == "" {
+		proto = "any"
+	}
+	s.audit(r, "acl_create", http.StatusOK, fmt.Sprintf("rule id=%d name=%q src=%s dst=%s proto=%q ports=%s",
+		id, req.Name, peerRef(req.SrcPeerID), peerRef(req.DstPeerID), proto, portRange(req.PortMin, req.PortMax)))
 	writeJSON(w, http.StatusOK, map[string]int64{"id": id})
 }
 

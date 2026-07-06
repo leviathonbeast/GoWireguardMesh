@@ -113,6 +113,13 @@ func (s *server) coordinatePunches(ctx context.Context, self store.PeerRow, othe
 			continue
 		}
 
+		// Reaching direct ends the relay episode: re-arm coordination so a
+		// future relay episode for this pair gets a fresh attempt budget.
+		if p.State == "direct" {
+			s.resetPunchAttempts(self.PublicKey, remote.PublicKey)
+			continue
+		}
+
 		if shouldBumpPunchEpoch(punchDecision{
 			state:            p.State,
 			remoteOnline:     online[p.PeerPublicKey],
@@ -176,12 +183,44 @@ func (s *server) bumpPunchEpoch(keyA, keyB string, now time.Time) {
 	}
 
 	cur := s.punchEpochs[pairID]
-	if !cur.bumpedAt.IsZero() && now.Sub(cur.bumpedAt) < punchCooldown {
+
+	// Give up coordinating after a few tries this relay episode; the pair
+	// then settles on relay until it goes direct (resetPunchAttempts) or an
+	// agent restarts. Prevents forever-thrashing a relay that cannot punch.
+	if cur.attempts >= maxPunchAttempts {
+		return
+	}
+
+	// Back the cadence off per attempt (2m, 4m, 8m) so repeated failures do
+	// not keep telling both agents to tear the working relay down.
+	cooldown := punchCooldown << min(cur.attempts, 2)
+	if !cur.bumpedAt.IsZero() && now.Sub(cur.bumpedAt) < cooldown {
 		return
 	}
 
 	cur.epoch++
+	cur.attempts++
 	cur.bumpedAt = now
+	s.punchEpochs[pairID] = cur
+}
+
+// resetPunchAttempts re-arms coordinated punching for a pair once it has
+// reached a direct path, so a later relay episode gets fresh attempts. The
+// epoch counter stays monotonic (agents compare it against a high-water
+// mark), only the per-episode attempt budget is cleared.
+func (s *server) resetPunchAttempts(keyA, keyB string) {
+	pairID := relayPairID(keyA, keyB)
+
+	s.punchMu.Lock()
+	defer s.punchMu.Unlock()
+
+	cur, ok := s.punchEpochs[pairID]
+	if !ok || cur.attempts == 0 {
+		return
+	}
+
+	cur.attempts = 0
+	cur.bumpedAt = time.Time{}
 	s.punchEpochs[pairID] = cur
 }
 

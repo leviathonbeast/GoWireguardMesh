@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -31,10 +33,52 @@ const coordinatedProbeInterval = 8 * time.Second
 
 const coordinatedProbeWindow = 45 * time.Second
 
-// directRetryAfter is how often a relayed peer gets a fresh chance to
-// use the control plane's direct endpoint hint. If the probe does not
-// handshake, directProbeInterval moves it back to the relay.
+// directRetryAfter is the base cadence at which a relayed peer gets a
+// fresh chance to use the control plane's direct endpoint hint. If the
+// probe does not handshake, directProbeInterval moves it back to the
+// relay. See directRetryInterval for the failure back-off.
 const directRetryAfter = 5 * time.Minute
+
+// directRetryInterval backs the uncoordinated relay->direct retry off as
+// probes keep failing, so a pair that genuinely cannot hole-punch (e.g. a
+// firewall-blocked inbound) settles on a stable relay instead of tearing it
+// down every 5 min forever. maybeRetryDirect resets the failure count to 0
+// when the peer's candidate set changes (a new path deserves a prompt try).
+// Kept comfortably above the 25s keepalive / 120s rekey so it never fights
+// the sticky-direct logic. 5m -> 10m -> 20m -> capped at 30m.
+func directRetryInterval(failures int) time.Duration {
+	if failures < 0 {
+		failures = 0
+	}
+	if failures > 3 {
+		failures = 3
+	}
+
+	d := directRetryAfter << failures
+	if d > 30*time.Minute {
+		d = 30 * time.Minute
+	}
+
+	return d
+}
+
+// candidateDigest is a stable fingerprint of a peer's candidate set, used
+// to detect when a new path appears (which re-arms a prompt direct retry).
+func candidateDigest(candidates []*net.UDPAddr) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	addrs := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if c != nil {
+			addrs = append(addrs, c.String())
+		}
+	}
+	sort.Strings(addrs)
+
+	return strings.Join(addrs, ",")
+}
 
 // checkHandshakes finds peers whose direct path never came up or has
 // gone genuinely silent and moves them to a relayed endpoint. A direct
@@ -107,6 +151,16 @@ func (t *telemetryReporter) maybeRetryDirect(peer wgtypes.Key, candidates []*net
 		return
 	}
 
+	// A changed candidate set means a new path may now work: forget past
+	// failures so this peer gets a prompt (un-backed-off) retry.
+	if digest := candidateDigest(candidates); digest != t.lastCandidates[peer] {
+		if t.lastCandidates == nil {
+			t.lastCandidates = make(map[wgtypes.Key]string)
+		}
+		t.lastCandidates[peer] = digest
+		delete(t.directFailures, peer)
+	}
+
 	fast := false
 	if punchEpoch > 0 && punchEpoch > t.lastPunchEpoch[peer] {
 		if t.lastPunchEpoch == nil {
@@ -120,7 +174,7 @@ func (t *telemetryReporter) maybeRetryDirect(peer wgtypes.Key, candidates []*net
 		return
 	}
 
-	if !fast && time.Since(t.relayedAt[peer]) < directRetryAfter {
+	if !fast && time.Since(t.relayedAt[peer]) < directRetryInterval(t.directFailures[peer]) {
 		return
 	}
 
@@ -178,6 +232,8 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 		delete(t.relayed, peer.PublicKey)
 		delete(t.relayedAt, peer.PublicKey)
 		delete(t.relayEndpoints, peer.PublicKey)
+		delete(t.directFailures, peer.PublicKey)
+		delete(t.lastCandidates, peer.PublicKey)
 		t.firstSeen[peer.PublicKey] = now
 
 		fmt.Printf("[agent] relay: direct endpoint for %s succeeded; leaving relay\n", peer.PublicKey)
@@ -227,8 +283,13 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 
 	delete(t.directProbes, peer.PublicKey)
 	t.relayedAt[peer.PublicKey] = now
+	if t.directFailures == nil {
+		t.directFailures = make(map[wgtypes.Key]int)
+	}
+	t.directFailures[peer.PublicKey]++
 
-	fmt.Printf("[agent] relay: direct probe for %s failed; staying on relay\n", peer.PublicKey)
+	fmt.Printf("[agent] relay: direct probe for %s failed; staying on relay (attempt %d)\n",
+		peer.PublicKey, t.directFailures[peer.PublicKey])
 }
 
 func (t *telemetryReporter) applyDirectProbeEndpoint(peer wgtypes.Key, endpoint *net.UDPAddr) bool {
