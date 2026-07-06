@@ -5,9 +5,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ti-mo/conntrack"
 )
+
+const conntrackAcctPath = "/proc/sys/net/netfilter/nf_conntrack_acct"
 
 // conntrackDumper adapts ti-mo/conntrack to the flowDumper interface.
 type conntrackDumper struct {
@@ -15,10 +18,15 @@ type conntrackDumper struct {
 }
 
 func newFlowDumper() (flowDumper, error) {
-	// Flow visibility needs conntrack byte/packet accounting, which is
-	// off by default on most kernels.
-	if err := os.WriteFile("/proc/sys/net/netfilter/nf_conntrack_acct", []byte("1\n"), 0644); err != nil {
-		return nil, fmt.Errorf("cannot enable conntrack accounting (%v)", err)
+	// Flow visibility needs conntrack byte/packet accounting, which is off
+	// by default on most kernels. It is a host-global knob, so if it is
+	// already on (e.g. enabled on the Docker host) we use it as-is —
+	// containers mount /proc/sys read-only and cannot write it themselves.
+	if !conntrackAcctEnabled() {
+		if err := os.WriteFile(conntrackAcctPath, []byte("1\n"), 0644); err != nil {
+			return nil, fmt.Errorf("conntrack accounting is off and could not be enabled (%v); "+
+				"for flow logs in a container, enable it on the host: sysctl -w net.netfilter.nf_conntrack_acct=1", err)
+		}
 	}
 
 	conn, err := conntrack.Dial(nil)
@@ -27,6 +35,18 @@ func newFlowDumper() (flowDumper, error) {
 	}
 
 	return &conntrackDumper{conn: conn}, nil
+}
+
+// conntrackAcctEnabled reports whether conntrack byte/packet accounting is
+// already on, letting us skip the sysctl write that a read-only /proc/sys
+// (the container default) would reject.
+func conntrackAcctEnabled() bool {
+	b, err := os.ReadFile(conntrackAcctPath)
+	if err != nil {
+		return false
+	}
+
+	return strings.TrimSpace(string(b)) == "1"
 }
 
 func (d *conntrackDumper) Dump() ([]ctFlow, error) {
