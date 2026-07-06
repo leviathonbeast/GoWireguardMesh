@@ -61,6 +61,14 @@ export interface AclResponse {
   rules: AclRule[];
 }
 
+export interface AclExport {
+  version: number;
+  exported_at: string;
+  default_policy: "allow" | "deny";
+  rules: AclRule[];
+  rule_count: number;
+}
+
 export interface Flow {
   id: number;
   peer_id: number;

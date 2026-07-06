@@ -57,6 +57,19 @@ func TestEffectiveListenPortFallsBackToFlagPort(t *testing.T) {
 	}
 }
 
+func TestAgentHostnamePrefersOverride(t *testing.T) {
+	if got := agentHostname("  muse  "); got != "muse" {
+		t.Fatalf("agentHostname override = %q, want muse", got)
+	}
+}
+
+func TestAgentHostnameFallsBackToOSHostname(t *testing.T) {
+	got := agentHostname("")
+	if got == "" {
+		t.Fatal("agentHostname fallback returned empty hostname")
+	}
+}
+
 func TestBuildPeerConfigAcceptsIPv6AllowedIP(t *testing.T) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {

@@ -49,6 +49,7 @@ var (
 	peerPSKFlag        = flag.String("peer-psk", "", "preshared key (base64, optional)")
 	serverFlag         = flag.String("server", "", "control plane URL (e.g. https://host:8080); enables enrollment mode")
 	setupKeyFlag       = flag.String("setup-key", "", "setup key for enrollment (required with --server)")
+	hostnameFlag       = flag.String("hostname", os.Getenv("WGMESH_HOSTNAME"), "name to show in the control plane (defaults to OS hostname; can also be set with WGMESH_HOSTNAME)")
 	serverCAFlag       = flag.String("server-ca", "", "PEM certificate to trust for the control plane (pin its self-signed cert.pem)")
 	reportIntervalFlag = flag.Duration("report-interval", 30*time.Second, "telemetry reporting interval")
 	stunServerFlag     = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables)")
@@ -391,6 +392,19 @@ func effectiveListenPort(flagPort, resolvedPort int) int {
 	return flagPort
 }
 
+func agentHostname(override string) string {
+	if name := strings.TrimSpace(override); name != "" {
+		return name
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(hostname)
+}
+
 func runWithStop(stop <-chan struct{}) error {
 	flag.Parse()
 
@@ -456,7 +470,7 @@ func runWithStop(stop <-chan struct{}) error {
 			return errors.New("--setup-key is required with --server")
 		}
 
-		hostname, _ := os.Hostname()
+		hostname := agentHostname(*hostnameFlag)
 
 		// STUN must run before the interface exists so the probe can
 		// bind the WireGuard port and discover its public mapping.

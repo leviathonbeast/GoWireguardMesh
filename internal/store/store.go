@@ -423,7 +423,7 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 
 	switch {
 	case err == nil:
-		return s.reEnroll(ctx, tx, setupKey, publicKey, existing, enrolledKeyID, observedIP, publicEndpoint, listenPort)
+		return s.reEnroll(ctx, tx, setupKey, publicKey, hostname, existing, enrolledKeyID, observedIP, publicEndpoint, listenPort)
 	case errors.Is(err, sql.ErrNoRows):
 		// New enrollment; fall through.
 	default:
@@ -531,7 +531,7 @@ func (s *Store) Enroll(ctx context.Context, setupKey, publicKey, hostname string
 
 // reEnroll handles the idempotent path. The presented key must exist,
 // match the key the peer originally enrolled with, and not be revoked.
-func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey string, existing PeerRow, enrolledKeyID int64, observedIP, publicEndpoint string, listenPort int) (*EnrollResult, error) {
+func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey, hostname string, existing PeerRow, enrolledKeyID int64, observedIP, publicEndpoint string, listenPort int) (*EnrollResult, error) {
 	var (
 		presentedID int64
 		revokedAt   sql.NullString
@@ -582,14 +582,15 @@ func (s *Store) reEnroll(ctx context.Context, tx *sql.Tx, setupKey, publicKey st
 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE peers SET auth_token_hash = ?,
-		        auth_token_issued_at = ?,
-		        assigned_ip6 = COALESCE(?, assigned_ip6),
-		        observed_ip = COALESCE(?, observed_ip),
-		        public_endpoint = COALESCE(?, public_endpoint),
-		        listen_port = COALESCE(?, listen_port)
-		 WHERE id = ?`,
+			        auth_token_issued_at = ?,
+			        assigned_ip6 = COALESCE(?, assigned_ip6),
+			        hostname = COALESCE(?, hostname),
+			        observed_ip = COALESCE(?, observed_ip),
+			        public_endpoint = COALESCE(?, public_endpoint),
+			        listen_port = COALESCE(?, listen_port)
+			 WHERE id = ?`,
 		tokenHash, time.Now().UTC().Format(timeFormat), nullable(ip6Backfill),
-		nullable(observedIP), nullable(publicEndpoint), port, existing.ID,
+		nullable(hostname), nullable(observedIP), nullable(publicEndpoint), port, existing.ID,
 	); err != nil {
 		return nil, fmt.Errorf("rotate auth token: %w", err)
 	}

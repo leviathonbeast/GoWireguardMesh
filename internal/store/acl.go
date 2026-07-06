@@ -90,6 +90,14 @@ func (s *Store) CreateACLRule(ctx context.Context, srcPeerID, dstPeerID *int64) 
 }
 
 func (s *Store) CreateACLRuleDetailed(ctx context.Context, rule ACLRule) (int64, error) {
+	return insertACLRule(ctx, s.db, rule)
+}
+
+type aclWriter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertACLRule(ctx context.Context, q aclWriter, rule ACLRule) (int64, error) {
 	srcPeerID, dstPeerID := rule.SrcPeerID, rule.DstPeerID
 	if srcPeerID != nil && dstPeerID != nil && *srcPeerID == *dstPeerID {
 		return 0, errors.New("src and dst are the same peer")
@@ -110,7 +118,7 @@ func (s *Store) CreateACLRuleDetailed(ctx context.Context, rule ACLRule) (int64,
 		dst = sql.NullInt64{Int64: *dstPeerID, Valid: true}
 	}
 
-	res, err := s.db.ExecContext(ctx,
+	res, err := q.ExecContext(ctx,
 		`INSERT INTO acl_rules (src_peer_id, dst_peer_id, name, protocol, port_min, port_max)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		src, dst, nullable(rule.Name), protocol, portMin, portMax,
@@ -125,6 +133,32 @@ func (s *Store) CreateACLRuleDetailed(ctx context.Context, rule ACLRule) (int64,
 	}
 
 	return id, nil
+}
+
+func (s *Store) ImportACLRules(ctx context.Context, rules []ACLRule, replace bool) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin acl import: %w", err)
+	}
+	defer tx.Rollback()
+
+	if replace {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM acl_rules`); err != nil {
+			return 0, fmt.Errorf("clear acl rules: %w", err)
+		}
+	}
+
+	for i, rule := range rules {
+		if _, err := insertACLRule(ctx, tx, rule); err != nil {
+			return 0, fmt.Errorf("import acl rule %d: %w", i+1, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit acl import: %w", err)
+	}
+
+	return len(rules), nil
 }
 
 func normalizeACLService(protocol string, portMin, portMax *int64) (string, sql.NullInt64, sql.NullInt64, error) {

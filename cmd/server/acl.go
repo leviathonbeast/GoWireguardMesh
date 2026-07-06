@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"gowireguard/internal/store"
 )
@@ -23,6 +24,19 @@ type aclRuleJSON struct {
 	CreatedAt string `json:"created_at"`
 }
 
+type aclExportJSON struct {
+	Version       int           `json:"version"`
+	ExportedAt    string        `json:"exported_at"`
+	DefaultPolicy string        `json:"default_policy"`
+	Rules         []aclRuleJSON `json:"rules"`
+	RuleCount     int           `json:"rule_count"`
+}
+
+type aclImportRequest struct {
+	Replace *bool         `json:"replace,omitempty"`
+	Rules   []aclRuleJSON `json:"rules"`
+}
+
 func (s *server) handleListACL(w http.ResponseWriter, r *http.Request) {
 	rules, err := s.store.ListACLRules(r.Context())
 	if err != nil {
@@ -31,20 +45,92 @@ func (s *server) handleListACL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := make([]aclRuleJSON, 0, len(rules))
-	for _, rule := range rules {
-		out = append(out, aclRuleJSON(rule))
+	writeACLResponse(w, s.defaultPolicyName(), rules)
+}
+
+func (s *server) handleExportACL(w http.ResponseWriter, r *http.Request) {
+	rules, err := s.store.ListACLRules(r.Context())
+	if err != nil {
+		slog.Error("export acl rules failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
 	}
 
+	out := aclRulesJSON(rules)
+	writeJSON(w, http.StatusOK, aclExportJSON{
+		Version:       1,
+		ExportedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		DefaultPolicy: s.defaultPolicyName(),
+		Rules:         out,
+		RuleCount:     len(out),
+	})
+}
+
+func (s *server) handleImportACL(w http.ResponseWriter, r *http.Request) {
+	var req aclImportRequest
+	if !decodeJSON(w, r, 1<<20, &req) {
+		return
+	}
+
+	replace := true
+	if req.Replace != nil {
+		replace = *req.Replace
+	}
+
+	rules := make([]store.ACLRule, 0, len(req.Rules))
+	for _, rule := range req.Rules {
+		rules = append(rules, store.ACLRule{
+			SrcPeerID: rule.SrcPeerID,
+			DstPeerID: rule.DstPeerID,
+			Name:      rule.Name,
+			Protocol:  rule.Protocol,
+			PortMin:   rule.PortMin,
+			PortMax:   rule.PortMax,
+		})
+	}
+
+	n, err := s.store.ImportACLRules(r.Context(), rules, replace)
+	if err != nil {
+		slog.Warn("import acl rules failed", "error", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	slog.Info("admin imported acl rules", "rules", n, "replace", replace)
+	s.audit(r, "acl_import", http.StatusOK, fmt.Sprintf("rules=%d replace=%v", n, replace))
+
+	imported, err := s.store.ListACLRules(r.Context())
+	if err != nil {
+		slog.Error("list acl rules after import failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeACLResponse(w, s.defaultPolicyName(), imported)
+}
+
+func (s *server) defaultPolicyName() string {
 	policy := "deny"
 	if s.store.DefaultAllow {
 		policy = "allow"
 	}
 
+	return policy
+}
+
+func writeACLResponse(w http.ResponseWriter, policy string, rules []store.ACLRule) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"default_policy": policy,
-		"rules":          out,
+		"rules":          aclRulesJSON(rules),
 	})
+}
+
+func aclRulesJSON(rules []store.ACLRule) []aclRuleJSON {
+	out := make([]aclRuleJSON, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, aclRuleJSON(rule))
+	}
+	return out
 }
 
 func (s *server) handleCreateACL(w http.ResponseWriter, r *http.Request) {

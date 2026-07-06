@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -65,9 +66,13 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 	mux.HandleFunc("GET /relay-ws", srv.handleRelayWS)
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
+	mux.HandleFunc("POST /api/peers/{id}/address", srv.requireAdmin(srv.handleUpdatePeerAddress))
 	mux.HandleFunc("GET /api/network", srv.requireAdmin(srv.handleGetNetwork))
 	mux.HandleFunc("POST /api/network/preview", srv.requireAdmin(srv.handlePreviewNetworkMigration))
 	mux.HandleFunc("POST /api/network/apply", srv.requireAdmin(srv.handleApplyNetworkMigration))
+	mux.HandleFunc("GET /api/acl", srv.requireAdmin(srv.handleListACL))
+	mux.HandleFunc("GET /api/acl/export", srv.requireAdmin(srv.handleExportACL))
+	mux.HandleFunc("POST /api/acl/import", srv.requireAdmin(srv.handleImportACL))
 
 	// Mirror the production middleware chain (logRequests wrapping
 	// securityHeaders) AND the production server limits, so tests
@@ -365,5 +370,46 @@ func TestNetworkMigrationEndToEnd(t *testing.T) {
 	c := enrollPeer(t, ts, setupKey, "node-c")
 	if c.AssignedIP != "100.99.0.3" || c.AssignedIP6 != "fd00:99::3" {
 		t.Fatalf("post-migration new peer assignment = %s / %s, want 100.99.0.3 / fd00:99::3", c.AssignedIP, c.AssignedIP6)
+	}
+}
+
+func TestPeerAddressUpdateUpdatesRunningAgentViaReport(t *testing.T) {
+	srv, ts := newTestServer(t)
+
+	setupKey, err := srv.store.CreateSetupKey(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+
+	a := enrollPeer(t, ts, setupKey, "node-a")
+	b := enrollPeer(t, ts, setupKey, "node-b")
+
+	update := map[string]any{"assigned_ip": "100.64.0.77", "assigned_ip6": "fd00:100:64::77"}
+	code, body := adminDo(t, ts, "POST", fmt.Sprintf("/api/peers/%d/address", a.PeerID), update)
+	if code != http.StatusOK {
+		t.Fatalf("address update: status %d (%s)", code, body)
+	}
+
+	var peer peerJSON
+	if err := json.Unmarshal(body, &peer); err != nil {
+		t.Fatalf("decode address update response: %v", err)
+	}
+	if peer.AssignedIP != "100.64.0.77" || peer.AssignedIP6 != "fd00:100:64::77" {
+		t.Fatalf("updated peer = %s / %s, want 100.64.0.77 / fd00:100:64::77", peer.AssignedIP, peer.AssignedIP6)
+	}
+
+	got := reportAs(t, ts, a.AuthToken)
+	if got.AssignedIP != "100.64.0.77" || got.AssignedIP6 != "fd00:100:64::77" {
+		t.Fatalf("post-update self-IP = %s / %s, want 100.64.0.77 / fd00:100:64::77", got.AssignedIP, got.AssignedIP6)
+	}
+
+	collide := map[string]any{"assigned_ip": b.AssignedIP, "assigned_ip6": "fd00:100:64::78"}
+	if code, body := adminDo(t, ts, "POST", fmt.Sprintf("/api/peers/%d/address", a.PeerID), collide); code != http.StatusConflict {
+		t.Fatalf("collision update: status %d (%s), want 409", code, body)
+	}
+
+	outside := map[string]any{"assigned_ip": "192.0.2.77", "assigned_ip6": "fd00:100:64::79"}
+	if code, body := adminDo(t, ts, "POST", fmt.Sprintf("/api/peers/%d/address", a.PeerID), outside); code != http.StatusBadRequest {
+		t.Fatalf("outside update: status %d (%s), want 400", code, body)
 	}
 }

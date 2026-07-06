@@ -9,6 +9,10 @@
 # image. With the included Gitea workflow that is:
 #   gitea.mynetbird.uk/<owner>/wgmesh-agent:latest
 # If building locally instead, build the Dockerfile with --target agent.
+#
+# Set WGMESH_HOSTNAME to the friendly machine name you want in the web UI.
+# Docker sidecars do not inherit the app container hostname just because
+# they use network_mode: "service:...".
 
 services:
   myservice:
@@ -26,9 +30,11 @@ services:
       - /dev/net/tun:/dev/net/tun
     environment:
       WGMESH_SETUP_KEY: ${WGMESH_SETUP_KEY:?set WGMESH_SETUP_KEY}
+      WGMESH_HOSTNAME: ${WGMESH_HOSTNAME:-myservice}
     command: >
       --server ${WGMESH_SERVER_URL:?set WGMESH_SERVER_URL}
       --setup-key ${WGMESH_SETUP_KEY}
+      --hostname ${WGMESH_HOSTNAME:-myservice}
       --listen-port ${WGMESH_LISTEN_PORT:-51820}
       --key-file /data/wgkey.key
       --relay-transport ${WGMESH_RELAY_TRANSPORT:-websocket}

@@ -3,6 +3,7 @@
 #   sudo cp bin/agent /usr/local/bin/wgmesh-agent
 #   sudo cp deploy/wgmesh-agent.service /etc/systemd/system/
 #   edit ExecStart below with your server URL and setup key
+#   optionally add --hostname friendly-name to control the web UI machine name
 #   sudo systemctl daemon-reload && sudo systemctl enable --now wgmesh-agent
 #
 # The private key persists in /var/lib/wgmesh-agent/wgkey.key — it is

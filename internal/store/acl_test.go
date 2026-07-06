@@ -101,3 +101,91 @@ func TestCreateACLRuleDetailedRejectsInvalidService(t *testing.T) {
 		t.Fatal("CreateACLRuleDetailed accepted an inverted port range")
 	}
 }
+
+func TestImportACLRulesReplacesExistingRules(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t, "100.64.0.0/16")
+
+	setupKey, err := st.CreateSetupKey(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey() returned error: %v", err)
+	}
+	src := enrollTestPeer(t, ctx, st, setupKey, "laptop")
+	dst := enrollTestPeer(t, ctx, st, setupKey, "jellyfin")
+	oldPort := int64(80)
+	newPort := int64(8096)
+
+	if _, err := st.CreateACLRuleDetailed(ctx, ACLRule{
+		SrcPeerID: &src.ID,
+		DstPeerID: &dst.ID,
+		Name:      "old",
+		Protocol:  "tcp",
+		PortMin:   &oldPort,
+	}); err != nil {
+		t.Fatalf("CreateACLRuleDetailed() returned error: %v", err)
+	}
+
+	n, err := st.ImportACLRules(ctx, []ACLRule{{
+		SrcPeerID: &src.ID,
+		DstPeerID: &dst.ID,
+		Name:      "restored",
+		Protocol:  "tcp",
+		PortMin:   &newPort,
+	}}, true)
+	if err != nil {
+		t.Fatalf("ImportACLRules() returned error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ImportACLRules() imported %d rules, want 1", n)
+	}
+
+	rules, err := st.ListACLRules(ctx)
+	if err != nil {
+		t.Fatalf("ListACLRules() returned error: %v", err)
+	}
+	if len(rules) != 1 || rules[0].Name != "restored" {
+		t.Fatalf("rules after replace = %#v, want one restored rule", rules)
+	}
+	if rules[0].PortMin == nil || *rules[0].PortMin != newPort {
+		t.Fatalf("restored port = %v, want %d", rules[0].PortMin, newPort)
+	}
+}
+
+func TestImportACLRulesRollsBackOnInvalidRule(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t, "100.64.0.0/16")
+
+	setupKey, err := st.CreateSetupKey(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey() returned error: %v", err)
+	}
+	src := enrollTestPeer(t, ctx, st, setupKey, "laptop")
+	dst := enrollTestPeer(t, ctx, st, setupKey, "jellyfin")
+
+	if _, err := st.CreateACLRuleDetailed(ctx, ACLRule{
+		SrcPeerID: &src.ID,
+		DstPeerID: &dst.ID,
+		Name:      "existing",
+		Protocol:  "any",
+	}); err != nil {
+		t.Fatalf("CreateACLRuleDetailed() returned error: %v", err)
+	}
+
+	missingPeer := int64(99999)
+	if _, err := st.ImportACLRules(ctx, []ACLRule{{
+		SrcPeerID: &src.ID,
+		DstPeerID: &missingPeer,
+		Name:      "bad",
+		Protocol:  "any",
+	}}, true); err == nil {
+		t.Fatal("ImportACLRules() accepted a missing peer")
+	}
+
+	rules, err := st.ListACLRules(ctx)
+	if err != nil {
+		t.Fatalf("ListACLRules() returned error: %v", err)
+	}
+	if len(rules) != 1 || rules[0].Name != "existing" {
+		t.Fatalf("rules after failed import = %#v, want original rule preserved", rules)
+	}
+}

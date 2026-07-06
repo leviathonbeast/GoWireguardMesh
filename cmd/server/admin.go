@@ -102,6 +102,11 @@ type networkMigrationRequest struct {
 	Confirm      string `json:"confirm,omitempty"`
 }
 
+type peerAddressRequest struct {
+	AssignedIP  string `json:"assigned_ip"`
+	AssignedIP6 string `json:"assigned_ip6,omitempty"`
+}
+
 type peerPingJSON struct {
 	PeerID         int64  `json:"peer_id"`
 	Status         string `json:"status"`
@@ -119,25 +124,29 @@ func (s *server) handleListPeers(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]peerJSON, 0, len(peers))
 	for _, p := range peers {
-		health, age := peerHealth(p.LastSeenAt, p.RevokedAt)
-		out = append(out, peerJSON{
-			ID:             p.ID,
-			PublicKey:      p.PublicKey,
-			AssignedIP:     p.AssignedIP,
-			AssignedIP6:    p.AssignedIP6,
-			HealthStatus:   health,
-			LastSeenAgeSec: age,
-			Hostname:       p.Hostname,
-			ListenPort:     p.ListenPort,
-			ObservedIP:     p.ObservedIP,
-			PublicEndpoint: p.PublicEndpoint,
-			CreatedAt:      p.CreatedAt,
-			LastSeenAt:     p.LastSeenAt,
-			RevokedAt:      p.RevokedAt,
-		})
+		out = append(out, peerInfoJSON(p))
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+func peerInfoJSON(p store.PeerInfo) peerJSON {
+	health, age := peerHealth(p.LastSeenAt, p.RevokedAt)
+	return peerJSON{
+		ID:             p.ID,
+		PublicKey:      p.PublicKey,
+		AssignedIP:     p.AssignedIP,
+		AssignedIP6:    p.AssignedIP6,
+		HealthStatus:   health,
+		LastSeenAgeSec: age,
+		Hostname:       p.Hostname,
+		ListenPort:     p.ListenPort,
+		ObservedIP:     p.ObservedIP,
+		PublicEndpoint: p.PublicEndpoint,
+		CreatedAt:      p.CreatedAt,
+		LastSeenAt:     p.LastSeenAt,
+		RevokedAt:      p.RevokedAt,
+	}
 }
 
 func (s *server) handlePingPeer(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +340,37 @@ func (s *server) handleRevokeSetupKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleRevokePeer(w http.ResponseWriter, r *http.Request) {
 	s.handleRevoke(w, r, s.store.RevokePeer, "peer")
+}
+
+func (s *server) handleUpdatePeerAddress(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	var req peerAddressRequest
+	if !decodeJSON(w, r, 64<<10, &req) {
+		return
+	}
+
+	peer, err := s.store.UpdatePeerAddress(r.Context(), id, req.AssignedIP, req.AssignedIP6)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "peer not found or revoked")
+		return
+	case errors.Is(err, store.ErrAddressInUse):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	slog.Info("admin updated peer address", "peer_id", id, "assigned_ip", peer.AssignedIP, "assigned_ip6", peer.AssignedIP6)
+	s.audit(r, "peer_address_update", http.StatusOK,
+		fmt.Sprintf("peer id=%d assigned_ip=%s assigned_ip6=%s", id, peer.AssignedIP, peer.AssignedIP6))
+	writeJSON(w, http.StatusOK, peerInfoJSON(peer))
 }
 
 func (s *server) handleRevoke(w http.ResponseWriter, r *http.Request, revoke func(context.Context, int64) error, kind string) {

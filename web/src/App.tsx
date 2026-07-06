@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiError, api } from "./api";
 import type {
   AccessLogRow,
+  AclExport,
+  AclRule,
   AclResponse,
   AuditRow,
   Flow,
   LinkStat,
   NetworkConfig,
+  NetworkPeerChange,
   NetworkMigrationPlan,
   Peer,
   SetupKey,
@@ -97,11 +100,10 @@ function PeerBadge({ peer }: { peer: Peer }) {
 }
 
 function KeyBadge({ k }: { k: SetupKey }) {
-  if (k.revoked_at) return <span className="badge bad">revoked</span>;
-  if (k.expires_at && k.expires_at <= new Date().toISOString())
-    return <span className="badge warn">expired</span>;
-  if (k.max_uses > 0 && k.uses_consumed >= k.max_uses)
-    return <span className="badge warn">exhausted</span>;
+  const status = setupKeyStatus(k);
+  if (status === "revoked") return <span className="badge bad">revoked</span>;
+  if (status === "expired") return <span className="badge warn">expired</span>;
+  if (status === "exhausted") return <span className="badge warn">exhausted</span>;
   return <span className="badge ok">active</span>;
 }
 
@@ -152,40 +154,91 @@ const TAB_LABEL: Record<Tab, string> = {
   settings: "Settings",
 };
 
-// flowMatches / auditMatches do free-text search across the fields an
-// operator would filter on: ip, port, hostname, protocol, direction,
-// event, detail. Case-insensitive substring.
-function flowMatches(f: Flow, q: string, srcName: string, dstName: string): boolean {
-  if (!q) return true;
-  const hay = [
-    f.src_ip, f.src_port, f.dst_ip, f.dst_port,
-    f.protocol_name, f.direction, f.peer_hostname, srcName, dstName,
-  ]
+function textMatches(q: string, ...parts: unknown[]): boolean {
+  const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const hay = parts
+    .flatMap((part) => Array.isArray(part) ? part : [part])
+    .filter((part) => part != null)
     .join(" ")
     .toLowerCase();
-  return hay.includes(q.toLowerCase());
+  return terms.every((term) => hay.includes(term));
+}
+
+// flowMatches / auditMatches do free-text search across the fields an
+// operator would filter on: ip, port, hostname, protocol, direction,
+// event, detail. Multiple terms are ANDed together.
+function flowMatches(f: Flow, q: string, srcName: string, dstName: string): boolean {
+  return textMatches(
+    q,
+    f.src_ip, f.src_port, f.dst_ip, f.dst_port,
+    f.protocol_name, f.direction, f.peer_hostname, srcName, dstName,
+  );
 }
 
 function auditMatches(a: AuditRow, q: string): boolean {
-  if (!q) return true;
-  const hay = [
+  return textMatches(
+    q,
     a.event, a.detail, a.remote_ip, a.overlay_ip, a.peer_hostname,
     a.forwarded_for, a.method, a.path, a.status,
-  ]
-    .join(" ")
-    .toLowerCase();
-  return hay.includes(q.toLowerCase());
+  );
 }
 
 function accessMatches(a: AccessLogRow, q: string): boolean {
-  if (!q) return true;
-  const hay = [
+  return textMatches(
+    q,
     a.method, a.path, a.status, a.remote_ip, a.forwarded_for, a.overlay_ip,
     a.peer_id, a.user_agent, Object.entries(a.headers ?? {}).flat().join(" "),
-  ]
-    .join(" ")
-    .toLowerCase();
-  return hay.includes(q.toLowerCase());
+  );
+}
+
+function peerMatches(p: Peer, q: string): boolean {
+  return textMatches(
+    q,
+    p.id, p.hostname, p.assigned_ip, p.assigned_ip6, p.health_status,
+    p.public_key, p.public_endpoint, p.observed_ip, p.listen_port,
+    lastSeenLabel(p), p.created_at, p.revoked_at,
+  );
+}
+
+function linkMatches(l: LinkStat, q: string): boolean {
+  return textMatches(
+    q,
+    l.peer_hostname, l.peer_ip, l.remote_hostname, l.remote_ip,
+    l.path_state, l.path_endpoint, l.rx_bytes, l.tx_bytes,
+    l.last_handshake_at, l.updated_at,
+  );
+}
+
+function aclMatches(rule: AclRule, q: string): boolean {
+  return textMatches(
+    q,
+    rule.id, rule.name, rule.src_label, rule.dst_label,
+    rule.protocol, rule.port_min, rule.port_max, serviceLabel(rule), rule.created_at,
+  );
+}
+
+function setupKeyMatches(key: SetupKey, q: string): boolean {
+  return textMatches(
+    q,
+    key.id, key.name, key.key, key.max_uses, key.uses_consumed,
+    setupKeyStatus(key), key.created_at, key.expires_at, key.revoked_at,
+  );
+}
+
+function setupKeyStatus(k: SetupKey): "active" | "revoked" | "expired" | "exhausted" {
+  if (k.revoked_at) return "revoked";
+  if (k.expires_at && k.expires_at <= new Date().toISOString()) return "expired";
+  if (k.max_uses > 0 && k.uses_consumed >= k.max_uses) return "exhausted";
+  return "active";
+}
+
+function migrationChangeMatches(change: NetworkPeerChange, q: string): boolean {
+  return textMatches(
+    q,
+    change.id, change.hostname, change.old_ip, change.new_ip,
+    change.old_ip6, change.new_ip6, change.revoked_at,
+  );
 }
 
 function Endpoint({ name, ip }: { name: string; ip?: string }) {
@@ -292,6 +345,45 @@ function Paginated<T>({
   return <>{children(pageItems, pager)}</>;
 }
 
+function SearchBox({
+  value,
+  onChange,
+  placeholder,
+  total,
+  shown,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  total: number;
+  shown: number;
+}) {
+  const active = value.trim() !== "";
+
+  return (
+    <div className="searchbox">
+      <input
+        type="search"
+        placeholder={placeholder}
+        value={value}
+        aria-label={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onChange("");
+        }}
+      />
+      {active && (
+        <button className="ghost" onClick={() => onChange("")}>
+          clear
+        </button>
+      )}
+      <span className="muted">
+        {active ? `${shown} of ${total}` : `${total} total`}
+      </span>
+    </div>
+  );
+}
+
 // FlowEvent renders one observed flow as a NetBird-style traffic
 // event: a sentence, both peer endpoints, protocol/port, and
 // directional byte counts from the reporting peer's vantage.
@@ -339,6 +431,7 @@ const ADMIN_EVENTS = new Set([
   "setup_key_create",
   "acl_create",
   "acl_delete",
+  "acl_import",
   "revoke",
 ]);
 
@@ -355,6 +448,7 @@ const EVENT_PHRASE: Record<string, string> = {
   setup_key_create: "created a setup key",
   acl_create: "added an ACL rule",
   acl_delete: "deleted an ACL rule",
+  acl_import: "imported ACL rules",
   network_migrate: "changed the overlay network",
   revoke: "revoked",
 };
@@ -469,7 +563,19 @@ export default function App() {
   const [networkPlan, setNetworkPlan] = useState<NetworkMigrationPlan | null>(null);
   const [networkConfirm, setNetworkConfirm] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [filter, setFilter] = useState("");
+  const [machineFilter, setMachineFilter] = useState("");
+  const [trafficFilter, setTrafficFilter] = useState("");
+  const [auditFilter, setAuditFilter] = useState("");
+  const [accessFilter, setAccessFilter] = useState("");
+  const [aclFilter, setAclFilter] = useState("");
+  const [aclImportReplace, setAclImportReplace] = useState(true);
+  const [aclImporting, setAclImporting] = useState(false);
+  const [setupFilter, setSetupFilter] = useState("");
+  const [migrationFilter, setMigrationFilter] = useState("");
+  const [editingPeerID, setEditingPeerID] = useState<number | null>(null);
+  const [peerIP, setPeerIP] = useState("");
+  const [peerIP6, setPeerIP6] = useState("");
+  const [savingPeerID, setSavingPeerID] = useState<number | null>(null);
   const [error, setError] = useState("");
 
   // ipName resolves an overlay IP to a peer hostname (both sides of a
@@ -684,6 +790,42 @@ export default function App() {
     }
   };
 
+  const startPeerAddressEdit = (p: Peer) => {
+    setEditingPeerID(p.id);
+    setPeerIP(p.assigned_ip);
+    setPeerIP6(p.assigned_ip6 || "");
+    setError("");
+  };
+
+  const cancelPeerAddressEdit = () => {
+    setEditingPeerID(null);
+    setPeerIP("");
+    setPeerIP6("");
+  };
+
+  const savePeerAddress = async (p: Peer) => {
+    setError("");
+    setSavingPeerID(p.id);
+    try {
+      const updated = await api<Peer>(`/api/peers/${p.id}/address`, token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assigned_ip: peerIP.trim(),
+          assigned_ip6: peerIP6.trim(),
+        }),
+      });
+      setPeers((current) =>
+        current.map((peer) => (peer.id === updated.id ? updated : peer)),
+      );
+      cancelPeerAddressEdit();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingPeerID(null);
+    }
+  };
+
   const createAclRule = async () => {
     setError("");
     try {
@@ -705,6 +847,65 @@ export default function App() {
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const exportAcl = async () => {
+    setError("");
+    try {
+      const payload = await api<AclExport>("/api/acl/export", token);
+      const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `wgmesh-acl-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const importAcl = async (file: File | null) => {
+    if (!file) return;
+    if (
+      aclImportReplace &&
+      !confirm("Replace all existing ACL rules with the imported file?")
+    ) {
+      return;
+    }
+
+    setError("");
+    setAclImporting(true);
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const rules = Array.isArray(parsed)
+        ? parsed
+        : typeof parsed === "object" && parsed !== null && "rules" in parsed
+          ? (parsed as { rules?: unknown }).rules
+          : null;
+      if (!Array.isArray(rules)) {
+        throw new Error("ACL import file must contain a rules array");
+      }
+
+      const next = await api<AclResponse>("/api/acl/import", token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          replace: aclImportReplace,
+          rules,
+        }),
+      });
+      setAcl(next);
+      setAclFilter("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAclImporting(false);
     }
   };
 
@@ -755,6 +956,18 @@ export default function App() {
   const relayedLinks = links.filter((l) => l.path_state === "ws-relay" || l.path_state === "udp-relay");
   const directLinks = links.filter((l) => l.path_state === "direct");
   const activeKeys = keys.filter((k) => !k.revoked_at && !(k.max_uses > 0 && k.uses_consumed >= k.max_uses));
+  const shownPeers = peers.filter((p) => peerMatches(p, machineFilter));
+  const shownActivePeers = activePeers.filter((p) => peerMatches(p, trafficFilter));
+  const shownLinks = links.filter((l) => linkMatches(l, trafficFilter));
+  const shownFlows = flows.filter((f) =>
+    flowMatches(f, trafficFilter, ipName(f.src_ip), ipName(f.dst_ip)),
+  );
+  const shownAudit = audit.filter((a) => auditMatches(a, auditFilter));
+  const shownAccess = access.filter((a) => accessMatches(a, accessFilter));
+  const shownRules = acl.rules.filter((r) => aclMatches(r, aclFilter));
+  const shownKeys = keys.filter((k) => setupKeyMatches(k, setupFilter));
+  const shownMigrationChanges =
+    networkPlan?.changes.filter((c) => migrationChangeMatches(c, migrationFilter)) ?? [];
 
   return (
     <div className="app-shell">
@@ -874,8 +1087,18 @@ export default function App() {
         )}
 
         {tab === "machines" && (
+          <>
+          <div className="row page-tools">
+            <SearchBox
+              value={machineFilter}
+              onChange={setMachineFilter}
+              placeholder="Search machines by name, IP, status, endpoint, key…"
+              total={peers.length}
+              shown={shownPeers.length}
+            />
+          </div>
           <div className="panel tablewrap">
-            <Paginated items={peers}>
+            <Paginated items={shownPeers} resetKey={machineFilter}>
               {(pagePeers, pager) => (
                 <>
                   <table>
@@ -893,50 +1116,93 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {peers.length === 0 && (
+                      {shownPeers.length === 0 && (
                         <tr>
                           <td colSpan={9} className="muted">
-                            no peers enrolled
+                            {peers.length ? "no matching machines" : "no peers enrolled"}
                           </td>
                         </tr>
                       )}
                       {pagePeers.map((p) => (
-                        <tr key={p.id}>
-                          <td>{p.id}</td>
-                          <td>
-                            <PeerBadge peer={p} />
-                          </td>
-                          <td>{p.hostname ?? ""}</td>
-                          <td>
-                            {p.assigned_ip}
-                            {p.assigned_ip6 && (
-                              <div className="muted">{p.assigned_ip6}</div>
-                            )}
-                          </td>
-                          <td className="muted">{lastSeenLabel(p)}</td>
-                          <td className="mono">
-                            {p.public_key} <CopyButton text={p.public_key} />
-                          </td>
-                          <td>
-                            {endpointOf(p) || <span className="muted">unknown</span>}
-                          </td>
-                          <td className="muted">{formatTime(p.created_at)}</td>
-                          <td>
-                            {!p.revoked_at && (
-                              <button
-                                className="danger"
-                                onClick={() =>
-                                  void revoke(
-                                    `/api/peers/${p.id}/revoke`,
-                                    `revoke peer ${p.id} (${p.hostname || p.assigned_ip})?`,
-                                  )
-                                }
-                              >
-                                revoke
-                              </button>
-                            )}
-                          </td>
-                        </tr>
+                        <Fragment key={p.id}>
+                          <tr>
+                            <td>{p.id}</td>
+                            <td>
+                              <PeerBadge peer={p} />
+                            </td>
+                            <td>{p.hostname ?? ""}</td>
+                            <td>
+                              {p.assigned_ip}
+                              {p.assigned_ip6 && (
+                                <div className="muted">{p.assigned_ip6}</div>
+                              )}
+                            </td>
+                            <td className="muted">{lastSeenLabel(p)}</td>
+                            <td className="mono">
+                              {p.public_key} <CopyButton text={p.public_key} />
+                            </td>
+                            <td>
+                              {endpointOf(p) || <span className="muted">unknown</span>}
+                            </td>
+                            <td className="muted">{formatTime(p.created_at)}</td>
+                            <td>
+                              {!p.revoked_at && (
+                                <div className="row table-actions">
+                                  <button onClick={() => startPeerAddressEdit(p)}>
+                                    edit IP
+                                  </button>
+                                  <button
+                                    className="danger"
+                                    onClick={() =>
+                                      void revoke(
+                                        `/api/peers/${p.id}/revoke`,
+                                        `revoke peer ${p.id} (${p.hostname || p.assigned_ip})?`,
+                                      )
+                                    }
+                                  >
+                                    revoke
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                          {editingPeerID === p.id && (
+                            <tr className="edit-row">
+                              <td colSpan={9}>
+                                <div className="inline-editor">
+                                  <label>
+                                    <span>IPv4</span>
+                                    <input
+                                      value={peerIP}
+                                      placeholder={network.network_cidr}
+                                      onChange={(e) => setPeerIP(e.target.value)}
+                                    />
+                                  </label>
+                                  <label>
+                                    <span>IPv6</span>
+                                    <input
+                                      value={peerIP6}
+                                      placeholder={network.network_cidr6}
+                                      onChange={(e) => setPeerIP6(e.target.value)}
+                                    />
+                                  </label>
+                                  <button
+                                    className="primary"
+                                    disabled={savingPeerID === p.id}
+                                    onClick={() => void savePeerAddress(p)}
+                                  >
+                                    {savingPeerID === p.id ? "saving" : "save"}
+                                  </button>
+                                  <button onClick={cancelPeerAddressEdit}>cancel</button>
+                                  <span className="muted">
+                                    {network.network_cidr}
+                                    {network.network_cidr6 ? ` · ${network.network_cidr6}` : ""}
+                                  </span>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       ))}
                     </tbody>
                   </table>
@@ -945,13 +1211,23 @@ export default function App() {
               )}
             </Paginated>
           </div>
+          </>
         )}
         {tab === "traffic" && (
-	          <>
-	          <h2>Liveness</h2>
-	          <div className="panel tablewrap">
-	            <Paginated items={activePeers}>
-	              {(pagePeers, pager) => (
+          <>
+          <div className="row page-tools">
+            <SearchBox
+              value={trafficFilter}
+              onChange={setTrafficFilter}
+              placeholder="Search traffic by peer, IP, path, protocol, port…"
+              total={flows.length + links.length + activePeers.length}
+              shown={shownFlows.length + shownLinks.length + shownActivePeers.length}
+            />
+          </div>
+		          <h2>Liveness</h2>
+		          <div className="panel tablewrap">
+		            <Paginated items={shownActivePeers} resetKey={trafficFilter}>
+		              {(pagePeers, pager) => (
 	                <>
 	                  <table>
 	                    <thead>
@@ -961,12 +1237,12 @@ export default function App() {
 	                      </tr>
 	                    </thead>
 	                    <tbody>
-	                      {activePeers.length === 0 && (
-	                        <tr>
-	                          <td colSpan={2} className="muted">
-	                            no active peers
-	                          </td>
-	                        </tr>
+		                      {shownActivePeers.length === 0 && (
+		                        <tr>
+		                          <td colSpan={2} className="muted">
+		                            {activePeers.length ? "no matching peers" : "no active peers"}
+		                          </td>
+		                        </tr>
 	                      )}
 	                      {pagePeers.map((p) => (
 	                        <tr key={p.id}>
@@ -984,9 +1260,9 @@ export default function App() {
 	            </Paginated>
 	          </div>
 
-	          <h2>Links</h2>
-	          <div className="panel tablewrap">
-	            <Paginated items={links}>
+		          <h2>Links</h2>
+		          <div className="panel tablewrap">
+		            <Paginated items={shownLinks} resetKey={trafficFilter}>
 	              {(pageLinks, pager) => (
 	                <>
 	                  <table>
@@ -1002,11 +1278,11 @@ export default function App() {
 	                      </tr>
 	                    </thead>
 	                    <tbody>
-	                      {links.length === 0 && (
-	                        <tr>
-	                          <td colSpan={7} className="muted">
-	                            no reports yet
-	                          </td>
+		                      {shownLinks.length === 0 && (
+		                        <tr>
+		                          <td colSpan={7} className="muted">
+		                            {links.length ? "no matching links" : "no reports yet"}
+		                          </td>
 	                        </tr>
 	                      )}
 	                      {pageLinks.map((l) => (
@@ -1035,16 +1311,7 @@ export default function App() {
 	            </Paginated>
 	          </div>
 
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <h2 style={{ margin: 0 }}>Traffic events</h2>
-            <input
-              type="search"
-              placeholder="filter by ip, port, hostname, protocol…"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              style={{ width: 320 }}
-            />
-          </div>
+          <h2>Traffic events</h2>
           <div className="panel tablewrap" style={{ marginTop: 12 }}>
             <div className="activity">
               <div className="activity-head">
@@ -1053,19 +1320,16 @@ export default function App() {
                 <span>protocol &amp; port</span>
                 <span>destination</span>
                 <span className="right">traffic</span>
-              </div>
-              {(() => {
-                const shown = flows.filter((f) =>
-                  flowMatches(f, filter, ipName(f.src_ip), ipName(f.dst_ip)),
-                );
-                if (shown.length === 0)
-                  return (
-                    <div className="activity-row muted">
-                      {flows.length ? "no matching flows" : "no flows recorded"}
-                    </div>
-                  );
-	                return (
-	                  <Paginated items={shown} resetKey={filter}>
+	              </div>
+	              {(() => {
+	                if (shownFlows.length === 0)
+	                  return (
+	                    <div className="activity-row muted">
+	                      {flows.length ? "no matching flows" : "no flows recorded"}
+	                    </div>
+	                  );
+		                return (
+		                  <Paginated items={shownFlows} resetKey={trafficFilter}>
 	                    {(pageRows, pager) => (
 	                      <>
 	                        {pageRows.map((f) => (
@@ -1084,14 +1348,14 @@ export default function App() {
 
         {tab === "logs" && (
           <>
-          <div className="row" style={{ justifyContent: "space-between" }}>
+          <div className="row page-tools">
             <h2 style={{ margin: 0 }}>Activity log</h2>
-            <input
-              type="search"
-              placeholder="filter by event, ip, hostname, path…"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              style={{ width: 320 }}
+            <SearchBox
+              value={auditFilter}
+              onChange={setAuditFilter}
+              placeholder="Search activity by event, peer, IP, path, status…"
+              total={audit.length}
+              shown={shownAudit.length}
             />
           </div>
             <p className="sub">
@@ -1107,17 +1371,16 @@ export default function App() {
                 <span>request</span>
                 <span>peer</span>
                 <span className="right">status</span>
-              </div>
-	              {(() => {
-	                const shown = audit.filter((a) => auditMatches(a, filter));
-	                if (shown.length === 0)
-	                  return (
-	                    <div className="activity-row muted">
-	                      {audit.length ? "no matching events" : "no activity yet"}
-	                    </div>
-	                  );
-	                return (
-	                  <Paginated items={shown} resetKey={filter}>
+	              </div>
+		              {(() => {
+		                if (shownAudit.length === 0)
+		                  return (
+		                    <div className="activity-row muted">
+		                      {audit.length ? "no matching events" : "no activity yet"}
+		                    </div>
+		                  );
+		                return (
+		                  <Paginated items={shownAudit} resetKey={auditFilter}>
 	                    {(pageRows, pager) => (
 	                      <>
 	                        {pageRows.map((a) => <AuditEvent key={a.id} a={a} />)}
@@ -1128,17 +1391,17 @@ export default function App() {
 	                );
 	              })()}
             </div>
-          </div>
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <h2 style={{ margin: 0 }}>Request log</h2>
-            <input
-              type="search"
-              placeholder="filter by method, path, ip, status…"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              style={{ width: 320 }}
-            />
-          </div>
+	          </div>
+	          <div className="row page-tools">
+	            <h2 style={{ margin: 0 }}>Request log</h2>
+	            <SearchBox
+	              value={accessFilter}
+	              onChange={setAccessFilter}
+	              placeholder="Search requests by method, path, IP, peer, status…"
+	              total={access.length}
+	              shown={shownAccess.length}
+	            />
+	          </div>
           <div className="panel tablewrap">
             <div className="activity">
               <div className="activity-head">
@@ -1147,17 +1410,16 @@ export default function App() {
                 <span>trace</span>
                 <span>peer</span>
                 <span className="right">status</span>
-              </div>
-	              {(() => {
-	                const shown = access.filter((a) => accessMatches(a, filter));
-	                if (shown.length === 0)
-	                  return (
-	                    <div className="activity-row muted">
-	                      {access.length ? "no matching requests" : "no request log entries"}
-	                    </div>
-	                  );
-	                return (
-	                  <Paginated items={shown} resetKey={filter}>
+	              </div>
+		              {(() => {
+		                if (shownAccess.length === 0)
+		                  return (
+		                    <div className="activity-row muted">
+		                      {access.length ? "no matching requests" : "no request log entries"}
+		                    </div>
+		                  );
+		                return (
+		                  <Paginated items={shownAccess} resetKey={accessFilter}>
 	                    {(pageRows, pager) => (
 	                      <>
 	                        {pageRows.map((a, i) => <AccessEvent key={`${a.time}-${i}`} a={a} />)}
@@ -1235,12 +1497,22 @@ export default function App() {
 
             {networkPlan && (
               <div className="stack">
-                <div className="notice">
-                  {networkPlan.message ||
-                    "Preview ready. Review the reassignment plan before applying."}
-                </div>
-	                <div className="tablewrap">
-	                  <Paginated items={networkPlan.changes}>
+	                <div className="notice">
+	                  {networkPlan.message ||
+	                    "Preview ready. Review the reassignment plan before applying."}
+	                </div>
+	                <SearchBox
+	                  value={migrationFilter}
+	                  onChange={setMigrationFilter}
+                  placeholder="Search migration by peer, old IP, new IP…"
+                  total={networkPlan.changes.length}
+                  shown={shownMigrationChanges.length}
+                />
+                <div className="tablewrap">
+                  <Paginated
+                    items={shownMigrationChanges}
+                    resetKey={migrationFilter}
+                  >
 	                    {(pageChanges, pager) => (
 	                      <>
 	                        <table>
@@ -1253,10 +1525,10 @@ export default function App() {
 	                            </tr>
 	                          </thead>
 	                          <tbody>
-	                            {networkPlan.changes.length === 0 && (
+                            {shownMigrationChanges.length === 0 && (
 	                              <tr>
 	                                <td colSpan={4} className="muted">
-	                                  no peers to reassign
+	                                  {networkPlan.changes.length ? "no matching peers" : "no peers to reassign"}
 	                                </td>
 	                              </tr>
 	                            )}
@@ -1392,10 +1664,43 @@ export default function App() {
                 <button className="primary" onClick={() => void createAclRule()}>
                   add rule
                 </button>
-              </div>
+	              </div>
 	            </div>
-	            <div className="tablewrap">
-	              <Paginated items={acl.rules}>
+		            <div className="row policy-tools">
+		              <SearchBox
+		                value={aclFilter}
+		                onChange={setAclFilter}
+		                placeholder="Search ACLs by name, source, destination, protocol, port…"
+		                total={acl.rules.length}
+		                shown={shownRules.length}
+		              />
+		              <div className="row import-export">
+		                <button onClick={() => void exportAcl()}>export</button>
+		                <label className="toggle">
+		                  <input
+		                    type="checkbox"
+		                    checked={aclImportReplace}
+		                    onChange={(e) => setAclImportReplace(e.target.checked)}
+		                  />
+		                  replace existing
+		                </label>
+		                <label className="file-button">
+		                  {aclImporting ? "importing" : "import"}
+		                  <input
+		                    type="file"
+		                    accept="application/json,.json"
+		                    disabled={aclImporting}
+		                    onChange={(e) => {
+		                      const file = e.currentTarget.files?.[0] ?? null;
+		                      e.currentTarget.value = "";
+		                      void importAcl(file);
+		                    }}
+		                  />
+		                </label>
+		              </div>
+		            </div>
+		            <div className="tablewrap">
+	              <Paginated items={shownRules} resetKey={aclFilter}>
 	                {(pageRules, pager) => (
 	                  <>
 	                    <table>
@@ -1411,10 +1716,10 @@ export default function App() {
 	                        </tr>
 	                      </thead>
 	                      <tbody>
-	                        {acl.rules.length === 0 && (
+	                        {shownRules.length === 0 && (
 	                          <tr>
 	                            <td colSpan={7} className="muted">
-	                              no rules
+	                              {acl.rules.length ? "no matching rules" : "no rules"}
 	                            </td>
 	                          </tr>
 	                        )}
@@ -1489,10 +1794,17 @@ export default function App() {
                 <button className="primary" onClick={() => void createKey()}>
                   new setup key
                 </button>
-              </div>
+	              </div>
 	            </div>
+	            <SearchBox
+	              value={setupFilter}
+	              onChange={setSetupFilter}
+	              placeholder="Search setup keys by name, key, status, expiry…"
+	              total={keys.length}
+	              shown={shownKeys.length}
+	            />
 	            <div className="tablewrap">
-	              <Paginated items={keys}>
+	              <Paginated items={shownKeys} resetKey={setupFilter}>
 	                {(pageKeys, pager) => (
 	                  <>
 	                    <table>
@@ -1509,10 +1821,10 @@ export default function App() {
 	                        </tr>
 	                      </thead>
 	                      <tbody>
-	                        {keys.length === 0 && (
+	                        {shownKeys.length === 0 && (
 	                          <tr>
 	                            <td colSpan={8} className="muted">
-	                              no setup keys
+	                              {keys.length ? "no matching setup keys" : "no setup keys"}
 	                            </td>
 	                          </tr>
 	                        )}
