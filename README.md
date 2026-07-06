@@ -347,6 +347,10 @@ privileges is a warning, never fatal.
   separate `server`, `relay`, and `agent` targets; the `agent` target is
   meant to be sidecar'd next to a service (`network_mode: service:<svc>`,
   `NET_ADMIN`) — see the sidecar example in [SECURITY.md](SECURITY.md).
+- **Debian + Traefik compose**: `deploy/docker-compose.debian.yml` is a
+  production-oriented server template for a Debian VPS where Traefik already
+  owns 80/443. Copy `deploy/debian-server.env.example` to
+  `/opt/wgmesh/server.env`, edit it, and run it with Docker Compose.
 - **Gitea Actions**: `.gitea/workflows/docker-images.yml` builds and pushes
   the `server`, `agent`, and `relay` Docker targets to the Gitea container
   registry on pushes to `main` and `v*` tags.
@@ -400,6 +404,27 @@ volumes:
   myservice-wg:
 ```
 
+### Debian server with Traefik
+
+The Debian template expects an external Docker network named `proxy` shared
+with Traefik, and publishes no host ports itself. Traefik routes
+`https://$WGMESH_HOST` to the server container over that private network.
+
+```sh
+sudo mkdir -p /opt/wgmesh/server
+sudo cp deploy/debian-server.env.example /opt/wgmesh/server.env
+sudoedit /opt/wgmesh/server.env
+
+docker compose --env-file /opt/wgmesh/server.env \
+  -f deploy/docker-compose.debian.yml up -d
+```
+
+The template runs the server with `--no-tls --trust-proxy`,
+`--relay-embedded`, default WebSocket relay over 443, durable state in
+`/opt/wgmesh/server`, and default-deny ACL policy. If you are migrating from an
+existing WireGuard range, set `WGMESH_NETWORK` and `WGMESH_NETWORK6` in the env
+file before first start.
+
 ### Honest production status
 
 Suitable today: trusted-LAN, public-endpoint, and VPS-fronted meshes at
@@ -430,13 +455,24 @@ with these differences:
 
 - There is no kernel WireGuard to drive, so the agent embeds
   wireguard-go as a library: it creates a Wintun adapter in-process,
-  runs the userspace WireGuard device, and exposes the standard UAPI
-  pipe that wgctrl speaks. No external binaries needed — just download
+  runs the userspace WireGuard device, and configures it through the
+  in-process UAPI. No external binaries needed — just download
   `wintun.dll` (amd64) from [wintun.net](https://www.wintun.net) and
   place it next to `agent.exe`.
 - Addressing uses `netsh`; run from an elevated (Administrator) prompt.
 - Flow telemetry is Linux-only (no conntrack); link counters, config
   sync, STUN, and relay fallback all work.
+- It can run as a Windows service. From an elevated prompt:
+
+```powershell
+.\agent.exe service install --server https://mesh.example.com --setup-key <token> `
+  --listen-port 51820 --key-file C:\ProgramData\wgmesh-agent\wgkey.key
+.\agent.exe service start
+
+# Later:
+.\agent.exe service stop
+.\agent.exe service remove
+```
 
 Treat it as a starting point: it compiles and follows documented Wintun
 behavior, but has not been validated on a real Windows host.

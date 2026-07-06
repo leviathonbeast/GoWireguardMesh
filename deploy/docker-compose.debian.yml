@@ -1,0 +1,56 @@
+# wgmesh control plane for a Debian VPS behind Traefik.
+#
+# Usage:
+#   mkdir -p /opt/wgmesh/server
+#   cp deploy/debian-server.env.example /opt/wgmesh/server.env
+#   edit /opt/wgmesh/server.env
+#   docker compose --env-file /opt/wgmesh/server.env \
+#     -f deploy/docker-compose.debian.yml up -d
+#
+# This template assumes Traefik is already attached to an external Docker
+# network named "proxy" and terminates HTTPS for WGMESH_HOST.
+
+services:
+  wgmesh:
+    image: ${WGMESH_SERVER_IMAGE:?set WGMESH_SERVER_IMAGE}
+    container_name: wgmesh-server
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: >
+      --listen 0.0.0.0:8080
+      --no-tls
+      --trust-proxy
+      --db /data/mesh.db
+      --psk-file /data/mesh-psk.key
+      --admin-token-file /data/admin-token
+      --network ${WGMESH_NETWORK:-100.64.0.0/16}
+      --network6 ${WGMESH_NETWORK6:-fd00:100:64::/64}
+      --relay-embedded
+      --relay-host ${WGMESH_HOST:?set WGMESH_HOST}
+      --default-policy ${WGMESH_DEFAULT_POLICY:-deny}
+      --token-ttl ${WGMESH_TOKEN_TTL:-720h}
+      --access-log ${WGMESH_ACCESS_LOG:-memory}
+      --manage-firewall=false
+    volumes:
+      - ${WGMESH_DATA_DIR:-/opt/wgmesh/server}:/data
+    networks:
+      - proxy
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "proxy"
+      traefik.http.routers.wgmesh.rule: "Host(`${WGMESH_HOST}`)"
+      traefik.http.routers.wgmesh.entrypoints: "websecure"
+      traefik.http.routers.wgmesh.tls.certresolver: "letsencrypt"
+      traefik.http.routers.wgmesh.middlewares: "${WGMESH_TRAEFIK_MIDDLEWARES:-crowdsec@file}"
+      traefik.http.services.wgmesh.loadbalancer.server.port: "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  proxy:
+    external: true

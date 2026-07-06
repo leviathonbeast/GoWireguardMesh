@@ -73,7 +73,7 @@ func setupLogging(level string) error {
 	return nil
 }
 
-func waitForShutdown() {
+func waitForShutdown(stop <-chan struct{}) {
 	sigCh := make(chan os.Signal, 1)
 
 	signal.Notify(
@@ -81,12 +81,20 @@ func waitForShutdown() {
 		os.Interrupt,
 		syscall.SIGTERM,
 	)
+	defer signal.Stop(sigCh)
 
 	fmt.Println("\nWaiting for shutdown signal (Ctrl+C)...")
 
-	sig := <-sigCh
+	select {
+	case sig := <-sigCh:
+		fmt.Printf("\nReceived signal: %s\n", sig)
+	case <-stop:
+		fmt.Println("\nReceived service stop request")
+	}
+}
 
-	fmt.Printf("\nReceived signal: %s\n", sig)
+func run() error {
+	return runWithStop(nil)
 }
 
 func buildPeerConfig(
@@ -383,7 +391,7 @@ func effectiveListenPort(flagPort, resolvedPort int) int {
 	return flagPort
 }
 
-func run() error {
+func runWithStop(stop <-chan struct{}) error {
 	flag.Parse()
 
 	if err := setupLogging(*logLevelFlag); err != nil {
@@ -638,7 +646,7 @@ func run() error {
 	}
 
 	// Block until terminated.
-	waitForShutdown()
+	waitForShutdown(stop)
 
 	if reporterStop != nil {
 		close(reporterStop)
@@ -648,6 +656,14 @@ func run() error {
 }
 
 func main() {
+	if handled, err := handlePlatformCommand(os.Args); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
