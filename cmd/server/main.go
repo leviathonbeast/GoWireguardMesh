@@ -347,6 +347,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /api/peers/{id}/ping", srv.requireAdmin(srv.handlePingPeer))
 	mux.HandleFunc("POST /api/peers/{id}/address", srv.requireAdmin(srv.handleUpdatePeerAddress))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))
+	mux.HandleFunc("POST /api/peers/{id}/remove", srv.requireAdmin(srv.handleRemovePeer))
 	mux.HandleFunc("GET /api/setup-keys", srv.requireAdmin(srv.handleListSetupKeys))
 	mux.HandleFunc("POST /api/setup-keys", srv.requireAdmin(srv.handleCreateSetupKey))
 	mux.HandleFunc("POST /api/setup-keys/{id}/revoke", srv.requireAdmin(srv.handleRevokeSetupKey))

@@ -67,6 +67,7 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
 	mux.HandleFunc("POST /api/peers/{id}/address", srv.requireAdmin(srv.handleUpdatePeerAddress))
+	mux.HandleFunc("POST /api/peers/{id}/remove", srv.requireAdmin(srv.handleRemovePeer))
 	mux.HandleFunc("GET /api/network", srv.requireAdmin(srv.handleGetNetwork))
 	mux.HandleFunc("POST /api/network/preview", srv.requireAdmin(srv.handlePreviewNetworkMigration))
 	mux.HandleFunc("POST /api/network/apply", srv.requireAdmin(srv.handleApplyNetworkMigration))
@@ -411,5 +412,39 @@ func TestPeerAddressUpdateUpdatesRunningAgentViaReport(t *testing.T) {
 	outside := map[string]any{"assigned_ip": "192.0.2.77", "assigned_ip6": "fd00:100:64::79"}
 	if code, body := adminDo(t, ts, "POST", fmt.Sprintf("/api/peers/%d/address", a.PeerID), outside); code != http.StatusBadRequest {
 		t.Fatalf("outside update: status %d (%s), want 400", code, body)
+	}
+}
+
+func TestRemovePeerRequiresRevocation(t *testing.T) {
+	srv, ts := newTestServer(t)
+
+	setupKey, err := srv.store.CreateSetupKey(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+
+	peer := enrollPeer(t, ts, setupKey, "stale-node")
+	path := fmt.Sprintf("/api/peers/%d/remove", peer.PeerID)
+
+	if code, body := adminDo(t, ts, "POST", path, nil); code != http.StatusNotFound {
+		t.Fatalf("remove active peer: status %d (%s), want 404", code, body)
+	}
+	if err := srv.store.RevokePeer(context.Background(), int64(peer.PeerID)); err != nil {
+		t.Fatalf("RevokePeer: %v", err)
+	}
+	if code, body := adminDo(t, ts, "POST", path, nil); code != http.StatusOK {
+		t.Fatalf("remove revoked peer: status %d (%s)", code, body)
+	}
+
+	code, body := adminDo(t, ts, "GET", "/api/peers", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list peers: status %d (%s)", code, body)
+	}
+	var peers []peerJSON
+	if err := json.Unmarshal(body, &peers); err != nil {
+		t.Fatalf("decode peers: %v", err)
+	}
+	if len(peers) != 0 {
+		t.Fatalf("peers after remove = %#v, want empty", peers)
 	}
 }

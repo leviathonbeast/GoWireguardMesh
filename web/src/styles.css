@@ -265,6 +265,58 @@ h2 {
   display: none;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.modal {
+  width: min(100%, 420px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 18px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.modal h2 {
+  margin-top: 0;
+  color: var(--text);
+  font-size: 16px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.modal p {
+  margin: 0 0 16px;
+  color: var(--text);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 50;
+  max-width: min(420px, calc(100vw - 36px));
+  border: 1px solid rgba(54, 184, 117, 0.5);
+  border-radius: 8px;
+  background: #173325;
+  color: var(--text);
+  padding: 10px 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+}
+
 input,
 select,
 button {

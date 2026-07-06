@@ -384,6 +384,47 @@ function SearchBox({
   );
 }
 
+type ConfirmAction = {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  danger?: boolean;
+  onConfirm: () => Promise<void> | void;
+};
+
+function ConfirmModal({
+  action,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  action: ConfirmAction;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h2 id="confirm-title">{action.title}</h2>
+        <p>{action.message}</p>
+        <div className="modal-actions">
+          <button disabled={busy} onClick={onCancel}>
+            no
+          </button>
+          <button
+            className={action.danger ? "danger" : "primary"}
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            {busy ? "working" : action.confirmLabel || "yes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // FlowEvent renders one observed flow as a NetBird-style traffic
 // event: a sentence, both peer endpoints, protocol/port, and
 // directional byte counts from the reporting peer's vantage.
@@ -432,6 +473,8 @@ const ADMIN_EVENTS = new Set([
   "acl_create",
   "acl_delete",
   "acl_import",
+  "peer_address_update",
+  "peer_remove",
   "revoke",
 ]);
 
@@ -450,6 +493,8 @@ const EVENT_PHRASE: Record<string, string> = {
   acl_delete: "deleted an ACL rule",
   acl_import: "imported ACL rules",
   network_migrate: "changed the overlay network",
+  peer_address_update: "changed a peer address",
+  peer_remove: "removed a peer",
   revoke: "revoked",
 };
 
@@ -576,6 +621,9 @@ export default function App() {
   const [peerIP, setPeerIP] = useState("");
   const [peerIP6, setPeerIP6] = useState("");
   const [savingPeerID, setSavingPeerID] = useState<number | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [toast, setToast] = useState("");
   const [error, setError] = useState("");
 
   // ipName resolves an overlay IP to a peer hostname (both sides of a
@@ -684,6 +732,13 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [authenticated, autoRefresh, refresh]);
 
+  useEffect(() => {
+    if (!toast) return;
+
+    const id = window.setTimeout(() => setToast(""), 3200);
+    return () => window.clearTimeout(id);
+  }, [toast]);
+
   const refreshUISession = async (adminToken: string) => {
     const body = new URLSearchParams();
     body.set("token", adminToken);
@@ -774,20 +829,40 @@ export default function App() {
       });
       setSetupName("");
       await refresh();
+      showToast("Setup key created");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const revoke = async (path: string, prompt: string) => {
-    if (!confirm(prompt)) return;
+  const showToast = (message: string) => {
+    setToast(message);
+  };
+
+  const runConfirmAction = async () => {
+    if (!confirmAction) return;
+
+    setConfirmBusy(true);
     setError("");
     try {
-      await api(path, token, { method: "POST" });
-      await refresh();
+      await confirmAction.onConfirm();
+      setConfirmAction(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConfirmBusy(false);
     }
+  };
+
+  const postAdminAction = async (path: string, success: string) => {
+    setError("");
+    await api(path, token, { method: "POST" });
+    await refresh();
+    showToast(success);
+  };
+
+  const confirmPost = (action: ConfirmAction) => {
+    setConfirmAction(action);
   };
 
   const startPeerAddressEdit = (p: Peer) => {
@@ -819,6 +894,7 @@ export default function App() {
         current.map((peer) => (peer.id === updated.id ? updated : peer)),
       );
       cancelPeerAddressEdit();
+      showToast("Peer address updated");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -845,6 +921,7 @@ export default function App() {
       setAclPortMin("");
       setAclPortMax("");
       await refresh();
+      showToast("ACL rule added");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -865,6 +942,7 @@ export default function App() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+      showToast("ACL export downloaded");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -872,13 +950,22 @@ export default function App() {
 
   const importAcl = async (file: File | null) => {
     if (!file) return;
-    if (
-      aclImportReplace &&
-      !confirm("Replace all existing ACL rules with the imported file?")
-    ) {
+
+    if (aclImportReplace) {
+      setConfirmAction({
+        title: "Import ACL rules?",
+        message: "This will replace all existing ACL rules with the selected file.",
+        confirmLabel: "import",
+        danger: true,
+        onConfirm: () => importAclFile(file),
+      });
       return;
     }
 
+    await importAclFile(file);
+  };
+
+  const importAclFile = async (file: File) => {
     setError("");
     setAclImporting(true);
     try {
@@ -902,6 +989,7 @@ export default function App() {
       });
       setAcl(next);
       setAclFilter("");
+      showToast(aclImportReplace ? "ACL rules replaced" : "ACL rules imported");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -922,6 +1010,7 @@ export default function App() {
       });
       setNetworkPlan(plan);
       setNetworkConfirm("");
+      showToast("Migration preview ready");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setNetworkPlan(null);
@@ -946,6 +1035,7 @@ export default function App() {
       setNetworkCIDR6(plan.target.network_cidr6);
       setNetworkConfirm("");
       await refresh();
+      showToast("Overlay network updated");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -1146,25 +1236,46 @@ export default function App() {
                             </td>
                             <td className="muted">{formatTime(p.created_at)}</td>
                             <td>
-                              {!p.revoked_at && (
-                                <div className="row table-actions">
-                                  <button onClick={() => startPeerAddressEdit(p)}>
-                                    edit IP
-                                  </button>
-                                  <button
-                                    className="danger"
-                                    onClick={() =>
-                                      void revoke(
-                                        `/api/peers/${p.id}/revoke`,
-                                        `revoke peer ${p.id} (${p.hostname || p.assigned_ip})?`,
-                                      )
-                                    }
-                                  >
-                                    revoke
-                                  </button>
-                                </div>
-                              )}
-                            </td>
+	                              {!p.revoked_at && (
+	                                <div className="row table-actions">
+	                                  <button onClick={() => startPeerAddressEdit(p)}>
+	                                    edit IP
+	                                  </button>
+	                                  <button
+	                                    className="danger"
+	                                    onClick={() =>
+	                                      confirmPost({
+	                                        title: "Revoke peer?",
+	                                        message: `Revoke peer ${p.id} (${p.hostname || p.assigned_ip})? It will stop receiving mesh config but remain in history.`,
+	                                        confirmLabel: "revoke",
+	                                        danger: true,
+	                                        onConfirm: () =>
+	                                          postAdminAction(`/api/peers/${p.id}/revoke`, "Peer revoked"),
+	                                      })
+	                                    }
+	                                  >
+	                                    revoke
+	                                  </button>
+	                                </div>
+	                              )}
+	                              {p.revoked_at && (
+	                                <button
+	                                  className="danger"
+	                                  onClick={() =>
+	                                    confirmPost({
+	                                      title: "Remove peer?",
+	                                      message: `Permanently remove peer ${p.id} (${p.hostname || p.assigned_ip})? This releases its overlay address and removes live ACL/topology references.`,
+	                                      confirmLabel: "remove",
+	                                      danger: true,
+	                                      onConfirm: () =>
+	                                        postAdminAction(`/api/peers/${p.id}/remove`, "Peer removed"),
+	                                    })
+	                                  }
+	                                >
+	                                  remove
+	                                </button>
+	                              )}
+	                            </td>
                           </tr>
                           {editingPeerID === p.id && (
                             <tr className="edit-row">
@@ -1732,16 +1843,20 @@ export default function App() {
 	                            <td>{serviceLabel(r)}</td>
 	                            <td className="muted">{formatTime(r.created_at)}</td>
 	                            <td>
-	                              <button
-	                                className="danger"
-	                                onClick={() =>
-	                                  void revoke(
-	                                    `/api/acl/${r.id}/delete`,
-	                                    `delete ACL rule ${r.id} (${r.src_label} to ${r.dst_label})?`,
-	                                  )
-	                                }
-	                              >
-	                                delete
+		                              <button
+		                                className="danger"
+		                                onClick={() =>
+		                                  confirmPost({
+		                                    title: "Delete ACL rule?",
+		                                    message: `Delete ACL rule ${r.id} (${r.src_label} to ${r.dst_label})?`,
+		                                    confirmLabel: "delete",
+		                                    danger: true,
+		                                    onConfirm: () =>
+		                                      postAdminAction(`/api/acl/${r.id}/delete`, "ACL rule deleted"),
+		                                  })
+		                                }
+		                              >
+		                                delete
 	                              </button>
 	                            </td>
 	                          </tr>
@@ -1850,10 +1965,14 @@ export default function App() {
 	                                <button
 	                                  className="danger"
 	                                  onClick={() =>
-	                                    void revoke(
-	                                      `/api/setup-keys/${k.id}/revoke`,
-	                                      `revoke setup key ${k.id}?`,
-	                                    )
+	                                    confirmPost({
+	                                      title: "Revoke setup key?",
+	                                      message: `Revoke setup key ${k.id}? Agents already enrolled keep working, but this key can no longer enroll or re-enroll peers.`,
+	                                      confirmLabel: "revoke",
+	                                      danger: true,
+	                                      onConfirm: () =>
+	                                        postAdminAction(`/api/setup-keys/${k.id}/revoke`, "Setup key revoked"),
+	                                    })
 	                                  }
 	                                >
 	                                  revoke
@@ -1873,6 +1992,15 @@ export default function App() {
           </>
         )}
       </main>
+      {confirmAction && (
+        <ConfirmModal
+          action={confirmAction}
+          busy={confirmBusy}
+          onCancel={() => !confirmBusy && setConfirmAction(null)}
+          onConfirm={() => void runConfirmAction()}
+        />
+      )}
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }

@@ -342,6 +342,26 @@ func (s *server) handleRevokePeer(w http.ResponseWriter, r *http.Request) {
 	s.handleRevoke(w, r, s.store.RevokePeer, "peer")
 }
 
+func (s *server) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	switch err := s.store.RemovePeer(r.Context(), id); {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "peer not found or not revoked")
+	case err != nil:
+		slog.Error("remove peer failed", "peer_id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+	default:
+		slog.Info("admin removed peer", "peer_id", id)
+		s.audit(r, "peer_remove", http.StatusOK, fmt.Sprintf("peer id=%d", id))
+		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	}
+}
+
 func (s *server) handleUpdatePeerAddress(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {

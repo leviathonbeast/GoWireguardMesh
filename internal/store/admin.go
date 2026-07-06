@@ -139,6 +139,26 @@ func (s *Store) RevokePeer(ctx context.Context, id int64) error {
 	return s.revoke(ctx, "peers", id)
 }
 
+// RemovePeer permanently deletes an already-revoked peer. Foreign-key
+// cascades remove live topology/ACL references, while audit rows keep
+// their historical event text and lose the peer_id reference.
+func (s *Store) RemovePeer(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM peers WHERE id = ? AND revoked_at IS NOT NULL`, id)
+	if err != nil {
+		return fmt.Errorf("remove peer %d: %w", id, err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("remove peer %d: %w", id, err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("remove peer %d: %w", id, ErrNotFound)
+	}
+
+	return nil
+}
+
 func (s *Store) UpdatePeerAddress(ctx context.Context, id int64, assignedIP, assignedIP6 string) (PeerInfo, error) {
 	addr4, err := validateOverlayAddr("assigned_ip", assignedIP, s.network4(), true)
 	if err != nil {
