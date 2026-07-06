@@ -2,10 +2,11 @@
 
 package main
 
-import "errors"
+import "net/netip"
 
-// Windows has no conntrack; flow telemetry is Linux-only for now.
-// Link counters, config sync, STUN, and relay fallback all still work.
-func newFlowDumper() (flowDumper, error) {
-	return nil, errors.New("flow telemetry is not supported on windows")
+// Windows has no kernel conntrack and no AF_PACKET; flow telemetry stays
+// Linux-only for now. A nil dumper disables it. Link counters, config
+// sync, STUN, and relay fallback all still work.
+func newFlowDumper(_ string, _, _ netip.Addr) (flowDumper, error) {
+	return nil, nil
 }

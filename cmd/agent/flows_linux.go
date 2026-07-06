@@ -4,6 +4,8 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -17,29 +19,40 @@ type conntrackDumper struct {
 	conn *conntrack.Conn
 }
 
-func newFlowDumper() (flowDumper, error) {
-	// Flow visibility needs conntrack byte/packet accounting, which is off
-	// by default on most kernels. It is a host-global knob, so if it is
-	// already on (e.g. enabled on the Docker host) we use it as-is —
-	// containers mount /proc/sys read-only and cannot write it themselves.
-	if !conntrackAcctEnabled() {
-		if err := os.WriteFile(conntrackAcctPath, []byte("1\n"), 0644); err != nil {
-			return nil, fmt.Errorf("conntrack accounting is off and could not be enabled (%v); "+
-				"for flow logs in a container, enable it on the host: sysctl -w net.netfilter.nf_conntrack_acct=1", err)
+// newFlowDumper picks a flow source. conntrack is preferred when byte
+// accounting is available — it is cheap, the kernel already tracks the
+// connections. When accounting is off and cannot be enabled (a read-only
+// /proc/sys, i.e. inside a container) it falls back to capturing the
+// overlay interface, which needs no sysctl — just CAP_NET_RAW.
+func newFlowDumper(iface string, self4, self6 netip.Addr) (flowDumper, error) {
+	if conntrackAcctReady() {
+		if d, err := newConntrackDumper(); err == nil {
+			return d, nil
+		} else {
+			slog.Warn("conntrack flow source failed; capturing overlay instead", "error", err)
 		}
+	} else {
+		slog.Info("conntrack byte accounting unavailable; capturing overlay for flow logs", "iface", iface)
 	}
 
-	conn, err := conntrack.Dial(nil)
-	if err != nil {
-		return nil, fmt.Errorf("conntrack unavailable (%v)", err)
+	return newCaptureDumper(iface, self4, self6)
+}
+
+// conntrackAcctReady reports whether conntrack byte accounting is on, or
+// could be turned on here. It is a host-global knob, so an already-enabled
+// value (e.g. set on the Docker host) is used as-is; otherwise we try to
+// enable it. A failed write — a read-only /proc/sys inside a container — is
+// the signal to fall back to capture.
+func conntrackAcctReady() bool {
+	if conntrackAcctEnabled() {
+		return true
 	}
 
-	return &conntrackDumper{conn: conn}, nil
+	return os.WriteFile(conntrackAcctPath, []byte("1\n"), 0644) == nil
 }
 
 // conntrackAcctEnabled reports whether conntrack byte/packet accounting is
-// already on, letting us skip the sysctl write that a read-only /proc/sys
-// (the container default) would reject.
+// already on.
 func conntrackAcctEnabled() bool {
 	b, err := os.ReadFile(conntrackAcctPath)
 	if err != nil {
@@ -47,6 +60,15 @@ func conntrackAcctEnabled() bool {
 	}
 
 	return strings.TrimSpace(string(b)) == "1"
+}
+
+func newConntrackDumper() (flowDumper, error) {
+	conn, err := conntrack.Dial(nil)
+	if err != nil {
+		return nil, fmt.Errorf("conntrack unavailable (%v)", err)
+	}
+
+	return &conntrackDumper{conn: conn}, nil
 }
 
 func (d *conntrackDumper) Dump() ([]ctFlow, error) {

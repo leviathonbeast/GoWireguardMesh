@@ -26,6 +26,10 @@ services:
     network_mode: "service:myservice"
     cap_add:
       - NET_ADMIN
+      # NET_RAW lets the agent capture the overlay interface for flow logs
+      # when conntrack byte accounting is unavailable (the container default,
+      # e.g. on Unraid). Drop it if you don't need the Traffic tab.
+      - NET_RAW
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:

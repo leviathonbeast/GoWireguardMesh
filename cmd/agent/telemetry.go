@@ -158,7 +158,7 @@ func newTelemetryReporter(
 		wsProxies:       make(map[wgtypes.Key]*wsRelayProxy),
 	}
 
-	dumper, err := newFlowDumper()
+	dumper, err := newFlowDumper(iface, parseSelfAddr(selfAddr), parseSelfAddr(selfAddr6))
 	if err != nil {
 		slog.Warn("flow logs disabled", "error", err)
 		return t, nil
@@ -167,6 +167,22 @@ func newTelemetryReporter(
 	t.ct = dumper
 
 	return t, nil
+}
+
+// parseSelfAddr parses an overlay self-address (a bare IP or a CIDR) for the
+// capture flow classifier; returns the zero Addr when empty or unparseable.
+func parseSelfAddr(s string) netip.Addr {
+	if s == "" {
+		return netip.Addr{}
+	}
+	if a, err := netip.ParseAddr(s); err == nil {
+		return a.Unmap()
+	}
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p.Addr().Unmap()
+	}
+
+	return netip.Addr{}
 }
 
 // run collects and reports until stop is closed. Runs one final
