@@ -34,15 +34,18 @@ Never expose `--no-tls` to the internet. Two options:
 The server warns loudly if it is serving plain HTTP on a non-loopback
 address without `--trust-proxy`.
 
-The web UI is protected by a single admin bearer token. Over HTTPS that is
-reasonable for a homelab control plane, but treat the token like root for the
-mesh: keep TLS strict, do not log or share the token, prefer putting the UI
-behind your existing identity-aware proxy/VPN allowlist when possible, and
-rotate `admin-token` if it leaks.
+The web UI is protected by a single admin bearer token. Anonymous visitors only
+receive a tiny token form; the actual dashboard bundle/assets are served only
+after the token validates and the server sets a signed HttpOnly UI session
+cookie. Over HTTPS that is reasonable for a homelab control plane, but treat the
+token like root for the mesh: keep TLS strict, do not log or share the token,
+prefer putting the UI behind your existing identity-aware proxy/VPN allowlist
+when possible, and rotate `admin-token` if it leaks.
 
 ### 2. Rate limiting (on by default)
 
-Public endpoints (`/enroll`, `/report`, `/relay-pair`, `/relay-ws`) are
+Public endpoints (`/enroll`, `/report`, `/relay-pair`, `/relay-ws`, and the
+UI login form) are
 throttled per source IP (`--rate-limit`, `--rate-burst`). This blunts
 setup-key brute forcing and relay exhaustion. Keyed on the real client
 IP, so it works correctly behind a trusted proxy. Admin routes are
@@ -73,8 +76,9 @@ project deliberately doesn't grow.
 - **Security headers** — every response carries a same-origin
   `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
   `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and (over
-  TLS) HSTS. The CSP is the backstop for the admin token in the UI's
-  sessionStorage: injected markup cannot load off-origin script.
+  TLS) HSTS. The CSP prevents injected markup from loading off-origin
+  script; the dashboard itself is not served until the signed UI session
+  cookie exists.
 - **Graceful shutdown** — SIGINT/SIGTERM drains the server and runs
   cleanup, so firewall rules the server opened are removed instead of
   leaking until the next start's reconciliation.

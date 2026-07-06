@@ -12,12 +12,15 @@ export async function api<T>(
   token: string,
   opts: RequestInit = {},
 ): Promise<T> {
+  const headers = new Headers(opts.headers);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
   const res = await fetch(path, {
     ...opts,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(opts.headers ?? {}),
-    },
+    credentials: "same-origin",
+    headers,
   });
 
   const body = await res.json().catch(() => ({}));

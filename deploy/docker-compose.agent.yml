@@ -1,0 +1,36 @@
+# wgmesh agent sidecar template.
+#
+# Copy this into an app's compose project and replace "myservice" with
+# the service container that should join the mesh. The agent shares that
+# service's network namespace, so wg-int and the overlay IP appear inside
+# the app container's networking.
+
+services:
+  myservice:
+    image: replace-me
+    restart: unless-stopped
+
+  myservice-wgmesh:
+    image: ${WGMESH_AGENT_IMAGE:?set WGMESH_AGENT_IMAGE}
+    restart: unless-stopped
+    network_mode: "service:myservice"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      WGMESH_SETUP_KEY: ${WGMESH_SETUP_KEY:?set WGMESH_SETUP_KEY}
+    command: >
+      --server ${WGMESH_SERVER_URL:?set WGMESH_SERVER_URL}
+      --setup-key ${WGMESH_SETUP_KEY}
+      --listen-port ${WGMESH_LISTEN_PORT:-51820}
+      --key-file /data/wgkey.key
+      --relay-transport ${WGMESH_RELAY_TRANSPORT:-websocket}
+      --manage-firewall=false
+    volumes:
+      - myservice-wgmesh:/data
+    depends_on:
+      - myservice
+
+volumes:
+  myservice-wgmesh:

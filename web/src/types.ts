@@ -19,6 +19,7 @@ export interface Peer {
 export interface SetupKey {
   id: number;
   key: string;
+  name?: string;
   created_at: string;
   expires_at?: string;
   revoked_at?: string;
@@ -48,6 +49,10 @@ export interface AclRule {
   src_label: string;
   dst_peer_id: number | null;
   dst_label: string;
+  name?: string;
+  protocol: "any" | "tcp" | "udp" | "icmp" | "icmpv6";
+  port_min?: number;
+  port_max?: number;
   created_at: string;
 }
 

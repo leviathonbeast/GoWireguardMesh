@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	gowireguard "gowireguard"
 
 	"github.com/coder/websocket"
 )
@@ -72,8 +75,8 @@ func TestEnrollBodyCapReturns413(t *testing.T) {
 }
 
 // TestSecurityHeadersPresent: every response must carry the CSP and
-// friends — the backstop for the admin token in the UI's
-// sessionStorage.
+// friends. The dashboard bundle itself is also server-gated by
+// TestWebUIStructureHiddenUntilSessionCookie below.
 func TestSecurityHeadersPresent(t *testing.T) {
 	_, ts := newTestServer(t)
 
@@ -100,6 +103,112 @@ func TestSecurityHeadersPresent(t *testing.T) {
 	// Plain-HTTP test server: HSTS must NOT be advertised without TLS.
 	if got := resp.Header.Get("Strict-Transport-Security"); got != "" {
 		t.Fatalf("Strict-Transport-Security = %q on plain HTTP, want unset", got)
+	}
+}
+
+func TestWebUIStructureHiddenUntilSessionCookie(t *testing.T) {
+	ui, err := fs.Sub(gowireguard.WebUI, "web/dist")
+	if err != nil {
+		t.Fatalf("locate embedded ui: %v", err)
+	}
+
+	srv := &server{adminToken: "test-admin"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /ui-login", srv.handleUILogin)
+	mux.Handle("GET /", srv.uiHandler(ui))
+	mux.HandleFunc("GET /api/peers", srv.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, []peerJSON{})
+	}))
+	ts := httptest.NewServer(securityHeaders(mux))
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("anonymous / status = %d, want 200", resp.StatusCode)
+	}
+	if strings.Contains(string(body), "/assets/") || strings.Contains(string(body), "Overview") {
+		t.Fatalf("anonymous login page exposed app structure: %s", body)
+	}
+
+	resp, err = http.Get(ts.URL + "/assets/index-does-not-matter.js")
+	if err != nil {
+		t.Fatalf("GET anonymous asset: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("anonymous asset status = %d, want 404", resp.StatusCode)
+	}
+
+	resp, err = http.PostForm(ts.URL+"/ui-login", url.Values{"token": {"wrong"}})
+	if err != nil {
+		t.Fatalf("POST bad /ui-login: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad login status = %d, want 401", resp.StatusCode)
+	}
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err = client.PostForm(ts.URL+"/ui-login", url.Values{"token": {"test-admin"}})
+	if err != nil {
+		t.Fatalf("POST good /ui-login: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("good login status = %d, want 303", resp.StatusCode)
+	}
+	var session *http.Cookie
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == uiSessionCookie {
+			session = cookie
+			break
+		}
+	}
+	if session == nil || !session.HttpOnly {
+		t.Fatalf("login did not set HttpOnly %s cookie: %#v", uiSessionCookie, resp.Cookies())
+	}
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
+	if err != nil {
+		t.Fatalf("build authenticated ui request: %v", err)
+	}
+	req.AddCookie(session)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET authenticated /: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated / status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "/assets/") {
+		t.Fatalf("authenticated / did not serve built app index: %s", body)
+	}
+
+	req, err = http.NewRequest(http.MethodGet, ts.URL+"/api/peers", nil)
+	if err != nil {
+		t.Fatalf("build cookie API request: %v", err)
+	}
+	req.AddCookie(session)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/peers with UI cookie: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("cookie-authenticated API status = %d, want 200", resp.StatusCode)
 	}
 }
 

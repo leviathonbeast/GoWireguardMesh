@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import type {
   AccessLogRow,
   AclResponse,
@@ -136,8 +136,18 @@ function PathBadge({ state }: { state?: LinkStat["path_state"] }) {
 }
 
 
-const TABS = ["peers", "traffic", "access", "audit", "admin"] as const;
+const TABS = ["overview", "machines", "traffic", "policies", "setup", "logs", "settings"] as const;
 type Tab = (typeof TABS)[number];
+
+const TAB_LABEL: Record<Tab, string> = {
+  overview: "Overview",
+  machines: "Machines",
+  traffic: "Traffic",
+  policies: "Policies",
+  setup: "Setup keys",
+  logs: "Logs",
+  settings: "Settings",
+};
 
 // flowMatches / auditMatches do free-text search across the fields an
 // operator would filter on: ip, port, hostname, protocol, direction,
@@ -182,6 +192,15 @@ function Endpoint({ name, ip }: { name: string; ip?: string }) {
       {ip ? <div className="endpoint-ip">{ip}</div> : null}
     </div>
   );
+}
+
+function serviceLabel(rule: { protocol: string; port_min?: number; port_max?: number }): string {
+  const proto = (rule.protocol || "any").toUpperCase();
+  if (!rule.port_min) return proto;
+  if (rule.port_max && rule.port_max !== rule.port_min) {
+    return `${proto} ${rule.port_min}-${rule.port_max}`;
+  }
+  return `${proto} ${rule.port_min}`;
 }
 
 // FlowEvent renders one observed flow as a NetBird-style traffic
@@ -341,7 +360,10 @@ export default function App() {
     () => sessionStorage.getItem("wgmesh-token") ?? "",
   );
   const [tokenInput, setTokenInput] = useState(token);
-  const [tab, setTab] = useState<Tab>("peers");
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authChecking, setAuthChecking] = useState(false);
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [tab, setTab] = useState<Tab>("overview");
   const [peers, setPeers] = useState<Peer[]>([]);
   const [keys, setKeys] = useState<SetupKey[]>([]);
   const [links, setLinks] = useState<LinkStat[]>([]);
@@ -371,57 +393,177 @@ export default function App() {
   );
   const [maxUses, setMaxUses] = useState(0);
   const [expiresIn, setExpiresIn] = useState("");
+  const [setupName, setSetupName] = useState("");
   const [aclSrc, setAclSrc] = useState("any");
   const [aclDst, setAclDst] = useState("any");
+  const [aclName, setAclName] = useState("");
+  const [aclProtocol, setAclProtocol] = useState("any");
+  const [aclPortMin, setAclPortMin] = useState("");
+  const [aclPortMax, setAclPortMax] = useState("");
+
+  const loadDashboard = useCallback(async (authToken: string) => {
+    const [p, k, l, f, a, au, al, n] = await Promise.all([
+      api<Peer[]>("/api/peers", authToken),
+      api<SetupKey[]>("/api/setup-keys", authToken),
+      api<LinkStat[]>("/api/link-stats", authToken),
+      api<Flow[]>("/api/flows?limit=100", authToken),
+      api<AclResponse>("/api/acl", authToken),
+      api<AuditRow[]>("/api/audit?limit=200", authToken),
+      api<AccessLogRow[]>("/api/access-log?limit=200", authToken),
+      api<NetworkConfig>("/api/network", authToken),
+    ]);
+    setPeers(p);
+    setKeys(k);
+    setLinks(l);
+    setFlows(f);
+    setAcl(a);
+    setAudit(au);
+    setAccess(al);
+    setNetwork(n);
+    setNetworkCIDR((cur) => cur || n.network_cidr);
+    setNetworkCIDR6((cur) => cur || n.network_cidr6);
+  }, []);
+
+  const lockAdminUI = useCallback((message?: string) => {
+    sessionStorage.removeItem("wgmesh-token");
+    setToken("");
+    setAuthenticated(false);
+    setSessionChecked(true);
+    setPeers([]);
+    setKeys([]);
+    setLinks([]);
+    setFlows([]);
+    setAudit([]);
+    setAccess([]);
+    setError(message ?? "");
+  }, []);
 
   const refresh = useCallback(async () => {
-    if (!token) return;
+    if (!authenticated) return;
     setError("");
     try {
-      const [p, k, l, f, a, au, al, n] = await Promise.all([
-        api<Peer[]>("/api/peers", token),
-        api<SetupKey[]>("/api/setup-keys", token),
-        api<LinkStat[]>("/api/link-stats", token),
-        api<Flow[]>("/api/flows?limit=100", token),
-        api<AclResponse>("/api/acl", token),
-        api<AuditRow[]>("/api/audit?limit=200", token),
-        api<AccessLogRow[]>("/api/access-log?limit=200", token),
-        api<NetworkConfig>("/api/network", token),
-      ]);
-      setPeers(p);
-      setKeys(k);
-      setLinks(l);
-      setFlows(f);
-      setAcl(a);
-      setAudit(au);
-      setAccess(al);
-      setNetwork(n);
-      setNetworkCIDR((cur) => cur || n.network_cidr);
-      setNetworkCIDR6((cur) => cur || n.network_cidr6);
+      await loadDashboard(token);
     } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        lockAdminUI("admin token rejected");
+        return;
+      }
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [token]);
+  }, [authenticated, loadDashboard, lockAdminUI, token]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (authenticated || sessionChecked) return;
+
+    let cancelled = false;
+    setAuthChecking(true);
+    setError("");
+    void loadDashboard(token)
+      .then(() => {
+        if (cancelled) return;
+        setAuthenticated(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        lockAdminUI(token ? "admin token rejected" : "");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setSessionChecked(true);
+          setAuthChecking(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, loadDashboard, lockAdminUI, sessionChecked, token]);
 
   useEffect(() => {
-    if (!token || !autoRefresh) return;
+    if (!authenticated || !autoRefresh) return;
 
     const id = window.setInterval(() => {
       void refresh();
     }, 5000);
 
     return () => window.clearInterval(id);
-  }, [autoRefresh, refresh, token]);
+  }, [authenticated, autoRefresh, refresh]);
 
-  const connect = () => {
-    const t = tokenInput.trim();
-    sessionStorage.setItem("wgmesh-token", t);
-    setToken(t);
+  const refreshUISession = async (adminToken: string) => {
+    const body = new URLSearchParams();
+    body.set("token", adminToken);
+    await fetch("/ui-login", {
+      method: "POST",
+      body,
+      credentials: "same-origin",
+    });
   };
+
+  const connect = async () => {
+    const t = tokenInput.trim();
+    if (!t) {
+      lockAdminUI("admin token required");
+      return;
+    }
+
+    setAuthChecking(true);
+    setError("");
+    try {
+      await loadDashboard(t);
+      await refreshUISession(t);
+      sessionStorage.setItem("wgmesh-token", t);
+      setToken(t);
+      setAuthenticated(true);
+      setSessionChecked(true);
+    } catch (e) {
+      sessionStorage.removeItem("wgmesh-token");
+      setToken("");
+      setAuthenticated(false);
+      if (e instanceof ApiError && e.status === 401) {
+        setError("admin token rejected");
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setAuthChecking(false);
+    }
+  };
+
+  const signIn = (
+    <div className="login-shell">
+      <div className="login-panel">
+        <div className="brand login-brand">
+          <div className="brand-mark">wg</div>
+          <div>
+            <div className="brand-name">wgmesh</div>
+            <div className="brand-sub">control plane</div>
+          </div>
+        </div>
+        <div className="login-form">
+          <label htmlFor="token">
+            <span>Admin token</span>
+            <input
+              id="token"
+              type="password"
+              autoFocus
+              placeholder="paste admin token"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void connect()}
+            />
+          </label>
+          <button className="primary" disabled={authChecking} onClick={() => void connect()}>
+            {authChecking ? "checking" : "connect"}
+          </button>
+        </div>
+        <div className="error">{error}</div>
+      </div>
+    </div>
+  );
+
+  if (!authenticated) {
+    return signIn;
+  }
 
   const createKey = async () => {
     setError("");
@@ -429,8 +571,13 @@ export default function App() {
       await api("/api/setup-keys", token, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_uses: maxUses, expires_in: expiresIn.trim() }),
+        body: JSON.stringify({
+          name: setupName.trim(),
+          max_uses: maxUses,
+          expires_in: expiresIn.trim(),
+        }),
       });
+      setSetupName("");
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -457,8 +604,15 @@ export default function App() {
         body: JSON.stringify({
           src_peer_id: aclSrc === "any" ? null : parseInt(aclSrc, 10),
           dst_peer_id: aclDst === "any" ? null : parseInt(aclDst, 10),
+          name: aclName.trim(),
+          protocol: aclProtocol,
+          port_min: aclPortMin.trim() ? parseInt(aclPortMin, 10) : null,
+          port_max: aclPortMax.trim() ? parseInt(aclPortMax, 10) : null,
         }),
       });
+      setAclName("");
+      setAclPortMin("");
+      setAclPortMax("");
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -507,53 +661,130 @@ export default function App() {
     }
   };
 
+  const activePeers = peers.filter((p) => !p.revoked_at);
+  const onlinePeers = activePeers.filter((p) => p.health_status === "online");
+  const relayedLinks = links.filter((l) => l.path_state === "ws-relay" || l.path_state === "udp-relay");
+  const directLinks = links.filter((l) => l.path_state === "direct");
+  const activeKeys = keys.filter((k) => !k.revoked_at && !(k.max_uses > 0 && k.uses_consumed >= k.max_uses));
+
   return (
-    <div className="wrap">
-      <header className="topbar">
-        <h1>
-          wgmesh <span>control plane</span>
-        </h1>
-        <div className="auth row">
-          <input
-            id="token"
-            type="password"
-            placeholder="admin token"
-            value={tokenInput}
-            onChange={(e) => setTokenInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && connect()}
-          />
-          <button className="primary" onClick={connect}>
-            connect
-          </button>
-          <button onClick={() => void refresh()}>refresh</button>
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-            />
-            5s auto
-          </label>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">wg</div>
+          <div>
+            <div className="brand-name">wgmesh</div>
+            <div className="brand-sub">control plane</div>
+          </div>
         </div>
-      </header>
+        <nav className="side-nav">
+          {TABS.map((t) => (
+            <button
+              key={t}
+              className={tab === t ? "side-link active" : "side-link"}
+              onClick={() => setTab(t)}
+            >
+              {TAB_LABEL[t]}
+            </button>
+          ))}
+        </nav>
+      </aside>
 
-      <nav className="tabs">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            className={tab === t ? "tab active" : "tab"}
-            onClick={() => setTab(t)}
-          >
-            {t}
-          </button>
-        ))}
-      </nav>
+      <main className="main">
+        <header className="topbar">
+          <div>
+            <h1>{TAB_LABEL[tab]}</h1>
+            <p className="page-sub">
+              {network.network_cidr || "overlay"} {network.network_cidr6 ? `· ${network.network_cidr6}` : ""}
+            </p>
+          </div>
+          <div className="auth row">
+            <input
+              id="token"
+              type="password"
+              placeholder="admin token"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void connect()}
+            />
+            <button className="primary" disabled={authChecking} onClick={() => void connect()}>
+              {authChecking ? "checking" : "connect"}
+            </button>
+            <button onClick={() => void refresh()}>refresh</button>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+              />
+              5s auto
+            </label>
+          </div>
+        </header>
 
-      <div className="error">{error}</div>
+        <div className="error">{error}</div>
 
-      {tab === "peers" && (
-        <>
-          <h2>Registered peers</h2>
+        {tab === "overview" && (
+          <>
+            <section className="metric-grid">
+              <div className="metric">
+                <div className="metric-label">machines</div>
+                <div className="metric-value">{activePeers.length}</div>
+                <div className="muted">{onlinePeers.length} online</div>
+              </div>
+              <div className="metric">
+                <div className="metric-label">direct links</div>
+                <div className="metric-value">{directLinks.length}</div>
+                <div className="muted">{relayedLinks.length} relayed</div>
+              </div>
+              <div className="metric">
+                <div className="metric-label">setup keys</div>
+                <div className="metric-value">{activeKeys.length}</div>
+                <div className="muted">{keys.length} total</div>
+              </div>
+              <div className="metric">
+                <div className="metric-label">ACL policy</div>
+                <div className="metric-value">{acl.default_policy}</div>
+                <div className="muted">{acl.rules.length} rules</div>
+              </div>
+            </section>
+
+            <section className="split">
+              <div className="panel">
+                <div className="section-head">
+                  <h2>Recent machines</h2>
+                  <button onClick={() => setTab("machines")}>view all</button>
+                </div>
+                <div className="compact-list">
+                  {activePeers.slice(0, 6).map((p) => (
+                    <div className="compact-row" key={p.id}>
+                      <Endpoint name={p.hostname || p.assigned_ip} ip={p.assigned_ip6 || p.assigned_ip} />
+                      <PeerBadge peer={p} />
+                    </div>
+                  ))}
+                  {activePeers.length === 0 && <div className="muted">no machines enrolled</div>}
+                </div>
+              </div>
+              <div className="panel">
+                <div className="section-head">
+                  <h2>Path state</h2>
+                  <button onClick={() => setTab("traffic")}>inspect</button>
+                </div>
+                <div className="compact-list">
+                  {links.slice(0, 6).map((l) => (
+                    <div className="compact-row" key={`${l.peer_id}-${l.remote_peer_id}`}>
+                      <Endpoint name={`${l.peer_hostname || l.peer_ip} → ${l.remote_hostname || l.remote_ip}`} />
+                      <PathBadge state={l.path_state} />
+                    </div>
+                  ))}
+                  {links.length === 0 && <div className="muted">no link reports yet</div>}
+                </div>
+              </div>
+            </section>
+          </>
+        )}
+
+        {tab === "machines" && (
           <div className="panel tablewrap">
             <table>
               <thead>
@@ -618,11 +849,10 @@ export default function App() {
               </tbody>
             </table>
           </div>
-        </>
-      )}
+        )}
 
-      {tab === "traffic" && (
-        <>
+        {tab === "traffic" && (
+          <>
           <h2>Liveness</h2>
           <div className="panel tablewrap">
             <table>
@@ -733,11 +963,11 @@ export default function App() {
               })()}
             </div>
           </div>
-        </>
-      )}
+          </>
+        )}
 
-      {tab === "audit" && (
-        <>
+        {tab === "logs" && (
+          <>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h2 style={{ margin: 0 }}>Activity log</h2>
             <input
@@ -748,10 +978,10 @@ export default function App() {
               style={{ width: 320 }}
             />
           </div>
-          <p className="sub">
-            security events — enrollment, revocation, ACL and key changes, relay
-            sessions, and auth failures. Full request tracing is available in the
-            Access tab when the server runs with the default in-memory access log.
+            <p className="sub">
+              security events — enrollment, revocation, ACL and key changes, relay
+              sessions, auth failures, and request tracing when the server runs with
+              the default in-memory access log.
           </p>
           <div className="panel tablewrap">
             <div className="activity">
@@ -774,11 +1004,6 @@ export default function App() {
               })()}
             </div>
           </div>
-        </>
-      )}
-
-      {tab === "access" && (
-        <>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h2 style={{ margin: 0 }}>Request log</h2>
             <input
@@ -810,11 +1035,11 @@ export default function App() {
               })()}
             </div>
           </div>
-        </>
-      )}
+          </>
+        )}
 
-      {tab === "admin" && (
-        <>
+        {tab === "settings" && (
+          <>
           <h2>Overlay network</h2>
           <div className="panel stack">
             <div className="metric-grid">
@@ -940,48 +1165,103 @@ export default function App() {
               </div>
             )}
           </div>
+          </>
+        )}
 
+        {tab === "policies" && (
+          <>
           <h2>ACL rules</h2>
           <div className="panel">
             <p className="muted" style={{ marginTop: 0 }}>
               default policy: <strong>{acl.default_policy}</strong>
               {acl.default_policy === "allow"
-                ? " — every peer sees every peer; rules below have no effect until the server runs with --default-policy deny"
-                : " — peers only see each other when a rule below connects them (bidirectional; \"any\" is a wildcard)"}
+                ? " — every peer sees every peer; rules below become active when the server runs with --default-policy deny"
+                : " — peers only see each other when a rule below connects them"}
             </p>
-            <div className="row">
-              <select value={aclSrc} onChange={(e) => setAclSrc(e.target.value)}>
-                <option value="any">any</option>
-                {peers
-                  .filter((p) => !p.revoked_at)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {peerLabel(p.hostname, p.assigned_ip)}
-                    </option>
-                  ))}
-              </select>
-              <span className="muted">↔</span>
-              <select value={aclDst} onChange={(e) => setAclDst(e.target.value)}>
-                <option value="any">any</option>
-                {peers
-                  .filter((p) => !p.revoked_at)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {peerLabel(p.hostname, p.assigned_ip)}
-                    </option>
-                  ))}
-              </select>
-              <button className="primary" onClick={() => void createAclRule()}>
-                add rule
-              </button>
+            <div className="form-grid acl-form">
+              <label>
+                <span>Name</span>
+                <input
+                  placeholder="Jellyfin access"
+                  value={aclName}
+                  onChange={(e) => setAclName(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>Source</span>
+                <select value={aclSrc} onChange={(e) => setAclSrc(e.target.value)}>
+                  <option value="any">any</option>
+                  {peers
+                    .filter((p) => !p.revoked_at)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {peerLabel(p.hostname, p.assigned_ip)}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label>
+                <span>Destination</span>
+                <select value={aclDst} onChange={(e) => setAclDst(e.target.value)}>
+                  <option value="any">any</option>
+                  {peers
+                    .filter((p) => !p.revoked_at)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {peerLabel(p.hostname, p.assigned_ip)}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label>
+                <span>Protocol</span>
+                <select value={aclProtocol} onChange={(e) => setAclProtocol(e.target.value)}>
+                  <option value="any">any</option>
+                  <option value="tcp">tcp</option>
+                  <option value="udp">udp</option>
+                  <option value="icmp">icmp</option>
+                  <option value="icmpv6">icmpv6</option>
+                </select>
+              </label>
+              <label>
+                <span>Port from</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  placeholder="any"
+                  value={aclPortMin}
+                  disabled={aclProtocol === "icmp" || aclProtocol === "icmpv6"}
+                  onChange={(e) => setAclPortMin(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>Port to</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  placeholder="same"
+                  value={aclPortMax}
+                  disabled={aclProtocol === "icmp" || aclProtocol === "icmpv6"}
+                  onChange={(e) => setAclPortMax(e.target.value)}
+                />
+              </label>
+              <div className="form-actions">
+                <button className="primary" onClick={() => void createAclRule()}>
+                  add rule
+                </button>
+              </div>
             </div>
             <div className="tablewrap">
               <table>
                 <thead>
                   <tr>
                     <th>id</th>
+                    <th>name</th>
                     <th>src</th>
                     <th>dst</th>
+                    <th>service</th>
                     <th>created</th>
                     <th></th>
                   </tr>
@@ -989,7 +1269,7 @@ export default function App() {
                 <tbody>
                   {acl.rules.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="muted">
+                      <td colSpan={7} className="muted">
                         no rules
                       </td>
                     </tr>
@@ -997,8 +1277,10 @@ export default function App() {
                   {acl.rules.map((r) => (
                     <tr key={r.id}>
                       <td>{r.id}</td>
+                      <td>{r.name || <span className="muted">unnamed</span>}</td>
                       <td>{r.src_label}</td>
                       <td>{r.dst_label}</td>
+                      <td>{serviceLabel(r)}</td>
                       <td className="muted">{formatTime(r.created_at)}</td>
                       <td>
                         <button
@@ -1006,7 +1288,7 @@ export default function App() {
                           onClick={() =>
                             void revoke(
                               `/api/acl/${r.id}/delete`,
-                              `delete ACL rule ${r.id} (${r.src_label} ↔ ${r.dst_label})?`,
+                              `delete ACL rule ${r.id} (${r.src_label} to ${r.dst_label})?`,
                             )
                           }
                         >
@@ -1019,31 +1301,47 @@ export default function App() {
               </table>
             </div>
           </div>
+          </>
+        )}
 
+        {tab === "setup" && (
+          <>
           <h2>Setup keys</h2>
           <div className="panel">
-            <div className="row">
-              <label htmlFor="maxUses">max uses (0 = unlimited)</label>
-              <input
-                id="maxUses"
-                type="number"
-                min={0}
-                style={{ width: 70 }}
-                value={maxUses}
-                onChange={(e) => setMaxUses(parseInt(e.target.value, 10) || 0)}
-              />
-              <label htmlFor="expiresIn">expires in (e.g. 24h, blank = never)</label>
-              <input
-                id="expiresIn"
-                type="text"
-                size={8}
-                placeholder="never"
-                value={expiresIn}
-                onChange={(e) => setExpiresIn(e.target.value)}
-              />
-              <button className="primary" onClick={() => void createKey()}>
-                new setup key
-              </button>
+            <div className="form-grid key-form">
+              <label>
+                <span>Name</span>
+                <input
+                  placeholder="Jellyfin sidecar"
+                  value={setupName}
+                  onChange={(e) => setSetupName(e.target.value)}
+                />
+              </label>
+              <label htmlFor="maxUses">
+                <span>Max uses</span>
+                <input
+                  id="maxUses"
+                  type="number"
+                  min={0}
+                  value={maxUses}
+                  onChange={(e) => setMaxUses(parseInt(e.target.value, 10) || 0)}
+                />
+              </label>
+              <label htmlFor="expiresIn">
+                <span>Expires in</span>
+                <input
+                  id="expiresIn"
+                  type="text"
+                  placeholder="never"
+                  value={expiresIn}
+                  onChange={(e) => setExpiresIn(e.target.value)}
+                />
+              </label>
+              <div className="form-actions">
+                <button className="primary" onClick={() => void createKey()}>
+                  new setup key
+                </button>
+              </div>
             </div>
             <div className="tablewrap">
               <table>
@@ -1051,6 +1349,7 @@ export default function App() {
                   <tr>
                     <th>id</th>
                     <th>status</th>
+                    <th>name</th>
                     <th>key</th>
                     <th>uses</th>
                     <th>expires</th>
@@ -1061,7 +1360,7 @@ export default function App() {
                 <tbody>
                   {keys.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="muted">
+                      <td colSpan={8} className="muted">
                         no setup keys
                       </td>
                     </tr>
@@ -1072,6 +1371,7 @@ export default function App() {
                       <td>
                         <KeyBadge k={k} />
                       </td>
+                      <td>{k.name || <span className="muted">unnamed</span>}</td>
                       <td className="mono">
                         {k.key} <CopyButton text={k.key} />
                       </td>
@@ -1103,8 +1403,9 @@ export default function App() {
               </table>
             </div>
           </div>
-        </>
-      )}
+          </>
+        )}
+      </main>
     </div>
   );
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ACLRule is one ALLOW rule. Nil peer IDs mean "any peer"; matching
@@ -15,12 +16,18 @@ type ACLRule struct {
 	SrcLabel  string // hostname or IP, "any" for wildcard
 	DstPeerID *int64
 	DstLabel  string
+	Name      string
+	Protocol  string // any, tcp, udp, icmp, icmpv6
+	PortMin   *int64
+	PortMax   *int64
 	CreatedAt string
 }
 
 func (s *Store) ListACLRules(ctx context.Context) ([]ACLRule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.src_peer_id, r.dst_peer_id, r.created_at,
+		`SELECT r.id, r.src_peer_id, r.dst_peer_id,
+		        COALESCE(r.name, ''), COALESCE(r.protocol, 'any'), r.port_min, r.port_max,
+		        r.created_at,
 		        COALESCE(ps.hostname, ps.assigned_ip, ''),
 		        COALESCE(pd.hostname, pd.assigned_ip, '')
 		 FROM acl_rules r
@@ -37,11 +44,13 @@ func (s *Store) ListACLRules(ctx context.Context) ([]ACLRule, error) {
 
 	for rows.Next() {
 		var (
-			r        ACLRule
-			src, dst sql.NullInt64
+			r                ACLRule
+			src, dst         sql.NullInt64
+			portMin, portMax sql.NullInt64
 		)
 
-		if err := rows.Scan(&r.ID, &src, &dst, &r.CreatedAt, &r.SrcLabel, &r.DstLabel); err != nil {
+		if err := rows.Scan(&r.ID, &src, &dst, &r.Name, &r.Protocol, &portMin, &portMax,
+			&r.CreatedAt, &r.SrcLabel, &r.DstLabel); err != nil {
 			return nil, fmt.Errorf("scan acl rule: %w", err)
 		}
 
@@ -57,6 +66,13 @@ func (s *Store) ListACLRules(ctx context.Context) ([]ACLRule, error) {
 			r.DstLabel = "any"
 		}
 
+		if portMin.Valid {
+			r.PortMin = &portMin.Int64
+		}
+		if portMax.Valid {
+			r.PortMax = &portMax.Int64
+		}
+
 		out = append(out, r)
 	}
 
@@ -70,8 +86,18 @@ func (s *Store) ListACLRules(ctx context.Context) ([]ACLRule, error) {
 // CreateACLRule adds an ALLOW rule. Nil means "any peer". Referenced
 // peers must exist (FK enforced).
 func (s *Store) CreateACLRule(ctx context.Context, srcPeerID, dstPeerID *int64) (int64, error) {
+	return s.CreateACLRuleDetailed(ctx, ACLRule{SrcPeerID: srcPeerID, DstPeerID: dstPeerID, Protocol: "any"})
+}
+
+func (s *Store) CreateACLRuleDetailed(ctx context.Context, rule ACLRule) (int64, error) {
+	srcPeerID, dstPeerID := rule.SrcPeerID, rule.DstPeerID
 	if srcPeerID != nil && dstPeerID != nil && *srcPeerID == *dstPeerID {
 		return 0, errors.New("src and dst are the same peer")
+	}
+
+	protocol, portMin, portMax, err := normalizeACLService(rule.Protocol, rule.PortMin, rule.PortMax)
+	if err != nil {
+		return 0, err
 	}
 
 	var src, dst sql.NullInt64
@@ -85,7 +111,9 @@ func (s *Store) CreateACLRule(ctx context.Context, srcPeerID, dstPeerID *int64) 
 	}
 
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO acl_rules (src_peer_id, dst_peer_id) VALUES (?, ?)`, src, dst,
+		`INSERT INTO acl_rules (src_peer_id, dst_peer_id, name, protocol, port_min, port_max)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		src, dst, nullable(rule.Name), protocol, portMin, portMax,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert acl rule: %w", err)
@@ -97,6 +125,53 @@ func (s *Store) CreateACLRule(ctx context.Context, srcPeerID, dstPeerID *int64) 
 	}
 
 	return id, nil
+}
+
+func normalizeACLService(protocol string, portMin, portMax *int64) (string, sql.NullInt64, sql.NullInt64, error) {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		protocol = "any"
+	}
+
+	switch protocol {
+	case "any", "tcp", "udp", "icmp", "icmpv6":
+	default:
+		return "", sql.NullInt64{}, sql.NullInt64{}, fmt.Errorf("protocol must be any, tcp, udp, icmp, or icmpv6")
+	}
+
+	if protocol == "icmp" || protocol == "icmpv6" {
+		if portMin != nil || portMax != nil {
+			return "", sql.NullInt64{}, sql.NullInt64{}, fmt.Errorf("%s rules cannot specify ports", protocol)
+		}
+		return protocol, sql.NullInt64{}, sql.NullInt64{}, nil
+	}
+
+	if portMin == nil && portMax == nil {
+		return protocol, sql.NullInt64{}, sql.NullInt64{}, nil
+	}
+
+	min := int64(0)
+	max := int64(0)
+	if portMin != nil {
+		min = *portMin
+	}
+	if portMax != nil {
+		max = *portMax
+	} else {
+		max = min
+	}
+	if portMin == nil {
+		min = max
+	}
+
+	if min < 1 || min > 65535 || max < 1 || max > 65535 || min > max {
+		return "", sql.NullInt64{}, sql.NullInt64{}, fmt.Errorf("port range must be 1-65535 with min <= max")
+	}
+
+	return protocol,
+		sql.NullInt64{Int64: min, Valid: true},
+		sql.NullInt64{Int64: max, Valid: true},
+		nil
 }
 
 func (s *Store) DeleteACLRule(ctx context.Context, id int64) error {

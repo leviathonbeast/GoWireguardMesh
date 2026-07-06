@@ -16,6 +16,10 @@ type aclRuleJSON struct {
 	SrcLabel  string `json:"src_label"`
 	DstPeerID *int64 `json:"dst_peer_id"` // null = any
 	DstLabel  string `json:"dst_label"`
+	Name      string `json:"name,omitempty"`
+	Protocol  string `json:"protocol"`
+	PortMin   *int64 `json:"port_min,omitempty"`
+	PortMax   *int64 `json:"port_max,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -47,22 +51,33 @@ func (s *server) handleCreateACL(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SrcPeerID *int64 `json:"src_peer_id"` // null = any
 		DstPeerID *int64 `json:"dst_peer_id"` // null = any
+		Name      string `json:"name,omitempty"`
+		Protocol  string `json:"protocol,omitempty"`
+		PortMin   *int64 `json:"port_min,omitempty"`
+		PortMax   *int64 `json:"port_max,omitempty"`
 	}
 
 	if !decodeJSON(w, r, 64<<10, &req) {
 		return
 	}
 
-	id, err := s.store.CreateACLRule(r.Context(), req.SrcPeerID, req.DstPeerID)
+	id, err := s.store.CreateACLRuleDetailed(r.Context(), store.ACLRule{
+		SrcPeerID: req.SrcPeerID,
+		DstPeerID: req.DstPeerID,
+		Name:      req.Name,
+		Protocol:  req.Protocol,
+		PortMin:   req.PortMin,
+		PortMax:   req.PortMax,
+	})
 	if err != nil {
 		slog.Warn("create acl rule failed", "error", err)
-		writeError(w, http.StatusBadRequest, "could not create rule (same peer twice, or unknown peer id?)")
+		writeError(w, http.StatusBadRequest, "could not create rule (check peers, protocol, and port range)")
 
 		return
 	}
 
 	slog.Info("admin created acl rule", "rule_id", id)
-	s.audit(r, "acl_create", http.StatusOK, fmt.Sprintf("rule id=%d src=%v dst=%v", id, req.SrcPeerID, req.DstPeerID))
+	s.audit(r, "acl_create", http.StatusOK, fmt.Sprintf("rule id=%d name=%q src=%v dst=%v proto=%q ports=%v-%v", id, req.Name, req.SrcPeerID, req.DstPeerID, req.Protocol, req.PortMin, req.PortMax))
 	writeJSON(w, http.StatusOK, map[string]int64{"id": id})
 }
 

@@ -29,6 +29,7 @@ type PeerInfo struct {
 type SetupKeyInfo struct {
 	ID           int64
 	Key          string
+	Name         string
 	CreatedAt    string
 	ExpiresAt    string // "" if never
 	RevokedAt    string // "" if active
@@ -82,7 +83,7 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 
 func (s *Store) ListSetupKeys(ctx context.Context) ([]SetupKeyInfo, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, key, created_at, expires_at, revoked_at, max_uses, uses_consumed
+		`SELECT id, key, COALESCE(name, ''), created_at, expires_at, revoked_at, max_uses, uses_consumed
 		 FROM setup_keys ORDER BY id`,
 	)
 	if err != nil {
@@ -100,7 +101,7 @@ func (s *Store) ListSetupKeys(ctx context.Context) ([]SetupKeyInfo, error) {
 			maxUses sql.NullInt64
 		)
 
-		if err := rows.Scan(&k.ID, &k.Key, &k.CreatedAt, &expires, &revoked,
+		if err := rows.Scan(&k.ID, &k.Key, &k.Name, &k.CreatedAt, &expires, &revoked,
 			&maxUses, &k.UsesConsumed); err != nil {
 			return nil, fmt.Errorf("scan setup key: %w", err)
 		}

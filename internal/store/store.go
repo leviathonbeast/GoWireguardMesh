@@ -157,7 +157,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 8
+const schemaVersion = 9
 
 var migrations = map[int]string{
 	2: migrationV2,
@@ -167,7 +167,21 @@ var migrations = map[int]string{
 	6: migrationV6,
 	7: migrationV7,
 	8: migrationV8,
+	9: migrationV9,
 }
+
+// migrationV9 adds operator-friendly names for setup keys and turns
+// ACL rules into service-level policies. Peer visibility still uses
+// the src/dst pair; protocol and port range describe the service
+// allowed between the pair and are returned through the admin API.
+const migrationV9 = `
+ALTER TABLE setup_keys ADD COLUMN name TEXT;
+
+ALTER TABLE acl_rules ADD COLUMN name TEXT;
+ALTER TABLE acl_rules ADD COLUMN protocol TEXT NOT NULL DEFAULT 'any';
+ALTER TABLE acl_rules ADD COLUMN port_min INTEGER;
+ALTER TABLE acl_rules ADD COLUMN port_max INTEGER;
+`
 
 // migrationV8 records the agent's selected path for each peer pair
 // (direct, ws-relay, udp-relay, probing-direct) so the UI can show
@@ -344,6 +358,10 @@ func ensureSchema(db *sql.DB, schemaSQL string) error {
 // unlimited; expiresIn == 0 means never expires. A negative expiresIn
 // creates an already-expired key (useful for testing).
 func (s *Store) CreateSetupKey(ctx context.Context, maxUses int, expiresIn time.Duration) (string, error) {
+	return s.CreateNamedSetupKey(ctx, "", maxUses, expiresIn)
+}
+
+func (s *Store) CreateNamedSetupKey(ctx context.Context, name string, maxUses int, expiresIn time.Duration) (string, error) {
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generate setup key: %w", err)
@@ -365,8 +383,8 @@ func (s *Store) CreateSetupKey(ctx context.Context, maxUses int, expiresIn time.
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO setup_keys (key, max_uses, expires_at) VALUES (?, ?, ?)`,
-		key, uses, expires,
+		`INSERT INTO setup_keys (key, name, max_uses, expires_at) VALUES (?, ?, ?, ?)`,
+		key, nullable(name), uses, expires,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert setup key: %w", err)

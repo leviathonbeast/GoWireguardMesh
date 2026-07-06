@@ -50,11 +50,15 @@ func loadOrGenerateAdminToken(path string) (string, error) {
 	return token, nil
 }
 
-// requireAdmin wraps admin handlers with bearer-token auth.
+// requireAdmin wraps admin handlers with bearer-token auth. The web UI
+// can also authenticate with a signed HttpOnly session cookie, so the
+// dashboard bundle does not need to be public just to render a login
+// screen.
 func (s *server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || subtle.ConstantTimeCompare([]byte(presented), []byte(s.adminToken)) != 1 {
+		bearerOK := ok && subtle.ConstantTimeCompare([]byte(presented), []byte(s.adminToken)) == 1
+		if !bearerOK && !s.validUISession(r) {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -82,6 +86,7 @@ type peerJSON struct {
 type setupKeyJSON struct {
 	ID           int64  `json:"id"`
 	Key          string `json:"key"`
+	Name         string `json:"name,omitempty"`
 	CreatedAt    string `json:"created_at"`
 	ExpiresAt    string `json:"expires_at,omitempty"`
 	RevokedAt    string `json:"revoked_at,omitempty"`
@@ -287,6 +292,7 @@ func parseNetworkMigrationTarget(w http.ResponseWriter, req networkMigrationRequ
 
 func (s *server) handleCreateSetupKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		Name      string `json:"name,omitempty"`
 		MaxUses   int    `json:"max_uses"`             // 0 = unlimited
 		ExpiresIn string `json:"expires_in,omitempty"` // Go duration, "" = never
 	}
@@ -307,15 +313,15 @@ func (s *server) handleCreateSetupKey(w http.ResponseWriter, r *http.Request) {
 		expiresIn = d
 	}
 
-	key, err := s.store.CreateSetupKey(r.Context(), req.MaxUses, expiresIn)
+	key, err := s.store.CreateNamedSetupKey(r.Context(), req.Name, req.MaxUses, expiresIn)
 	if err != nil {
 		slog.Error("create setup key failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	slog.Info("admin created setup key", "max_uses", req.MaxUses, "expires_in", req.ExpiresIn)
-	s.audit(r, "setup_key_create", http.StatusOK, fmt.Sprintf("max_uses=%d expires_in=%q", req.MaxUses, req.ExpiresIn))
+	slog.Info("admin created setup key", "name", req.Name, "max_uses", req.MaxUses, "expires_in", req.ExpiresIn)
+	s.audit(r, "setup_key_create", http.StatusOK, fmt.Sprintf("name=%q max_uses=%d expires_in=%q", req.Name, req.MaxUses, req.ExpiresIn))
 	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }
 

@@ -112,6 +112,7 @@ func runNewKey(args []string) error {
 	fs := flag.NewFlagSet("newkey", flag.ExitOnError)
 	dbPath := fs.String("db", "mesh.db", "path to sqlite database")
 	network := fs.String("network", "100.64.0.0/16", "overlay network (CIDR)")
+	name := fs.String("name", "", "human-readable setup key name")
 	maxUses := fs.Int("max-uses", 0, "maximum enrollments (0 = unlimited)")
 	expiresIn := fs.Duration("expires-in", 0, "time until expiry (0 = never; negative mints an already-expired key, for testing)")
 
@@ -130,7 +131,7 @@ func runNewKey(args []string) error {
 	}
 	defer st.Close()
 
-	key, err := st.CreateSetupKey(context.Background(), *maxUses, *expiresIn)
+	key, err := st.CreateNamedSetupKey(context.Background(), *name, *maxUses, *expiresIn)
 	if err != nil {
 		return err
 	}
@@ -340,7 +341,8 @@ func runServe(args []string) error {
 	mux.HandleFunc("POST /report", publicLimit(srv.handleReport))
 	mux.HandleFunc("POST /relay-pair", publicLimit(srv.handleRelayPair))
 	mux.HandleFunc("GET /relay-ws", publicLimit(srv.handleRelayWS))
-	mux.Handle("GET /", http.FileServerFS(ui))
+	mux.HandleFunc("POST /ui-login", publicLimit(srv.handleUILogin))
+	mux.Handle("GET /", srv.uiHandler(ui))
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
 	mux.HandleFunc("GET /api/peers/{id}/ping", srv.requireAdmin(srv.handlePingPeer))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))

@@ -119,6 +119,7 @@ Mint a setup key from the CLI (or use the web UI):
 ./bin/server newkey --db mesh.db                    # unlimited uses, never expires
 ./bin/server newkey --db mesh.db --max-uses 1       # single enrollment
 ./bin/server newkey --db mesh.db --expires-in 24h   # valid for one day
+./bin/server newkey --db mesh.db --name jellyfin    # named for UI/API auditing
 ```
 
 Flags for `server`:
@@ -185,25 +186,34 @@ cleartext.
 
 ## Web UI
 
-The server serves the admin interface at `/` (same port as the API). Open
-it, paste the contents of `admin-token`, and use the tabs:
+The server serves the admin interface at `/` (same port as the API). Anonymous
+visitors only receive a small admin-token form; the React dashboard bundle and
+assets are served after the token validates and the server sets a signed
+HttpOnly UI session cookie. Open it, paste the contents of `admin-token`, and
+use the sidebar:
 
-- **Peers** — registered peers with online/stale/offline status, overlay IP,
-  endpoint, last seen, and a 5s auto-refresh toggle; revoke inline.
+- **Overview** — active machines, direct/relayed path counts, setup-key count,
+  and ACL posture at a glance.
+- **Machines** — registered peers with online/stale/offline status, overlay IP,
+  endpoint, last seen, and inline revoke.
 - **Traffic** — liveness, per-link totals, and a NetBird-style traffic-event
   feed (both peer names resolved, protocol/port, ingress/egress ports, and
   `↓ rx / ↑ tx`) with a **search box** (ip / port / hostname / protocol).
   Link rows show the current path: `direct`, `ws-relay`, `udp-relay`, or
   `probing-direct`.
-- **Access** — recent request tracing when `--access-log=memory`.
-- **Audit** — the security activity log (colored by outcome) with search.
-- **Admin** — overlay-network migration preview/apply, ACL rules, and
-  setup-key management.
+- **Policies** — ACL rules with a human name plus protocol and optional port
+  range.
+- **Setup keys** — named setup keys, expiry, max uses, copy, and revoke.
+- **Logs** — security audit events plus recent request tracing when
+  `--access-log=memory`.
+- **Settings** — overlay-network migration preview/apply. The header has the
+  admin token control, manual refresh, and the default 5s auto-refresh toggle.
 
 The UI lives in `web/` (React + TypeScript); `npm run dev` starts a Vite dev
 server that proxies API calls to a control plane on `127.0.0.1:8080`.
 
-The admin API behind it (all require `Authorization: Bearer <admin-token>`):
+The admin API behind it requires either `Authorization: Bearer <admin-token>` or
+the signed UI session cookie:
 
 | Endpoint | Purpose |
 |---|---|
@@ -213,7 +223,7 @@ The admin API behind it (all require `Authorization: Bearer <admin-token>`):
 | `GET /api/network` | current persisted overlay CIDRs |
 | `POST /api/network/preview` | preview a full overlay re-IP plan |
 | `POST /api/network/apply` | apply a confirmed overlay re-IP plan |
-| `GET /api/setup-keys` · `POST /api/setup-keys` | list / create (`{"max_uses":0,"expires_in":"24h"}`) |
+| `GET /api/setup-keys` · `POST /api/setup-keys` | list / create (`{"name":"jellyfin","max_uses":0,"expires_in":"24h"}`) |
 | `POST /api/setup-keys/{id}/revoke` | revoke a key (also blocks re-enroll with it) |
 | `GET /api/acl` · `POST /api/acl` · `POST /api/acl/{id}/delete` | list / create / delete ACL rules |
 | `GET /api/link-stats` | accumulated per-link transfer totals + last handshake |
@@ -346,7 +356,7 @@ privileges is a warning, never fatal.
   relay as a single service (`RELAY_PUBLIC_IP` required). The Dockerfile has
   separate `server`, `relay`, and `agent` targets; the `agent` target is
   meant to be sidecar'd next to a service (`network_mode: service:<svc>`,
-  `NET_ADMIN`) — see the sidecar example in [SECURITY.md](SECURITY.md).
+  `NET_ADMIN`, `/dev/net/tun`). See `deploy/docker-compose.agent.yml`.
 - **Debian + Traefik compose**: `deploy/docker-compose.debian.yml` is a
   production-oriented server template for a Debian VPS where Traefik already
   owns 80/443. Copy `deploy/debian-server.env.example` to
@@ -440,13 +450,19 @@ Windows agent is unvalidated on real hardware.
 Run the server with `--default-policy deny` and the mesh starts fully
 segmented: no peer sees any other until a rule connects them. Rules are
 ALLOW rules, matched in both directions, with "any" as a wildcard on
-either side; manage them in the web UI's Access tab or via
-`GET/POST /api/acl` and `POST /api/acl/{id}/delete`. Changes — including
+either side; manage them in the web UI's Policies page or via
+`GET/POST /api/acl` and `POST /api/acl/{id}/delete`. Each rule can carry a
+human name, a protocol (`any`, `tcp`, `udp`, `icmp`, `icmpv6`), and an optional
+port or port range for service-level policy modelling. Changes — including
 deletions — propagate within one report interval: agents remove peers
 that vanish from their sync payload, tearing down the tunnel.
 
 Under the default `allow` policy rules exist but have no effect, so you
 can stage rules before flipping the policy.
+
+Current enforcement is still peer visibility: under default-deny, a matching
+rule lets the two peers learn each other's WireGuard config. True packet-level
+port/protocol blocking needs the agent firewall-enforcement phase.
 
 ## Windows agent (experimental, untested on real hardware)
 
