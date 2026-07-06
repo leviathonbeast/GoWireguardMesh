@@ -195,8 +195,11 @@ services:
 
   myservice-wg:
     image: wgmesh-agent           # built from the agent Dockerfile target
+    entrypoint: ["/usr/local/bin/agent"]
     network_mode: "service:myservice"   # share the service's netns
     cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
     environment:
       WGMESH_SETUP_KEY: ${WGMESH_SETUP_KEY}
     command: >

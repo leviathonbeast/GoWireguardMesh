@@ -467,6 +467,28 @@ td.mono {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.pagination {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px 14px 0;
+  border-top: 1px solid var(--border);
+}
+
+.page-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.page-size select {
+  padding: 4px 8px;
+}
+
 .event-cell {
   display: flex;
   gap: 10px;

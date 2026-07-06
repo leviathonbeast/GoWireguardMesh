@@ -400,8 +400,11 @@ Then sidecars can use the published image:
 services:
   myservice-wg:
     image: gitea.mynetbird.uk/<owner>/wgmesh-agent:latest
+    entrypoint: ["/usr/local/bin/agent"]
     network_mode: "service:myservice"
     cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
     command: >
       --server https://mesh.example.com
       --setup-key ${WGMESH_SETUP_KEY}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { ApiError, api } from "./api";
 import type {
   AccessLogRow,
@@ -138,6 +139,8 @@ function PathBadge({ state }: { state?: LinkStat["path_state"] }) {
 
 const TABS = ["overview", "machines", "traffic", "policies", "setup", "logs", "settings"] as const;
 type Tab = (typeof TABS)[number];
+const DEFAULT_PAGE_SIZE = 25;
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 
 const TAB_LABEL: Record<Tab, string> = {
   overview: "Overview",
@@ -201,6 +204,92 @@ function serviceLabel(rule: { protocol: string; port_min?: number; port_max?: nu
     return `${proto} ${rule.port_min}-${rule.port_max}`;
   }
   return `${proto} ${rule.port_min}`;
+}
+
+function PaginationControls({
+  page,
+  pageSize,
+  setPageSize,
+  setPage,
+  total,
+}: {
+  page: number;
+  pageSize: number;
+  setPageSize: (pageSize: number) => void;
+  setPage: (fn: (page: number) => number) => void;
+  total: number;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const start = (currentPage - 1) * pageSize;
+
+  return (
+    <div className="pagination">
+      <div className="muted">
+        {start + 1}-{Math.min(start + pageSize, total)} of {total}
+      </div>
+      <label className="page-size">
+        <span>Rows</span>
+        <select
+          value={pageSize}
+          onChange={(e) => setPageSize(parseInt(e.target.value, 10))}
+        >
+          {PAGE_SIZE_OPTIONS.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        disabled={currentPage <= 1}
+        onClick={() => setPage((p) => Math.max(1, p - 1))}
+      >
+        previous
+      </button>
+      <span className="muted">page {currentPage} of {totalPages}</span>
+      <button
+        disabled={currentPage >= totalPages}
+        onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+      >
+        next
+      </button>
+    </div>
+  );
+}
+
+function Paginated<T>({
+  items,
+  resetKey,
+  children,
+}: {
+  items: T[];
+  resetKey?: unknown;
+  children: (pageItems: T[], pager: ReactNode) => ReactNode;
+}) {
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [items.length, pageSize, resetKey]);
+
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const start = (currentPage - 1) * pageSize;
+  const pageItems = items.slice(start, start + pageSize);
+  const pager =
+    items.length > DEFAULT_PAGE_SIZE ? (
+      <PaginationControls
+        page={currentPage}
+        pageSize={pageSize}
+        setPage={setPage}
+        setPageSize={setPageSize}
+        total={items.length}
+      />
+    ) : null;
+
+  return <>{children(pageItems, pager)}</>;
 }
 
 // FlowEvent renders one observed flow as a NetBird-style traffic
@@ -406,10 +495,10 @@ export default function App() {
       api<Peer[]>("/api/peers", authToken),
       api<SetupKey[]>("/api/setup-keys", authToken),
       api<LinkStat[]>("/api/link-stats", authToken),
-      api<Flow[]>("/api/flows?limit=100", authToken),
+      api<Flow[]>("/api/flows?limit=1000", authToken),
       api<AclResponse>("/api/acl", authToken),
-      api<AuditRow[]>("/api/audit?limit=200", authToken),
-      api<AccessLogRow[]>("/api/access-log?limit=200", authToken),
+      api<AuditRow[]>("/api/audit?limit=1000", authToken),
+      api<AccessLogRow[]>("/api/access-log?limit=1000", authToken),
       api<NetworkConfig>("/api/network", authToken),
     ]);
     setPeers(p);
@@ -786,147 +875,165 @@ export default function App() {
 
         {tab === "machines" && (
           <div className="panel tablewrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>id</th>
-                  <th>status</th>
-                  <th>hostname</th>
-                  <th>overlay ip</th>
-                  <th>last seen</th>
-                  <th>public key</th>
-                  <th>endpoint</th>
-                  <th>created</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {peers.length === 0 && (
-                  <tr>
-                    <td colSpan={9} className="muted">
-                      no peers enrolled
-                    </td>
-                  </tr>
-                )}
-                {peers.map((p) => (
-                  <tr key={p.id}>
-                    <td>{p.id}</td>
-                    <td>
-                      <PeerBadge peer={p} />
-                    </td>
-                    <td>{p.hostname ?? ""}</td>
-                    <td>
-                      {p.assigned_ip}
-                      {p.assigned_ip6 && (
-                        <div className="muted">{p.assigned_ip6}</div>
+            <Paginated items={peers}>
+              {(pagePeers, pager) => (
+                <>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>id</th>
+                        <th>status</th>
+                        <th>hostname</th>
+                        <th>overlay ip</th>
+                        <th>last seen</th>
+                        <th>public key</th>
+                        <th>endpoint</th>
+                        <th>created</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {peers.length === 0 && (
+                        <tr>
+                          <td colSpan={9} className="muted">
+                            no peers enrolled
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td className="muted">{lastSeenLabel(p)}</td>
-                    <td className="mono">
-                      {p.public_key} <CopyButton text={p.public_key} />
-                    </td>
-                    <td>
-                      {endpointOf(p) || <span className="muted">unknown</span>}
-                    </td>
-                    <td className="muted">{formatTime(p.created_at)}</td>
-                    <td>
-                      {!p.revoked_at && (
-                        <button
-                          className="danger"
-                          onClick={() =>
-                            void revoke(
-                              `/api/peers/${p.id}/revoke`,
-                              `revoke peer ${p.id} (${p.hostname || p.assigned_ip})?`,
-                            )
-                          }
-                        >
-                          revoke
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                      {pagePeers.map((p) => (
+                        <tr key={p.id}>
+                          <td>{p.id}</td>
+                          <td>
+                            <PeerBadge peer={p} />
+                          </td>
+                          <td>{p.hostname ?? ""}</td>
+                          <td>
+                            {p.assigned_ip}
+                            {p.assigned_ip6 && (
+                              <div className="muted">{p.assigned_ip6}</div>
+                            )}
+                          </td>
+                          <td className="muted">{lastSeenLabel(p)}</td>
+                          <td className="mono">
+                            {p.public_key} <CopyButton text={p.public_key} />
+                          </td>
+                          <td>
+                            {endpointOf(p) || <span className="muted">unknown</span>}
+                          </td>
+                          <td className="muted">{formatTime(p.created_at)}</td>
+                          <td>
+                            {!p.revoked_at && (
+                              <button
+                                className="danger"
+                                onClick={() =>
+                                  void revoke(
+                                    `/api/peers/${p.id}/revoke`,
+                                    `revoke peer ${p.id} (${p.hostname || p.assigned_ip})?`,
+                                  )
+                                }
+                              >
+                                revoke
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {pager}
+                </>
+              )}
+            </Paginated>
           </div>
         )}
-
         {tab === "traffic" && (
-          <>
-          <h2>Liveness</h2>
-          <div className="panel tablewrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>peer</th>
-                  <th>last seen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {peers.filter((p) => !p.revoked_at).length === 0 && (
-                  <tr>
-                    <td colSpan={2} className="muted">
-                      no active peers
-                    </td>
-                  </tr>
-                )}
-                {peers
-                  .filter((p) => !p.revoked_at)
-                  .map((p) => (
-                    <tr key={p.id}>
-                      <td>{peerLabel(p.hostname, p.assigned_ip)}</td>
-                      <td className="muted">
-                        {formatTime(p.last_seen_at) || "never"}
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
+	          <>
+	          <h2>Liveness</h2>
+	          <div className="panel tablewrap">
+	            <Paginated items={activePeers}>
+	              {(pagePeers, pager) => (
+	                <>
+	                  <table>
+	                    <thead>
+	                      <tr>
+	                        <th>peer</th>
+	                        <th>last seen</th>
+	                      </tr>
+	                    </thead>
+	                    <tbody>
+	                      {activePeers.length === 0 && (
+	                        <tr>
+	                          <td colSpan={2} className="muted">
+	                            no active peers
+	                          </td>
+	                        </tr>
+	                      )}
+	                      {pagePeers.map((p) => (
+	                        <tr key={p.id}>
+	                          <td>{peerLabel(p.hostname, p.assigned_ip)}</td>
+	                          <td className="muted">
+	                            {formatTime(p.last_seen_at) || "never"}
+	                          </td>
+	                        </tr>
+	                      ))}
+	                    </tbody>
+	                  </table>
+	                  {pager}
+	                </>
+	              )}
+	            </Paginated>
+	          </div>
 
-          <h2>Links</h2>
-          <div className="panel tablewrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>reporter</th>
-                  <th>remote</th>
-                  <th>path</th>
-                  <th>rx</th>
-                  <th>tx</th>
-                  <th>last handshake</th>
-                  <th>updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {links.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="muted">
-                      no reports yet
-                    </td>
-                  </tr>
-                )}
-                {links.map((l) => (
-                  <tr key={`${l.peer_id}-${l.remote_peer_id}`}>
-                    <td>{peerLabel(l.peer_hostname, l.peer_ip)}</td>
-                    <td>{peerLabel(l.remote_hostname, l.remote_ip)}</td>
-                    <td>
-                      <PathBadge state={l.path_state} />
-                      {l.path_endpoint && (
-                        <div className="muted">{l.path_endpoint}</div>
-                      )}
-                    </td>
-                    <td>{humanBytes(l.rx_bytes)}</td>
-                    <td>{humanBytes(l.tx_bytes)}</td>
-                    <td className="muted">
-                      {formatTime(l.last_handshake_at) || "never"}
-                    </td>
-                    <td className="muted">{formatTime(l.updated_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+	          <h2>Links</h2>
+	          <div className="panel tablewrap">
+	            <Paginated items={links}>
+	              {(pageLinks, pager) => (
+	                <>
+	                  <table>
+	                    <thead>
+	                      <tr>
+	                        <th>reporter</th>
+	                        <th>remote</th>
+	                        <th>path</th>
+	                        <th>rx</th>
+	                        <th>tx</th>
+	                        <th>last handshake</th>
+	                        <th>updated</th>
+	                      </tr>
+	                    </thead>
+	                    <tbody>
+	                      {links.length === 0 && (
+	                        <tr>
+	                          <td colSpan={7} className="muted">
+	                            no reports yet
+	                          </td>
+	                        </tr>
+	                      )}
+	                      {pageLinks.map((l) => (
+	                        <tr key={`${l.peer_id}-${l.remote_peer_id}`}>
+	                          <td>{peerLabel(l.peer_hostname, l.peer_ip)}</td>
+	                          <td>{peerLabel(l.remote_hostname, l.remote_ip)}</td>
+	                          <td>
+	                            <PathBadge state={l.path_state} />
+	                            {l.path_endpoint && (
+	                              <div className="muted">{l.path_endpoint}</div>
+	                            )}
+	                          </td>
+	                          <td>{humanBytes(l.rx_bytes)}</td>
+	                          <td>{humanBytes(l.tx_bytes)}</td>
+	                          <td className="muted">
+	                            {formatTime(l.last_handshake_at) || "never"}
+	                          </td>
+	                          <td className="muted">{formatTime(l.updated_at)}</td>
+	                        </tr>
+	                      ))}
+	                    </tbody>
+	                  </table>
+	                  {pager}
+	                </>
+	              )}
+	            </Paginated>
+	          </div>
 
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h2 style={{ margin: 0 }}>Traffic events</h2>
@@ -957,10 +1064,19 @@ export default function App() {
                       {flows.length ? "no matching flows" : "no flows recorded"}
                     </div>
                   );
-                return shown.map((f) => (
-                  <FlowEvent key={f.id} f={f} ipName={ipName} />
-                ));
-              })()}
+	                return (
+	                  <Paginated items={shown} resetKey={filter}>
+	                    {(pageRows, pager) => (
+	                      <>
+	                        {pageRows.map((f) => (
+	                          <FlowEvent key={f.id} f={f} ipName={ipName} />
+	                        ))}
+	                        {pager}
+	                      </>
+	                    )}
+	                  </Paginated>
+	                );
+	              })()}
             </div>
           </div>
           </>
@@ -992,16 +1108,25 @@ export default function App() {
                 <span>peer</span>
                 <span className="right">status</span>
               </div>
-              {(() => {
-                const shown = audit.filter((a) => auditMatches(a, filter));
-                if (shown.length === 0)
-                  return (
-                    <div className="activity-row muted">
-                      {audit.length ? "no matching events" : "no activity yet"}
-                    </div>
-                  );
-                return shown.map((a) => <AuditEvent key={a.id} a={a} />);
-              })()}
+	              {(() => {
+	                const shown = audit.filter((a) => auditMatches(a, filter));
+	                if (shown.length === 0)
+	                  return (
+	                    <div className="activity-row muted">
+	                      {audit.length ? "no matching events" : "no activity yet"}
+	                    </div>
+	                  );
+	                return (
+	                  <Paginated items={shown} resetKey={filter}>
+	                    {(pageRows, pager) => (
+	                      <>
+	                        {pageRows.map((a) => <AuditEvent key={a.id} a={a} />)}
+	                        {pager}
+	                      </>
+	                    )}
+	                  </Paginated>
+	                );
+	              })()}
             </div>
           </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
@@ -1023,16 +1148,25 @@ export default function App() {
                 <span>peer</span>
                 <span className="right">status</span>
               </div>
-              {(() => {
-                const shown = access.filter((a) => accessMatches(a, filter));
-                if (shown.length === 0)
-                  return (
-                    <div className="activity-row muted">
-                      {access.length ? "no matching requests" : "no request log entries"}
-                    </div>
-                  );
-                return shown.map((a, i) => <AccessEvent key={`${a.time}-${i}`} a={a} />);
-              })()}
+	              {(() => {
+	                const shown = access.filter((a) => accessMatches(a, filter));
+	                if (shown.length === 0)
+	                  return (
+	                    <div className="activity-row muted">
+	                      {access.length ? "no matching requests" : "no request log entries"}
+	                    </div>
+	                  );
+	                return (
+	                  <Paginated items={shown} resetKey={filter}>
+	                    {(pageRows, pager) => (
+	                      <>
+	                        {pageRows.map((a, i) => <AccessEvent key={`${a.time}-${i}`} a={a} />)}
+	                        {pager}
+	                      </>
+	                    )}
+	                  </Paginated>
+	                );
+	              })()}
             </div>
           </div>
           </>
@@ -1105,47 +1239,54 @@ export default function App() {
                   {networkPlan.message ||
                     "Preview ready. Review the reassignment plan before applying."}
                 </div>
-                <div className="tablewrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>peer</th>
-                        <th>IPv4</th>
-                        <th>IPv6</th>
-                        <th>status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {networkPlan.changes.length === 0 && (
-                        <tr>
-                          <td colSpan={4} className="muted">
-                            no peers to reassign
-                          </td>
-                        </tr>
-                      )}
-                      {networkPlan.changes.map((c) => (
-                        <tr key={c.id}>
-                          <td>{c.hostname || `peer ${c.id}`}</td>
-                          <td>
-                            <span className="muted">{c.old_ip}</span>
-                            <div>{c.new_ip}</div>
-                          </td>
-                          <td>
-                            <span className="muted">{c.old_ip6 || "none"}</span>
-                            <div>{c.new_ip6}</div>
-                          </td>
-                          <td>
-                            {c.revoked_at ? (
-                              <span className="badge bad">revoked</span>
-                            ) : (
-                              <span className="badge warn">will move</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+	                <div className="tablewrap">
+	                  <Paginated items={networkPlan.changes}>
+	                    {(pageChanges, pager) => (
+	                      <>
+	                        <table>
+	                          <thead>
+	                            <tr>
+	                              <th>peer</th>
+	                              <th>IPv4</th>
+	                              <th>IPv6</th>
+	                              <th>status</th>
+	                            </tr>
+	                          </thead>
+	                          <tbody>
+	                            {networkPlan.changes.length === 0 && (
+	                              <tr>
+	                                <td colSpan={4} className="muted">
+	                                  no peers to reassign
+	                                </td>
+	                              </tr>
+	                            )}
+	                            {pageChanges.map((c) => (
+	                              <tr key={c.id}>
+	                                <td>{c.hostname || `peer ${c.id}`}</td>
+	                                <td>
+	                                  <span className="muted">{c.old_ip}</span>
+	                                  <div>{c.new_ip}</div>
+	                                </td>
+	                                <td>
+	                                  <span className="muted">{c.old_ip6 || "none"}</span>
+	                                  <div>{c.new_ip6}</div>
+	                                </td>
+	                                <td>
+	                                  {c.revoked_at ? (
+	                                    <span className="badge bad">revoked</span>
+	                                  ) : (
+	                                    <span className="badge warn">will move</span>
+	                                  )}
+	                                </td>
+	                              </tr>
+	                            ))}
+	                          </tbody>
+	                        </table>
+	                        {pager}
+	                      </>
+	                    )}
+	                  </Paginated>
+	                </div>
                 <div className="confirm-box">
                   <label>
                     <span>type REASSIGN OVERLAY NETWORK to apply</span>
@@ -1252,54 +1393,61 @@ export default function App() {
                   add rule
                 </button>
               </div>
-            </div>
-            <div className="tablewrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>id</th>
-                    <th>name</th>
-                    <th>src</th>
-                    <th>dst</th>
-                    <th>service</th>
-                    <th>created</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {acl.rules.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="muted">
-                        no rules
-                      </td>
-                    </tr>
-                  )}
-                  {acl.rules.map((r) => (
-                    <tr key={r.id}>
-                      <td>{r.id}</td>
-                      <td>{r.name || <span className="muted">unnamed</span>}</td>
-                      <td>{r.src_label}</td>
-                      <td>{r.dst_label}</td>
-                      <td>{serviceLabel(r)}</td>
-                      <td className="muted">{formatTime(r.created_at)}</td>
-                      <td>
-                        <button
-                          className="danger"
-                          onClick={() =>
-                            void revoke(
-                              `/api/acl/${r.id}/delete`,
-                              `delete ACL rule ${r.id} (${r.src_label} to ${r.dst_label})?`,
-                            )
-                          }
-                        >
-                          delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+	            </div>
+	            <div className="tablewrap">
+	              <Paginated items={acl.rules}>
+	                {(pageRules, pager) => (
+	                  <>
+	                    <table>
+	                      <thead>
+	                        <tr>
+	                          <th>id</th>
+	                          <th>name</th>
+	                          <th>src</th>
+	                          <th>dst</th>
+	                          <th>service</th>
+	                          <th>created</th>
+	                          <th></th>
+	                        </tr>
+	                      </thead>
+	                      <tbody>
+	                        {acl.rules.length === 0 && (
+	                          <tr>
+	                            <td colSpan={7} className="muted">
+	                              no rules
+	                            </td>
+	                          </tr>
+	                        )}
+	                        {pageRules.map((r) => (
+	                          <tr key={r.id}>
+	                            <td>{r.id}</td>
+	                            <td>{r.name || <span className="muted">unnamed</span>}</td>
+	                            <td>{r.src_label}</td>
+	                            <td>{r.dst_label}</td>
+	                            <td>{serviceLabel(r)}</td>
+	                            <td className="muted">{formatTime(r.created_at)}</td>
+	                            <td>
+	                              <button
+	                                className="danger"
+	                                onClick={() =>
+	                                  void revoke(
+	                                    `/api/acl/${r.id}/delete`,
+	                                    `delete ACL rule ${r.id} (${r.src_label} to ${r.dst_label})?`,
+	                                  )
+	                                }
+	                              >
+	                                delete
+	                              </button>
+	                            </td>
+	                          </tr>
+	                        ))}
+	                      </tbody>
+	                    </table>
+	                    {pager}
+	                  </>
+	                )}
+	              </Paginated>
+	            </div>
           </div>
           </>
         )}
@@ -1342,66 +1490,73 @@ export default function App() {
                   new setup key
                 </button>
               </div>
-            </div>
-            <div className="tablewrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>id</th>
-                    <th>status</th>
-                    <th>name</th>
-                    <th>key</th>
-                    <th>uses</th>
-                    <th>expires</th>
-                    <th>created</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {keys.length === 0 && (
-                    <tr>
-                      <td colSpan={8} className="muted">
-                        no setup keys
-                      </td>
-                    </tr>
-                  )}
-                  {keys.map((k) => (
-                    <tr key={k.id}>
-                      <td>{k.id}</td>
-                      <td>
-                        <KeyBadge k={k} />
-                      </td>
-                      <td>{k.name || <span className="muted">unnamed</span>}</td>
-                      <td className="mono">
-                        {k.key} <CopyButton text={k.key} />
-                      </td>
-                      <td>
-                        {k.uses_consumed}/{k.max_uses > 0 ? k.max_uses : "∞"}
-                      </td>
-                      <td className="muted">
-                        {formatTime(k.expires_at) || "never"}
-                      </td>
-                      <td className="muted">{formatTime(k.created_at)}</td>
-                      <td>
-                        {!k.revoked_at && (
-                          <button
-                            className="danger"
-                            onClick={() =>
-                              void revoke(
-                                `/api/setup-keys/${k.id}/revoke`,
-                                `revoke setup key ${k.id}?`,
-                              )
-                            }
-                          >
-                            revoke
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+	            </div>
+	            <div className="tablewrap">
+	              <Paginated items={keys}>
+	                {(pageKeys, pager) => (
+	                  <>
+	                    <table>
+	                      <thead>
+	                        <tr>
+	                          <th>id</th>
+	                          <th>status</th>
+	                          <th>name</th>
+	                          <th>key</th>
+	                          <th>uses</th>
+	                          <th>expires</th>
+	                          <th>created</th>
+	                          <th></th>
+	                        </tr>
+	                      </thead>
+	                      <tbody>
+	                        {keys.length === 0 && (
+	                          <tr>
+	                            <td colSpan={8} className="muted">
+	                              no setup keys
+	                            </td>
+	                          </tr>
+	                        )}
+	                        {pageKeys.map((k) => (
+	                          <tr key={k.id}>
+	                            <td>{k.id}</td>
+	                            <td>
+	                              <KeyBadge k={k} />
+	                            </td>
+	                            <td>{k.name || <span className="muted">unnamed</span>}</td>
+	                            <td className="mono">
+	                              {k.key} <CopyButton text={k.key} />
+	                            </td>
+	                            <td>
+	                              {k.uses_consumed}/{k.max_uses > 0 ? k.max_uses : "∞"}
+	                            </td>
+	                            <td className="muted">
+	                              {formatTime(k.expires_at) || "never"}
+	                            </td>
+	                            <td className="muted">{formatTime(k.created_at)}</td>
+	                            <td>
+	                              {!k.revoked_at && (
+	                                <button
+	                                  className="danger"
+	                                  onClick={() =>
+	                                    void revoke(
+	                                      `/api/setup-keys/${k.id}/revoke`,
+	                                      `revoke setup key ${k.id}?`,
+	                                    )
+	                                  }
+	                                >
+	                                  revoke
+	                                </button>
+	                              )}
+	                            </td>
+	                          </tr>
+	                        ))}
+	                      </tbody>
+	                    </table>
+	                    {pager}
+	                  </>
+	                )}
+	              </Paginated>
+	            </div>
           </div>
           </>
         )}

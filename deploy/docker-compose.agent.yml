@@ -4,6 +4,11 @@
 # the service container that should join the mesh. The agent shares that
 # service's network namespace, so wg-int and the overlay IP appear inside
 # the app container's networking.
+#
+# WGMESH_AGENT_IMAGE must point at the agent image/target, not the server
+# image. With the included Gitea workflow that is:
+#   gitea.mynetbird.uk/<owner>/wgmesh-agent:latest
+# If building locally instead, build the Dockerfile with --target agent.
 
 services:
   myservice:
@@ -11,7 +16,8 @@ services:
     restart: unless-stopped
 
   myservice-wgmesh:
-    image: ${WGMESH_AGENT_IMAGE:?set WGMESH_AGENT_IMAGE}
+    image: ${WGMESH_AGENT_IMAGE:?set WGMESH_AGENT_IMAGE to wgmesh-agent, not wgmesh-server}
+    entrypoint: ["/usr/local/bin/agent"]
     restart: unless-stopped
     network_mode: "service:myservice"
     cap_add:
