@@ -448,3 +448,37 @@ func TestRemovePeerRequiresRevocation(t *testing.T) {
 		t.Fatalf("peers after remove = %#v, want empty", peers)
 	}
 }
+
+func TestBuildACLPolicyUsesOverlayIPsAndService(t *testing.T) {
+	srv, ts := newTestServer(t)
+	srv.store.DefaultAllow = false
+
+	setupKey, err := srv.store.CreateSetupKey(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+	src := enrollPeer(t, ts, setupKey, "traefik")
+	dst := enrollPeer(t, ts, setupKey, "muse")
+	port := int64(4040)
+	if _, err := srv.store.CreateACLRuleDetailed(context.Background(), store.ACLRule{
+		SrcPeerID: int64Ptr(int64(src.PeerID)),
+		DstPeerID: int64Ptr(int64(dst.PeerID)),
+		Name:      "Muse",
+		Protocol:  "tcp",
+		PortMin:   &port,
+	}); err != nil {
+		t.Fatalf("CreateACLRuleDetailed: %v", err)
+	}
+
+	policy, err := srv.buildACLPolicy(context.Background())
+	if err != nil {
+		t.Fatalf("buildACLPolicy: %v", err)
+	}
+	if policy.DefaultPolicy != "deny" || len(policy.Rules) != 1 {
+		t.Fatalf("policy = %#v, want deny with one rule", policy)
+	}
+	rule := policy.Rules[0]
+	if rule.SrcIP != "100.64.0.1" || rule.DstIP != "100.64.0.2" || rule.Protocol != "tcp" || rule.PortMin != 4040 {
+		t.Fatalf("rule = %#v, want traefik->muse tcp/4040 overlay IPs", rule)
+	}
+}

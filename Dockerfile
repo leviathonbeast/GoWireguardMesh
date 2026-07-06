@@ -30,7 +30,7 @@ ENTRYPOINT ["relay"]
 
 # --- agent (needs NET_ADMIN + host networking at runtime) ---
 FROM alpine:3.21 AS agent
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates iptables
 COPY --from=build /out/agent /usr/local/bin/agent
 WORKDIR /data
 ENTRYPOINT ["agent"]

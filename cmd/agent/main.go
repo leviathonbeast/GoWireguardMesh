@@ -461,6 +461,7 @@ func runWithStop(stop <-chan struct{}) error {
 	var (
 		enrolledPeers  []wgtypes.PeerConfig
 		authToken      string
+		initialACL     *proto.ACLPolicy
 		networkPrefix  netip.Prefix
 		networkPrefix6 netip.Prefix
 	)
@@ -506,6 +507,7 @@ func runWithStop(stop <-chan struct{}) error {
 		}
 
 		authToken = resp.AuthToken
+		initialACL = resp.ACL
 
 		networkPrefix, err = netip.ParsePrefix(resp.NetworkCIDR)
 		if err != nil {
@@ -620,6 +622,11 @@ func runWithStop(stop <-chan struct{}) error {
 		Peers:        peers,
 	}); err != nil {
 		return err
+	}
+	if initialACL != nil {
+		if err := applyOverlayACL(ifaceName, initialACL); err != nil {
+			slog.Warn("initial overlay acl sync failed", "error", err)
+		}
 	}
 
 	fmt.Println("[agent] wireguard interface setup complete")

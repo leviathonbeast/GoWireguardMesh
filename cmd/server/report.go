@@ -75,12 +75,19 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.currentNetworkConfig()
+	acl, err := s.buildACLPolicy(r.Context())
+	if err != nil {
+		slog.Error("build acl sync payload failed", "peer_id", peerID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	writeJSON(w, http.StatusOK, proto.ReportResponse{
 		AssignedIP:   self.AssignedIP,
 		AssignedIP6:  self.AssignedIP6,
 		NetworkCIDR:  cfg.NetworkCIDR,
 		NetworkCIDR6: cfg.NetworkCIDR6,
 		Peers:        entries,
+		ACL:          acl,
 	})
 }
 

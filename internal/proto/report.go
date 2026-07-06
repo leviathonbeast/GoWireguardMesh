@@ -29,6 +29,7 @@ type ReportResponse struct {
 	NetworkCIDR  string               `json:"network_cidr,omitempty"`
 	NetworkCIDR6 string               `json:"network_cidr6,omitempty"`
 	Peers        []PeerConfigResponse `json:"peers"`
+	ACL          *ACLPolicy           `json:"acl,omitempty"`
 }
 
 // PeerCounter is the reporting agent's view of one WireGuard link.

@@ -500,6 +500,10 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 	if err := syncPeers(t.wg, desired); err != nil {
 		slog.Warn("telemetry sync failed", "error", err)
 	}
+
+	if err := applyOverlayACL(t.iface, sync.ACL); err != nil {
+		slog.Warn("overlay acl sync failed", "error", err)
+	}
 }
 
 func (t *telemetryReporter) applySelfAssignment(sync proto.ReportResponse) error {

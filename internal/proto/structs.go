@@ -20,6 +20,7 @@ type EnrollResponse struct {
 	NetworkCIDR  string               `json:"network_cidr"`
 	NetworkCIDR6 string               `json:"network_cidr6,omitempty"`
 	Peers        []PeerConfigResponse `json:"peers"`
+	ACL          *ACLPolicy           `json:"acl,omitempty"`
 
 	// AuthToken authenticates subsequent agent requests (telemetry
 	// reports). Rotated on every enrollment, including idempotent
@@ -56,4 +57,19 @@ type EndpointCandidate struct {
 	Endpoint string `json:"endpoint"`
 	Type     string `json:"type"`     // lan, stun
 	Priority int    `json:"priority"` // larger wins
+}
+
+type ACLPolicy struct {
+	DefaultPolicy string    `json:"default_policy"` // allow or deny
+	Rules         []ACLRule `json:"rules,omitempty"`
+}
+
+type ACLRule struct {
+	SrcIP    string `json:"src_ip,omitempty"` // empty means any
+	SrcIP6   string `json:"src_ip6,omitempty"`
+	DstIP    string `json:"dst_ip,omitempty"` // empty means any
+	DstIP6   string `json:"dst_ip6,omitempty"`
+	Protocol string `json:"protocol"` // any, tcp, udp, icmp, icmpv6
+	PortMin  int    `json:"port_min,omitempty"`
+	PortMax  int    `json:"port_max,omitempty"`
 }

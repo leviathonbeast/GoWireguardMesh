@@ -521,7 +521,7 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		s.audit(r, "re_enroll", http.StatusOK, fmt.Sprintf("peer %s (%s)", res.Peer.AssignedIP, req.Hostname))
 	}
 
-	out, err := s.buildResponse(res)
+	out, err := s.buildResponse(r.Context(), res)
 	if err != nil {
 		slog.Error("build enroll response failed", "public_key", req.PublicKey, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -632,6 +632,62 @@ func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([
 	return peers, nil
 }
 
+func (s *server) buildACLPolicy(ctx context.Context) (*proto.ACLPolicy, error) {
+	policy := "deny"
+	if s.store.DefaultAllow {
+		policy = "allow"
+	}
+
+	out := &proto.ACLPolicy{DefaultPolicy: policy}
+	if s.store.DefaultAllow {
+		return out, nil
+	}
+
+	peers, err := s.store.ListPeers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]store.PeerInfo, len(peers))
+	for _, p := range peers {
+		if p.RevokedAt == "" {
+			byID[p.ID] = p
+		}
+	}
+
+	rules, err := s.store.ListACLRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rules {
+		pr := proto.ACLRule{Protocol: r.Protocol}
+		if r.PortMin != nil {
+			pr.PortMin = int(*r.PortMin)
+		}
+		if r.PortMax != nil {
+			pr.PortMax = int(*r.PortMax)
+		}
+		if r.SrcPeerID != nil {
+			p, ok := byID[*r.SrcPeerID]
+			if !ok {
+				continue
+			}
+			pr.SrcIP = p.AssignedIP
+			pr.SrcIP6 = p.AssignedIP6
+		}
+		if r.DstPeerID != nil {
+			p, ok := byID[*r.DstPeerID]
+			if !ok {
+				continue
+			}
+			pr.DstIP = p.AssignedIP
+			pr.DstIP6 = p.AssignedIP6
+		}
+		out.Rules = append(out.Rules, pr)
+	}
+
+	return out, nil
+}
+
 func (s *server) punchEpoch(keyA, keyB string) int {
 	if s == nil {
 		return 0
@@ -652,13 +708,17 @@ func allowedIPsForPeer(p store.PeerRow) []string {
 	return allowed
 }
 
-func (s *server) buildResponse(res *store.EnrollResult) (proto.EnrollResponse, error) {
+func (s *server) buildResponse(ctx context.Context, res *store.EnrollResult) (proto.EnrollResponse, error) {
 	peers, err := s.buildPeerEntries(res.Peer, res.Others)
 	if err != nil {
 		return proto.EnrollResponse{}, err
 	}
 
 	cfg := s.currentNetworkConfig()
+	acl, err := s.buildACLPolicy(ctx)
+	if err != nil {
+		return proto.EnrollResponse{}, err
+	}
 
 	return proto.EnrollResponse{
 		PeerID:       int(res.Peer.ID),
@@ -667,6 +727,7 @@ func (s *server) buildResponse(res *store.EnrollResult) (proto.EnrollResponse, e
 		NetworkCIDR:  cfg.NetworkCIDR,
 		NetworkCIDR6: cfg.NetworkCIDR6,
 		Peers:        peers,
+		ACL:          acl,
 		AuthToken:    res.AuthToken,
 	}, nil
 }
