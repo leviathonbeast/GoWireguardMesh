@@ -223,6 +223,14 @@ h2 {
   margin: 0 0 12px;
 }
 
+.section-title {
+  margin: 0 0 14px;
+}
+
+.section-title h2 {
+  margin-bottom: 2px;
+}
+
 .searchbox {
   display: inline-flex;
   align-items: center;
@@ -258,6 +266,13 @@ h2 {
 
 .inline-editor input {
   width: 220px;
+}
+
+.boxed-editor {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
 }
 
 .policy-tools {
@@ -541,6 +556,11 @@ td.mono {
   overflow-wrap: anywhere;
 }
 
+.metric-value.small {
+  font-size: 15px;
+  line-height: 1.6;
+}
+
 .split {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -571,6 +591,74 @@ td.mono {
   gap: 12px;
   padding: 9px 0;
   border-top: 1px solid var(--border);
+}
+
+.peer-detail-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.peer-detail-head h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.peer-metrics {
+  margin-bottom: 16px;
+}
+
+.peer-detail-grid {
+  align-items: start;
+}
+
+.detail-list {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+
+.detail-list > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.55fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-list span {
+  color: var(--muted);
+}
+
+.detail-list strong {
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.breakable {
+  overflow-wrap: anywhere;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(360px, 1.15fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-card {
+  min-height: 100%;
+}
+
+.network-form {
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  margin-bottom: 0;
 }
 
 .notice {
@@ -866,9 +954,21 @@ label {
   .form-grid,
   .confirm-box,
   .split,
+  .settings-layout,
   .acl-form,
-  .key-form {
+  .key-form,
+  .network-form {
     grid-template-columns: 1fr;
+  }
+
+  .peer-detail-head {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .detail-list > div {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 
   .form-actions {

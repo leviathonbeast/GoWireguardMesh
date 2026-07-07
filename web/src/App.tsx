@@ -167,7 +167,7 @@ const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 
 const TAB_LABEL: Record<Tab, string> = {
   overview: "Overview",
-  machines: "Machines",
+  machines: "Peers",
   traffic: "Traffic Events",
   policies: "Policies",
   setup: "Setup keys",
@@ -717,6 +717,7 @@ export default function App() {
   const [networkConfirm, setNetworkConfirm] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [machineFilter, setMachineFilter] = useState("");
+  const [selectedPeerID, setSelectedPeerID] = useState<number | null>(null);
   const [trafficFilter, setTrafficFilter] = useState("");
   const [auditFilter, setAuditFilter] = useState("");
   const [accessFilter, setAccessFilter] = useState("");
@@ -852,6 +853,11 @@ export default function App() {
     const id = window.setTimeout(() => setToast(""), 3200);
     return () => window.clearTimeout(id);
   }, [toast]);
+
+  useEffect(() => {
+    if (selectedPeerID == null) return;
+    if (!peers.some((p) => p.id === selectedPeerID)) setSelectedPeerID(null);
+  }, [peers, selectedPeerID]);
 
   const refreshUISession = async (adminToken: string) => {
     const body = new URLSearchParams();
@@ -1173,6 +1179,20 @@ export default function App() {
   const shownKeys = keys.filter((k) => setupKeyMatches(k, setupFilter));
   const shownMigrationChanges =
     networkPlan?.changes.filter((c) => migrationChangeMatches(c, migrationFilter)) ?? [];
+  const selectedPeer = selectedPeerID == null ? null : peers.find((p) => p.id === selectedPeerID) ?? null;
+  const selectedPeerLinks = selectedPeer
+    ? links.filter((l) => l.peer_id === selectedPeer.id || l.remote_peer_id === selectedPeer.id)
+    : [];
+  const selectedPeerFlows = selectedPeer
+    ? flows.filter(
+        (f) =>
+          f.src_ip === selectedPeer.assigned_ip ||
+          f.dst_ip === selectedPeer.assigned_ip ||
+          (selectedPeer.assigned_ip6 &&
+            (f.src_ip === selectedPeer.assigned_ip6 || f.dst_ip === selectedPeer.assigned_ip6)),
+      )
+    : [];
+  const selectedPeerPathState = selectedPeerLinks.find((l) => l.path_state)?.path_state;
 
   return (
     <div className="app-shell">
@@ -1261,7 +1281,7 @@ export default function App() {
           <>
             <section className="metric-grid">
               <div className="metric">
-                <div className="metric-label">machines</div>
+                <div className="metric-label">peers</div>
                 <div className="metric-value">{activePeers.length}</div>
                 <div className="muted">{onlinePeers.length} online</div>
               </div>
@@ -1285,7 +1305,7 @@ export default function App() {
             <section className="split">
               <div className="panel">
                 <div className="section-head">
-                  <h2>Recent machines</h2>
+                  <h2>Recent peers</h2>
                   <button onClick={() => setTab("machines")}>view all</button>
                 </div>
                 <div className="compact-list">
@@ -1295,7 +1315,7 @@ export default function App() {
                       <PeerBadge peer={p} />
                     </div>
                   ))}
-                  {activePeers.length === 0 && <div className="muted">no machines enrolled</div>}
+                  {activePeers.length === 0 && <div className="muted">no peers enrolled</div>}
                 </div>
               </div>
               <div className="panel">
@@ -1319,11 +1339,231 @@ export default function App() {
 
         {tab === "machines" && (
           <>
+          {selectedPeer ? (
+            <>
+              <div className="peer-detail-head">
+                <button
+                  onClick={() => {
+                    cancelPeerAddressEdit();
+                    setSelectedPeerID(null);
+                  }}
+                >
+                  back to peers
+                </button>
+                <div>
+                  <h2>{selectedPeer.hostname || `peer ${selectedPeer.id}`}</h2>
+                  <p className="page-sub">
+                    peer {selectedPeer.id} · {selectedPeer.assigned_ip}
+                    {selectedPeer.assigned_ip6 ? ` · ${selectedPeer.assigned_ip6}` : ""}
+                  </p>
+                </div>
+                <PeerBadge peer={selectedPeer} />
+              </div>
+
+              <section className="metric-grid peer-metrics">
+                <div className="metric">
+                  <div className="metric-label">last seen</div>
+                  <div className="metric-value small">{lastSeenLabel(selectedPeer)}</div>
+                </div>
+                <div className="metric">
+                  <div className="metric-label">path state</div>
+                  <div className="metric-value small">
+                    <PathBadge state={selectedPeerPathState} />
+                  </div>
+                </div>
+                <div className="metric">
+                  <div className="metric-label">links</div>
+                  <div className="metric-value">{selectedPeerLinks.length}</div>
+                </div>
+                <div className="metric">
+                  <div className="metric-label">recent flows</div>
+                  <div className="metric-value">{selectedPeerFlows.length}</div>
+                </div>
+              </section>
+
+              <section className="split peer-detail-grid">
+                <div className="panel stack">
+                  <div className="section-head">
+                    <h2>Identity</h2>
+                    <PeerBadge peer={selectedPeer} />
+                  </div>
+                  <div className="detail-list">
+                    <div>
+                      <span>Hostname</span>
+                      <strong>{selectedPeer.hostname || "unknown"}</strong>
+                    </div>
+                    <div>
+                      <span>Public key</span>
+                      <strong className="breakable">
+                        {selectedPeer.public_key} <CopyButton text={selectedPeer.public_key} />
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Created</span>
+                      <strong>{formatTime(selectedPeer.created_at)}</strong>
+                    </div>
+                    {selectedPeer.revoked_at && (
+                      <div>
+                        <span>Revoked</span>
+                        <strong>{formatTime(selectedPeer.revoked_at)}</strong>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="panel stack">
+                  <div className="section-head">
+                    <h2>Network</h2>
+                    {!selectedPeer.revoked_at && (
+                      <button onClick={() => startPeerAddressEdit(selectedPeer)}>
+                        edit IP
+                      </button>
+                    )}
+                  </div>
+                  <div className="detail-list">
+                    <div>
+                      <span>IPv4 overlay</span>
+                      <strong>{selectedPeer.assigned_ip}</strong>
+                    </div>
+                    <div>
+                      <span>IPv6 overlay</span>
+                      <strong>{selectedPeer.assigned_ip6 || "not assigned"}</strong>
+                    </div>
+                    <div>
+                      <span>Endpoint</span>
+                      <strong>{endpointOf(selectedPeer) || "unknown"}</strong>
+                    </div>
+                    <div>
+                      <span>Observed address</span>
+                      <strong>{selectedPeer.observed_ip || "unknown"}</strong>
+                    </div>
+                  </div>
+                  {editingPeerID === selectedPeer.id && (
+                    <div className="inline-editor boxed-editor">
+                      <label>
+                        <span>IPv4</span>
+                        <input
+                          value={peerIP}
+                          placeholder={network.network_cidr}
+                          onChange={(e) => setPeerIP(e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>IPv6</span>
+                        <input
+                          value={peerIP6}
+                          placeholder={network.network_cidr6}
+                          onChange={(e) => setPeerIP6(e.target.value)}
+                        />
+                      </label>
+                      <button
+                        className="primary"
+                        disabled={savingPeerID === selectedPeer.id}
+                        onClick={() => void savePeerAddress(selectedPeer)}
+                      >
+                        {savingPeerID === selectedPeer.id ? "saving" : "save"}
+                      </button>
+                      <button onClick={cancelPeerAddressEdit}>cancel</button>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              <section className="panel stack">
+                <div className="section-head">
+                  <h2>Lifecycle</h2>
+                  {!selectedPeer.revoked_at ? (
+                    <button
+                      className="danger"
+                      onClick={() =>
+                        confirmPost({
+                          title: "Revoke peer?",
+                          message: `Revoke peer ${selectedPeer.id} (${selectedPeer.hostname || selectedPeer.assigned_ip})? It will stop receiving mesh config but remain in history.`,
+                          confirmLabel: "revoke",
+                          danger: true,
+                          onConfirm: () =>
+                            postAdminAction(`/api/peers/${selectedPeer.id}/revoke`, "Peer revoked"),
+                        })
+                      }
+                    >
+                      revoke peer
+                    </button>
+                  ) : (
+                    <button
+                      className="danger"
+                      onClick={() =>
+                        confirmPost({
+                          title: "Remove peer?",
+                          message: `Permanently remove peer ${selectedPeer.id} (${selectedPeer.hostname || selectedPeer.assigned_ip})? This releases its overlay address and removes live ACL/topology references.`,
+                          confirmLabel: "remove",
+                          danger: true,
+                          onConfirm: () =>
+                            postAdminAction(`/api/peers/${selectedPeer.id}/remove`, "Peer removed"),
+                        })
+                      }
+                    >
+                      remove peer
+                    </button>
+                  )}
+                </div>
+                <div className="notice">
+                  Revoked peers stop receiving mesh configuration but remain visible for history.
+                  Removed peers are deleted from the control plane and release their overlay address.
+                </div>
+              </section>
+
+              <section className="panel tablewrap">
+                <div className="section-head">
+                  <h2>Connections</h2>
+                  <button onClick={() => setTab("traffic")}>open traffic</button>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>remote peer</th>
+                      <th>path</th>
+                      <th>rx</th>
+                      <th>tx</th>
+                      <th>last handshake</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedPeerLinks.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="muted">no link reports for this peer yet</td>
+                      </tr>
+                    )}
+                    {selectedPeerLinks.slice(0, 8).map((l) => {
+                      const isReporter = l.peer_id === selectedPeer.id;
+                      return (
+                        <tr key={`${l.peer_id}-${l.remote_peer_id}`}>
+                          <td>
+                            {isReporter
+                              ? peerLabel(l.remote_hostname, l.remote_ip)
+                              : peerLabel(l.peer_hostname, l.peer_ip)}
+                          </td>
+                          <td>
+                            <PathBadge state={l.path_state} />
+                            {l.path_endpoint && <div className="muted">{l.path_endpoint}</div>}
+                          </td>
+                          <td>{humanBytes(l.rx_bytes)}</td>
+                          <td>{humanBytes(l.tx_bytes)}</td>
+                          <td className="muted">{formatTime(l.last_handshake_at) || "never"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </section>
+            </>
+          ) : (
+            <>
           <div className="row page-tools">
+            <h2 style={{ margin: 0 }}>Peers</h2>
             <SearchBox
               value={machineFilter}
               onChange={setMachineFilter}
-              placeholder="Search machines by name, IP, status, endpoint, key…"
+              placeholder="Search peers by name, IP, status, endpoint, key…"
               total={peers.length}
               shown={shownPeers.length}
             />
@@ -1350,7 +1590,7 @@ export default function App() {
                       {shownPeers.length === 0 && (
                         <tr>
                           <td colSpan={9} className="muted">
-                            {peers.length ? "no matching machines" : "no peers enrolled"}
+                            {peers.length ? "no matching peers" : "no peers enrolled"}
                           </td>
                         </tr>
                       )}
@@ -1378,10 +1618,13 @@ export default function App() {
                             <td className="muted">{formatTime(p.created_at)}</td>
                             <td>
 	                              {!p.revoked_at && (
-	                                <div className="row table-actions">
-	                                  <button onClick={() => startPeerAddressEdit(p)}>
-	                                    edit IP
-	                                  </button>
+		                                <div className="row table-actions">
+		                                  <button onClick={() => setSelectedPeerID(p.id)}>
+		                                    details
+		                                  </button>
+		                                  <button onClick={() => startPeerAddressEdit(p)}>
+		                                    edit IP
+		                                  </button>
 	                                  <button
 	                                    className="danger"
 	                                    onClick={() =>
@@ -1399,24 +1642,29 @@ export default function App() {
 	                                  </button>
 	                                </div>
 	                              )}
-	                              {p.revoked_at && (
-	                                <button
-	                                  className="danger"
-	                                  onClick={() =>
-	                                    confirmPost({
-	                                      title: "Remove peer?",
-	                                      message: `Permanently remove peer ${p.id} (${p.hostname || p.assigned_ip})? This releases its overlay address and removes live ACL/topology references.`,
-	                                      confirmLabel: "remove",
-	                                      danger: true,
-	                                      onConfirm: () =>
-	                                        postAdminAction(`/api/peers/${p.id}/remove`, "Peer removed"),
-	                                    })
-	                                  }
-	                                >
-	                                  remove
-	                                </button>
-	                              )}
-	                            </td>
+		                              {p.revoked_at && (
+		                                <div className="row table-actions">
+		                                  <button onClick={() => setSelectedPeerID(p.id)}>
+		                                    details
+		                                  </button>
+		                                  <button
+		                                    className="danger"
+		                                    onClick={() =>
+		                                      confirmPost({
+		                                        title: "Remove peer?",
+		                                        message: `Permanently remove peer ${p.id} (${p.hostname || p.assigned_ip})? This releases its overlay address and removes live ACL/topology references.`,
+		                                        confirmLabel: "remove",
+		                                        danger: true,
+		                                        onConfirm: () =>
+		                                          postAdminAction(`/api/peers/${p.id}/remove`, "Peer removed"),
+		                                      })
+		                                    }
+		                                  >
+		                                    remove
+		                                  </button>
+		                                </div>
+		                              )}
+		                            </td>
                           </tr>
                           {editingPeerID === p.id && (
                             <tr className="edit-row">
@@ -1463,6 +1711,8 @@ export default function App() {
               )}
             </Paginated>
           </div>
+            </>
+          )}
           </>
         )}
         {tab === "traffic" && (
@@ -1749,67 +1999,86 @@ export default function App() {
 
         {tab === "settings" && (
           <>
-          <h2>Overlay network</h2>
-          <div className="panel stack">
-            <div className="metric-grid">
-              <div className="metric">
-                <div className="metric-label">current IPv4</div>
-                <div className="metric-value">{network.network_cidr || "unknown"}</div>
+          <div className="section-title">
+            <h2>Overlay network</h2>
+            <p className="page-sub">
+              Manage the IPv4 and IPv6 address ranges assigned to enrolled peers.
+            </p>
+          </div>
+
+          <section className="settings-layout">
+            <div className="panel stack settings-card">
+              <div className="section-head">
+                <h2>Current network</h2>
+                <span className="badge ok">active</span>
               </div>
-              <div className="metric">
-                <div className="metric-label">current IPv6</div>
-                <div className="metric-value">{network.network_cidr6 || "unknown"}</div>
-              </div>
-              <div className="metric">
-                <div className="metric-label">active peers</div>
-                <div className="metric-value">
-                  {peers.filter((p) => !p.revoked_at).length}
+              <div className="detail-list">
+                <div>
+                  <span>IPv4 range</span>
+                  <strong>{network.network_cidr || "unknown"}</strong>
+                </div>
+                <div>
+                  <span>IPv6 range</span>
+                  <strong>{network.network_cidr6 || "unknown"}</strong>
+                </div>
+                <div>
+                  <span>Active peers</span>
+                  <strong>{peers.filter((p) => !p.revoked_at).length}</strong>
+                </div>
+                <div>
+                  <span>Total assignments</span>
+                  <strong>{peers.length}</strong>
                 </div>
               </div>
-              <div className="metric">
-                <div className="metric-label">total assignments</div>
-                <div className="metric-value">{peers.length}</div>
-              </div>
             </div>
 
-            <div className="notice warn">
-              Changing the overlay network reassigns every peer. Running agents
-              adopt the new interface address from their next report response;
-              restarting an agent also re-enrolls it onto the new assignment.
-            </div>
-
-            <div className="form-grid">
-              <label>
-                <span>IPv4 CIDR</span>
-                <input
-                  value={networkCIDR}
-                  placeholder="100.64.0.0/16"
-                  onChange={(e) => {
-                    setNetworkCIDR(e.target.value);
-                    setNetworkPlan(null);
-                  }}
-                />
-              </label>
-              <label>
-                <span>IPv6 CIDR</span>
-                <input
-                  value={networkCIDR6}
-                  placeholder="fd00:100:64::/64"
-                  onChange={(e) => {
-                    setNetworkCIDR6(e.target.value);
-                    setNetworkPlan(null);
-                  }}
-                />
-              </label>
-              <div className="form-actions">
-                <button className="primary" onClick={() => void previewNetworkMigration()}>
-                  preview changes
-                </button>
+            <div className="panel stack settings-card">
+              <div className="section-head">
+                <h2>Network settings</h2>
+              </div>
+              <div className="notice warn">
+                Changing the overlay network reassigns every peer. Running agents
+                adopt the new interface address from their next report response;
+                restarting an agent also re-enrolls it onto the new assignment.
+              </div>
+              <div className="form-grid network-form">
+                <label>
+                  <span>IPv4 CIDR</span>
+                  <input
+                    value={networkCIDR}
+                    placeholder="100.64.0.0/16"
+                    onChange={(e) => {
+                      setNetworkCIDR(e.target.value);
+                      setNetworkPlan(null);
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>IPv6 CIDR</span>
+                  <input
+                    value={networkCIDR6}
+                    placeholder="fd00:100:64::/64"
+                    onChange={(e) => {
+                      setNetworkCIDR6(e.target.value);
+                      setNetworkPlan(null);
+                    }}
+                  />
+                </label>
+                <div className="form-actions">
+                  <button className="primary" onClick={() => void previewNetworkMigration()}>
+                    preview changes
+                  </button>
+                </div>
               </div>
             </div>
+          </section>
 
             {networkPlan && (
-              <div className="stack">
+              <div className="panel stack">
+                <div className="section-head">
+                  <h2>Migration preview</h2>
+                  <span className="badge warn">{networkPlan.changes.length} peers</span>
+                </div>
 	                <div className="notice">
 	                  {networkPlan.message ||
 	                    "Preview ready. Review the reassignment plan before applying."}
@@ -1884,13 +2153,12 @@ export default function App() {
                     className="danger"
                     disabled={networkConfirm !== "REASSIGN OVERLAY NETWORK"}
                     onClick={() => void applyNetworkMigration()}
-                  >
-                    apply network migration
-                  </button>
-                </div>
-              </div>
+	                  >
+	                    apply network migration
+	                  </button>
+	                </div>
+	              </div>
             )}
-          </div>
           </>
         )}
 
