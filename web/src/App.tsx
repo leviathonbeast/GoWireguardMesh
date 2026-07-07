@@ -450,12 +450,12 @@ function FlowEvent({ f, ipName }: { f: Flow; ipName: (ip: string) => string }) {
           </div>
         </div>
       </div>
-      <Endpoint name={srcName} ip={`${f.src_ip}:${f.src_port}`} />
+      <Endpoint name={srcName} ip={f.src_port ? `${f.src_ip}:${f.src_port}` : f.src_ip} />
       <div className="pills">
         <span className="pill">{f.protocol_name.toUpperCase()}</span>
-        <span className="pill">{f.dst_port}</span>
+        {f.dst_port ? <span className="pill">{f.dst_port}</span> : null}
       </div>
-      <Endpoint name={dstName} ip={`${f.dst_ip}:${f.dst_port}`} />
+      <Endpoint name={dstName} ip={f.dst_port ? `${f.dst_ip}:${f.dst_port}` : f.dst_ip} />
       <div className="traffic">
         <div>
           <span className="down">↓</span> {humanBytes(f.rx_bytes)}

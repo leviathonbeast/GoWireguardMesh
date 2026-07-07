@@ -324,22 +324,37 @@ func (t *telemetryReporter) collectFlows() {
 			continue
 		}
 
-		pending, ok := t.pendingFlows[key]
-		if !ok {
-			pending = &proto.FlowRecord{
-				Protocol: int(key.protocol),
-				SrcIP:    key.src.String(),
-				SrcPort:  int(key.srcPort),
-				DstIP:    key.dst.String(),
-				DstPort:  int(key.dstPort),
-			}
-			t.pendingFlows[key] = pending
+		// Aggregate by service: fold every connection to the same
+		// server:port into one record, oriented client -> server, so a
+		// storm of short connections with fresh ephemeral ports (e.g. a
+		// reverse proxy health-checking backends) collapses to a single
+		// row. tx/rx swap when the orientation flips, since ctFlow always
+		// keeps tx = src->dst and rx = dst->src.
+		client, server, serverPort, flipped := orientFlow(f.src, f.srcPort, f.dst, f.dstPort)
+		aggKey := flowKey{protocol: f.protocol, src: client, dst: server, dstPort: serverPort}
+
+		txB, txP := delta.txBytes, delta.txPackets
+		rxB, rxP := delta.rxBytes, delta.rxPackets
+		if flipped {
+			txB, rxB = rxB, txB
+			txP, rxP = rxP, txP
 		}
 
-		pending.TxBytes += int64(delta.txBytes)
-		pending.TxPackets += int64(delta.txPackets)
-		pending.RxBytes += int64(delta.rxBytes)
-		pending.RxPackets += int64(delta.rxPackets)
+		pending, ok := t.pendingFlows[aggKey]
+		if !ok {
+			pending = &proto.FlowRecord{
+				Protocol: int(aggKey.protocol),
+				SrcIP:    client.String(),
+				DstIP:    server.String(),
+				DstPort:  int(serverPort),
+			}
+			t.pendingFlows[aggKey] = pending
+		}
+
+		pending.TxBytes += int64(txB)
+		pending.TxPackets += int64(txP)
+		pending.RxBytes += int64(rxB)
+		pending.RxPackets += int64(rxP)
 	}
 
 	// Flows gone from conntrack won't report again; drop their
@@ -353,6 +368,34 @@ func (t *telemetryReporter) collectFlows() {
 
 func (t *telemetryReporter) overlayContains(addr netip.Addr) bool {
 	return t.network.Contains(addr) || (t.network6.IsValid() && t.network6.Contains(addr))
+}
+
+// ephemeralMin is the start of Linux's default ephemeral port range
+// (ip_local_port_range). Ports at or above it are treated as the client
+// side of a flow when orienting client -> server.
+const ephemeralMin = 32768
+
+// orientFlow puts the client (ephemeral port) as src and the server
+// (stable listening port) as dst, so both peers describe a connection the
+// same way and connections that differ only in the client's port fold
+// together. It reports whether that swapped the original src/dst, so the
+// caller can swap tx/rx to match. When neither or both ports look
+// ephemeral, the lower port is taken as the server.
+func orientFlow(src netip.Addr, srcPort uint16, dst netip.Addr, dstPort uint16) (client, server netip.Addr, serverPort uint16, flipped bool) {
+	srcEph := srcPort >= ephemeralMin
+	dstEph := dstPort >= ephemeralMin
+
+	switch {
+	case srcEph && !dstEph:
+		return src, dst, dstPort, false
+	case dstEph && !srcEph:
+		return dst, src, srcPort, true
+	default:
+		if dstPort <= srcPort {
+			return src, dst, dstPort, false
+		}
+		return dst, src, srcPort, true
+	}
 }
 
 // counterDelta handles both new flows (count everything) and conntrack
