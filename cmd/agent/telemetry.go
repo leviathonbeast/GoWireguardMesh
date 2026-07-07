@@ -80,7 +80,8 @@ type telemetryReporter struct {
 	network6  netip.Prefix
 	interval  time.Duration
 
-	ct flowDumper // nil when the platform has no flow source
+	ct        flowDumper   // nil when the platform has no flow source
+	proxyTail *proxyTailer // nil unless --traefik-access-log is set
 
 	prevLink map[wgtypes.Key]linkCounters
 	prevFlow map[flowKey]flowCounters
@@ -203,6 +204,10 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 
 			if t.ct != nil {
 				t.ct.Close()
+			}
+
+			if t.proxyTail != nil {
+				t.proxyTail.Close()
 			}
 
 			return
@@ -409,7 +414,12 @@ func counterDelta(cur, prev uint64, known bool) uint64 {
 }
 
 func (t *telemetryReporter) send() {
-	if len(t.pendingCounters) == 0 && len(t.pendingFlows) == 0 {
+	var proxyEvents []proto.ProxyEvent
+	if t.proxyTail != nil {
+		proxyEvents = t.proxyTail.drain(proxyDrainPerTick)
+	}
+
+	if len(t.pendingCounters) == 0 && len(t.pendingFlows) == 0 && len(proxyEvents) == 0 {
 		// Still send: an empty report is the liveness heartbeat that
 		// keeps last_seen_at fresh on the server.
 		t.post(&proto.ReportRequest{PathStates: t.currentPathStates()})
@@ -417,9 +427,10 @@ func (t *telemetryReporter) send() {
 	}
 
 	report := &proto.ReportRequest{
-		Counters:   make([]proto.PeerCounter, 0, len(t.pendingCounters)),
-		Flows:      make([]proto.FlowRecord, 0, len(t.pendingFlows)),
-		PathStates: t.currentPathStates(),
+		Counters:    make([]proto.PeerCounter, 0, len(t.pendingCounters)),
+		Flows:       make([]proto.FlowRecord, 0, len(t.pendingFlows)),
+		PathStates:  t.currentPathStates(),
+		ProxyEvents: proxyEvents,
 	}
 
 	for _, c := range t.pendingCounters {
@@ -430,6 +441,8 @@ func (t *telemetryReporter) send() {
 		report.Flows = append(report.Flows, *f)
 	}
 
+	// Proxy events are a best-effort log: if the report fails they are
+	// dropped (not re-queued), while counters/flows survive as deltas.
 	if t.post(report) {
 		t.pendingCounters = make(map[wgtypes.Key]*proto.PeerCounter)
 		t.pendingFlows = make(map[flowKey]*proto.FlowRecord)

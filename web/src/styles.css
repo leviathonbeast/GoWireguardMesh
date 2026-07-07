@@ -714,6 +714,21 @@ td.mono {
   color: var(--warn);
 }
 
+.pill.pill-ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.pill.pill-warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.pill.pill-bad {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
 .traffic {
   font-size: 13px;
   line-height: 1.5;

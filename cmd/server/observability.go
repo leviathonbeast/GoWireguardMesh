@@ -215,6 +215,12 @@ func (s *server) pruneAuditLoop(ctx context.Context, retention time.Duration) {
 			slog.Debug("pruned connection events", "count", ce, "retention", retention)
 		}
 
+		if pe, err := s.store.PruneProxyEvents(ctx, retention); err != nil {
+			slog.Error("prune proxy events failed", "error", err)
+		} else if pe > 0 {
+			slog.Debug("pruned proxy events", "count", pe, "retention", retention)
+		}
+
 		select {
 		case <-ctx.Done():
 			return

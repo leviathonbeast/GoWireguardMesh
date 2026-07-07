@@ -18,6 +18,11 @@ type ReportRequest struct {
 	// PathStates carries the agent's current path choice for each
 	// configured remote peer: direct, ws-relay, udp-relay, or probing-direct.
 	PathStates []PeerPathState `json:"path_states,omitempty"`
+
+	// ProxyEvents carries reverse-proxy access-log entries the agent
+	// tailed from the node's reverse proxy (e.g. Traefik) since the
+	// previous report. Bounded per report.
+	ProxyEvents []ProxyEvent `json:"proxy_events,omitempty"`
 }
 
 // ReportResponse doubles as the config-sync channel: every accepted
@@ -64,4 +69,20 @@ type FlowRecord struct {
 	RxBytes   int64  `json:"rx_bytes"`
 	TxPackets int64  `json:"tx_packets"`
 	RxPackets int64  `json:"rx_packets"`
+}
+
+// ProxyEvent is one reverse-proxy access-log entry ingested from the
+// reporting node's reverse proxy (e.g. Traefik). Values are as the proxy
+// logged them; the mesh only stores and displays them.
+type ProxyEvent struct {
+	At         string `json:"at"`     // RFC3339
+	Method     string `json:"method"` // GET/POST/...
+	Host       string `json:"host"`   // request host
+	Path       string `json:"path"`   // request path
+	Status     int    `json:"status"` // HTTP status code
+	DurationMS int64  `json:"duration_ms"`
+	ReqBytes   int64  `json:"req_bytes"`
+	RespBytes  int64  `json:"resp_bytes"`
+	ClientIP   string `json:"client_ip"`
+	Service    string `json:"service,omitempty"` // backend/router name
 }

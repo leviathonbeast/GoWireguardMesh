@@ -40,23 +40,24 @@ var (
 )
 
 var (
-	addrFlag           = flag.String("addr", "100.64.0.1/16", "overlay address (CIDR)")
-	addr6Flag          = flag.String("addr6", "", "optional IPv6 overlay address (CIDR)")
-	peerKeyFlag        = flag.String("peer-key", "", "peer public key (base64)")
-	peerEndpointFlag   = flag.String("peer-endpoint", "", "peer endpoint host:port (optional)")
-	peerAddrFlag       = flag.String("peer-addr", "", "peer overlay address, e.g. 100.64.0.2/32")
-	peerAddr6Flag      = flag.String("peer-addr6", "", "optional peer IPv6 overlay address, e.g. fd00:100:64::2/128")
-	peerPSKFlag        = flag.String("peer-psk", "", "preshared key (base64, optional)")
-	serverFlag         = flag.String("server", "", "control plane URL (e.g. https://host:8080); enables enrollment mode")
-	setupKeyFlag       = flag.String("setup-key", "", "setup key for enrollment (required with --server)")
-	hostnameFlag       = flag.String("hostname", os.Getenv("WGMESH_HOSTNAME"), "name to show in the control plane (defaults to OS hostname; can also be set with WGMESH_HOSTNAME)")
-	serverCAFlag       = flag.String("server-ca", "", "PEM certificate to trust for the control plane (pin its self-signed cert.pem)")
-	reportIntervalFlag = flag.Duration("report-interval", 30*time.Second, "telemetry reporting interval")
-	stunServerFlag     = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables)")
-	relayTransportFlag = flag.String("relay-transport", "websocket", "relay fallback transport: \"websocket\" (rides the control-plane port, needs no extra firewall holes) or \"udp\" (faster, needs the relay port range reachable)")
-	manageFirewallFlag = flag.Bool("manage-firewall", true, "open the WireGuard listen port on the host firewall (removed again on shutdown)")
-	keyFileFlag        = flag.String("key-file", "wgkey.key", "path to private key file")
-	logLevelFlag       = flag.String("log-level", "info", "minimum log level: debug, info, warn, or error")
+	addrFlag             = flag.String("addr", "100.64.0.1/16", "overlay address (CIDR)")
+	addr6Flag            = flag.String("addr6", "", "optional IPv6 overlay address (CIDR)")
+	peerKeyFlag          = flag.String("peer-key", "", "peer public key (base64)")
+	peerEndpointFlag     = flag.String("peer-endpoint", "", "peer endpoint host:port (optional)")
+	peerAddrFlag         = flag.String("peer-addr", "", "peer overlay address, e.g. 100.64.0.2/32")
+	peerAddr6Flag        = flag.String("peer-addr6", "", "optional peer IPv6 overlay address, e.g. fd00:100:64::2/128")
+	peerPSKFlag          = flag.String("peer-psk", "", "preshared key (base64, optional)")
+	serverFlag           = flag.String("server", "", "control plane URL (e.g. https://host:8080); enables enrollment mode")
+	setupKeyFlag         = flag.String("setup-key", "", "setup key for enrollment (required with --server)")
+	hostnameFlag         = flag.String("hostname", os.Getenv("WGMESH_HOSTNAME"), "name to show in the control plane (defaults to OS hostname; can also be set with WGMESH_HOSTNAME)")
+	serverCAFlag         = flag.String("server-ca", "", "PEM certificate to trust for the control plane (pin its self-signed cert.pem)")
+	reportIntervalFlag   = flag.Duration("report-interval", 30*time.Second, "telemetry reporting interval")
+	stunServerFlag       = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables)")
+	relayTransportFlag   = flag.String("relay-transport", "websocket", "relay fallback transport: \"websocket\" (rides the control-plane port, needs no extra firewall holes) or \"udp\" (faster, needs the relay port range reachable)")
+	manageFirewallFlag   = flag.Bool("manage-firewall", true, "open the WireGuard listen port on the host firewall (removed again on shutdown)")
+	keyFileFlag          = flag.String("key-file", "wgkey.key", "path to private key file")
+	logLevelFlag         = flag.String("log-level", "info", "minimum log level: debug, info, warn, or error")
+	traefikAccessLogFlag = flag.String("traefik-access-log", "", "path to a Traefik JSON access log to ingest as Proxy Events (empty disables)")
 )
 
 // setupLogging installs the process-wide slog handler. Human status
@@ -660,6 +661,10 @@ func runWithStop(stop <-chan struct{}) error {
 		if err != nil {
 			slog.Error("telemetry init failed", "error", err)
 		} else {
+			if *traefikAccessLogFlag != "" {
+				reporter.proxyTail = newProxyTailer(*traefikAccessLogFlag)
+				fmt.Printf("[agent] ingesting Traefik access log %s\n", *traefikAccessLogFlag)
+			}
 			reporterStop = make(chan struct{})
 			go reporter.run(reporterStop)
 			fmt.Printf("[agent] telemetry reporting enabled every %s\n", *reportIntervalFlag)

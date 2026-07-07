@@ -157,7 +157,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 10
+const schemaVersion = 11
 
 var migrations = map[int]string{
 	2:  migrationV2,
@@ -169,7 +169,29 @@ var migrations = map[int]string{
 	8:  migrationV8,
 	9:  migrationV9,
 	10: migrationV10,
+	11: migrationV11,
 }
+
+// migrationV11 records reverse-proxy access-log entries (e.g. from
+// Traefik) that agents tail and ship, for the dashboard Proxy Events log.
+const migrationV11 = `
+CREATE TABLE proxy_events (
+    id          INTEGER PRIMARY KEY,
+    peer_id     INTEGER REFERENCES peers(id) ON DELETE SET NULL,
+    at          TEXT NOT NULL,
+    method      TEXT,
+    host        TEXT,
+    path        TEXT,
+    status      INTEGER,
+    duration_ms INTEGER,
+    req_bytes   INTEGER,
+    resp_bytes  INTEGER,
+    client_ip   TEXT,
+    service     TEXT
+);
+
+CREATE INDEX idx_proxy_events_at ON proxy_events(at);
+`
 
 // migrationV10 records peer-to-peer connection lifecycle events (a direct
 // connection established, a relay fallback) derived from path-state

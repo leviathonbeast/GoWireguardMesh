@@ -371,6 +371,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("POST /api/acl/{id}/delete", srv.requireAdmin(srv.handleDeleteACL))
 	mux.HandleFunc("GET /api/audit", srv.requireAdmin(srv.handleListAudit))
 	mux.HandleFunc("GET /api/connection-events", srv.requireAdmin(srv.handleListConnectionEvents))
+	mux.HandleFunc("GET /api/proxy-events", srv.requireAdmin(srv.handleListProxyEvents))
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 
 	// Every request gets security headers and a structured access-log

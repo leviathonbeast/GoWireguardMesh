@@ -141,7 +141,7 @@ function PathBadge({ state }: { state?: LinkStat["path_state"] }) {
 
 const TABS = ["overview", "machines", "traffic", "policies", "setup", "logs", "proxy", "settings"] as const;
 type Tab = (typeof TABS)[number];
-const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_PAGE_SIZE = 10;
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 
 const TAB_LABEL: Record<Tab, string> = {
@@ -431,6 +431,22 @@ function ConfirmModal({
   );
 }
 
+type ProxyEvent = {
+  id: number;
+  at: string;
+  peer_id?: number;
+  peer_hostname?: string;
+  method?: string;
+  host?: string;
+  path?: string;
+  status?: number;
+  duration_ms?: number;
+  req_bytes?: number;
+  resp_bytes?: number;
+  client_ip?: string;
+  service?: string;
+};
+
 type ConnectionEvent = {
   id: number;
   at: string;
@@ -469,6 +485,23 @@ function ConnectionEventRow({ e }: { e: ConnectionEvent }) {
       </div>
     </div>
   );
+}
+
+// StatusPill colors an HTTP status code green/neutral/amber/red.
+function StatusPill({ status }: { status?: number }) {
+  if (!status) return <span className="pill">-</span>;
+  const cls = status >= 500 ? "pill-bad" : status >= 400 ? "pill-warn" : status >= 300 ? "" : "pill-ok";
+  return <span className={`pill ${cls}`}>{status}</span>;
+}
+
+function formatDuration(ms?: number): string {
+  if (!ms) return "-";
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
+}
+
+function proxyMatches(e: ProxyEvent, q: string): boolean {
+  return textMatches(q, e.method, e.host, e.path, e.status, e.client_ip, e.peer_hostname, e.service);
 }
 
 // FlowEvent renders one observed flow as a NetBird-style traffic
@@ -643,6 +676,8 @@ export default function App() {
   const [links, setLinks] = useState<LinkStat[]>([]);
   const [flows, setFlows] = useState<Flow[]>([]);
   const [connEvents, setConnEvents] = useState<ConnectionEvent[]>([]);
+  const [proxyEvents, setProxyEvents] = useState<ProxyEvent[]>([]);
+  const [proxyFilter, setProxyFilter] = useState("");
   const [activityOpen, setActivityOpen] = useState(true);
   const [acl, setAcl] = useState<AclResponse>({ default_policy: "allow", rules: [] });
   const [audit, setAudit] = useState<AuditRow[]>([]);
@@ -693,7 +728,7 @@ export default function App() {
   const [aclPortMax, setAclPortMax] = useState("");
 
   const loadDashboard = useCallback(async (authToken: string) => {
-    const [p, k, l, f, a, au, al, n, ce] = await Promise.all([
+    const [p, k, l, f, a, au, al, n, ce, pe] = await Promise.all([
       api<Peer[]>("/api/peers", authToken),
       api<SetupKey[]>("/api/setup-keys", authToken),
       api<LinkStat[]>("/api/link-stats", authToken),
@@ -703,6 +738,7 @@ export default function App() {
       api<AccessLogRow[]>("/api/access-log?limit=1000", authToken),
       api<NetworkConfig>("/api/network", authToken),
       api<ConnectionEvent[]>("/api/connection-events?limit=1000", authToken),
+      api<ProxyEvent[]>("/api/proxy-events?limit=1000", authToken),
     ]);
     setPeers(p);
     setKeys(k);
@@ -713,6 +749,7 @@ export default function App() {
     setAccess(al);
     setNetwork(n);
     setConnEvents(ce);
+    setProxyEvents(pe);
     setNetworkCIDR((cur) => cur || n.network_cidr);
     setNetworkCIDR6((cur) => cur || n.network_cidr6);
   }, []);
@@ -727,6 +764,7 @@ export default function App() {
     setLinks([]);
     setFlows([]);
     setConnEvents([]);
+    setProxyEvents([]);
     setAudit([]);
     setAccess([]);
     setError(message ?? "");
@@ -1104,6 +1142,7 @@ export default function App() {
     flowMatches(f, trafficFilter, ipName(f.src_ip), ipName(f.dst_ip)),
   );
   const shownAudit = audit.filter((a) => auditMatches(a, auditFilter));
+  const shownProxy = proxyEvents.filter((e) => proxyMatches(e, proxyFilter));
   const shownAccess = access.filter((a) => accessMatches(a, accessFilter));
   const shownRules = acl.rules.filter((r) => aclMatches(r, aclFilter));
   const shownKeys = keys.filter((k) => setupKeyMatches(k, setupFilter));
@@ -1430,42 +1469,6 @@ export default function App() {
               </Paginated>
             )}
           </div>
-		          <h2>Liveness</h2>
-		          <div className="panel tablewrap">
-		            <Paginated items={shownActivePeers} resetKey={trafficFilter}>
-		              {(pagePeers, pager) => (
-	                <>
-	                  <table>
-	                    <thead>
-	                      <tr>
-	                        <th>peer</th>
-	                        <th>last seen</th>
-	                      </tr>
-	                    </thead>
-	                    <tbody>
-		                      {shownActivePeers.length === 0 && (
-		                        <tr>
-		                          <td colSpan={2} className="muted">
-		                            {activePeers.length ? "no matching peers" : "no active peers"}
-		                          </td>
-		                        </tr>
-	                      )}
-	                      {pagePeers.map((p) => (
-	                        <tr key={p.id}>
-	                          <td>{peerLabel(p.hostname, p.assigned_ip)}</td>
-	                          <td className="muted">
-	                            {formatTime(p.last_seen_at) || "never"}
-	                          </td>
-	                        </tr>
-	                      ))}
-	                    </tbody>
-	                  </table>
-	                  {pager}
-	                </>
-	              )}
-	            </Paginated>
-	          </div>
-
 		          <h2>Links</h2>
 		          <div className="panel tablewrap">
 		            <Paginated items={shownLinks} resetKey={trafficFilter}>
@@ -1553,13 +1556,70 @@ export default function App() {
         )}
 
         {tab === "proxy" && (
-          <div className="panel">
-            <h2>Proxy Events</h2>
-            <p className="muted">
-              Reverse-proxy access logs — method, host, status, latency, bytes, and client —
-              will appear here once Traefik access-log ingestion is wired up (coming next).
-            </p>
-          </div>
+          <>
+            <div className="row page-tools">
+              <SearchBox
+                value={proxyFilter}
+                onChange={setProxyFilter}
+                placeholder="Search proxy events by host, path, method, status, client…"
+                total={proxyEvents.length}
+                shown={shownProxy.length}
+              />
+            </div>
+            <div className="panel tablewrap">
+              <Paginated items={shownProxy} resetKey={proxyFilter}>
+                {(page, pager) => (
+                  <>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>time</th>
+                          <th>method</th>
+                          <th>request</th>
+                          <th>status</th>
+                          <th>duration</th>
+                          <th>size</th>
+                          <th>client</th>
+                          <th>service</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {shownProxy.length === 0 && (
+                          <tr>
+                            <td colSpan={8} className="muted">
+                              {proxyEvents.length
+                                ? "no matching proxy events"
+                                : "no proxy events — enable Traefik access-log ingestion on an agent (--traefik-access-log)"}
+                            </td>
+                          </tr>
+                        )}
+                        {page.map((e) => (
+                          <tr key={e.id}>
+                            <td className="muted">{formatTime(e.at)}</td>
+                            <td>
+                              <span className="pill">{e.method || "-"}</span>
+                            </td>
+                            <td>
+                              {e.host}
+                              <span className="muted">{e.path}</span>
+                            </td>
+                            <td>
+                              <StatusPill status={e.status} />
+                            </td>
+                            <td className="muted">{formatDuration(e.duration_ms)}</td>
+                            <td className="muted">{humanBytes((e.req_bytes || 0) + (e.resp_bytes || 0))}</td>
+                            <td className="muted">{e.client_ip}</td>
+                            <td className="muted">{e.service}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {pager}
+                  </>
+                )}
+              </Paginated>
+            </div>
+          </>
         )}
 
         {tab === "logs" && (

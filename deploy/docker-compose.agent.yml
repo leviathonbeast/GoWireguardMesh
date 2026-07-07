@@ -43,8 +43,12 @@ services:
       --key-file /data/wgkey.key
       --relay-transport ${WGMESH_RELAY_TRANSPORT:-websocket}
       --manage-firewall=false
+      # To surface Traefik access logs as Proxy Events, add the flag below
+      # and mount Traefik's JSON access log into this sidecar (see volumes):
+      #   --traefik-access-log /logs/access.log
     volumes:
       - myservice-wgmesh:/data
+      # - traefik-logs:/logs:ro   # the volume Traefik writes its JSON access log to
     depends_on:
       - myservice
 

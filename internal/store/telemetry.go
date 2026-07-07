@@ -185,6 +185,32 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 		}
 	}
 
+	if len(report.ProxyEvents) > 0 {
+		stmt, err := tx.PrepareContext(ctx,
+			`INSERT INTO proxy_events
+			   (peer_id, at, method, host, path, status, duration_ms, req_bytes, resp_bytes, client_ip, service)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+		if err != nil {
+			return fmt.Errorf("prepare proxy event insert: %w", err)
+		}
+		defer stmt.Close()
+
+		for _, e := range report.ProxyEvents {
+			at := e.At
+			if at == "" {
+				at = now
+			}
+
+			if _, err := stmt.ExecContext(ctx,
+				peerID, at, nullable(e.Method), nullable(e.Host), nullable(e.Path),
+				e.Status, e.DurationMS, e.ReqBytes, e.RespBytes, nullable(e.ClientIP), nullable(e.Service),
+			); err != nil {
+				return fmt.Errorf("insert proxy event: %w", err)
+			}
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit report: %w", err)
 	}
