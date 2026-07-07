@@ -396,6 +396,10 @@ button.ghost {
   overflow-x: auto;
 }
 
+.tablewrap-fit {
+  overflow-x: hidden;
+}
+
 table {
   border-collapse: collapse;
   width: 100%;
@@ -418,6 +422,56 @@ th {
   color: var(--muted);
   font-weight: normal;
   font-size: 12px;
+}
+
+.proxy-table {
+  table-layout: fixed;
+}
+
+.proxy-table .col-time {
+  width: 190px;
+}
+
+.proxy-table .col-method {
+  width: 64px;
+}
+
+.proxy-table .col-status {
+  width: 74px;
+}
+
+.proxy-table .col-duration {
+  width: 92px;
+}
+
+.proxy-table .col-size {
+  width: 82px;
+}
+
+.proxy-table .col-client {
+  width: 140px;
+}
+
+.proxy-table .col-service {
+  width: 140px;
+}
+
+.proxy-table th,
+.proxy-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.request-cell {
+  min-width: 0;
+}
+
+.request-url {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Keys and flows render in full — the .tablewrap scrolls horizontally

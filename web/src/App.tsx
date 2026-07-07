@@ -521,6 +521,10 @@ function formatDuration(ms?: number): string {
   return `${(ms / 1000).toFixed(2)} s`;
 }
 
+function proxyRequest(e: ProxyEvent): string {
+  return `${e.host || ""}${e.path || ""}` || "-";
+}
+
 function proxyMatches(e: ProxyEvent, q: string): boolean {
   return textMatches(q, e.method, e.host, e.path, e.status, e.client_ip, e.peer_hostname, e.service);
 }
@@ -1587,11 +1591,21 @@ export default function App() {
                 shown={shownProxy.length}
               />
             </div>
-            <div className="panel tablewrap">
+            <div className="panel tablewrap tablewrap-fit">
               <Paginated items={shownProxy} resetKey={proxyFilter}>
                 {(page, pager) => (
                   <>
-                    <table>
+                    <table className="proxy-table">
+                      <colgroup>
+                        <col className="col-time" />
+                        <col className="col-method" />
+                        <col className="col-request" />
+                        <col className="col-status" />
+                        <col className="col-duration" />
+                        <col className="col-size" />
+                        <col className="col-client" />
+                        <col className="col-service" />
+                      </colgroup>
                       <thead>
                         <tr>
                           <th>time</th>
@@ -1620,9 +1634,11 @@ export default function App() {
                             <td>
                               <span className="pill">{e.method || "-"}</span>
                             </td>
-                            <td>
-                              {e.host}
-                              <span className="muted">{e.path}</span>
+                            <td className="request-cell" title={proxyRequest(e)}>
+                              <span className="request-url">
+                                {e.host}
+                                <span className="muted">{e.path}</span>
+                              </span>
                             </td>
                             <td>
                               <StatusPill status={e.status} />
