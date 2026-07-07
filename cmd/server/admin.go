@@ -107,6 +107,14 @@ type peerAddressRequest struct {
 	AssignedIP6 string `json:"assigned_ip6,omitempty"`
 }
 
+type dnsConfigRequest struct {
+	Enabled       bool     `json:"enabled"`
+	MagicDNS      bool     `json:"magic_dns"`
+	Domain        string   `json:"domain,omitempty"`
+	Nameservers   []string `json:"nameservers,omitempty"`
+	SearchDomains []string `json:"search_domains,omitempty"`
+}
+
 type peerPingJSON struct {
 	PeerID         int64  `json:"peer_id"`
 	Status         string `json:"status"`
@@ -223,6 +231,46 @@ func (s *server) handleListSetupKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.currentNetworkConfig())
+}
+
+func (s *server) handleGetDNS(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.store.CurrentDNSConfig(r.Context())
+	if err != nil {
+		slog.Error("get dns config failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *server) handleUpdateDNS(w http.ResponseWriter, r *http.Request) {
+	var req dnsConfigRequest
+	if !decodeJSON(w, r, 64<<10, &req) {
+		return
+	}
+
+	cfg, err := s.store.UpdateDNSConfig(r.Context(), store.DNSConfig{
+		Enabled:       req.Enabled,
+		MagicDNS:      req.MagicDNS,
+		Domain:        req.Domain,
+		Nameservers:   req.Nameservers,
+		SearchDomains: req.SearchDomains,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	slog.Info("admin updated dns settings", "enabled", cfg.Enabled, "domain", cfg.Domain, "nameservers", strings.Join(cfg.Nameservers, ","))
+	s.audit(r, "dns_update", http.StatusOK,
+		fmt.Sprintf("enabled=%t nameservers=%s domain=%s search=%s",
+			cfg.Enabled,
+			strings.Join(cfg.Nameservers, ","),
+			cfg.Domain,
+			strings.Join(cfg.SearchDomains, ","),
+		))
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 func (s *server) handlePreviewNetworkMigration(w http.ResponseWriter, r *http.Request) {

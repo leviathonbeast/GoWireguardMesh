@@ -169,6 +169,11 @@ func runServe(args []string) error {
 	relayControl := fs.String("relay-control", "http://127.0.0.1:8081", "standalone relay: control API URL")
 	relaySecretFile := fs.String("relay-secret-file", "relay-secret", "standalone relay: path to the control shared secret")
 	defaultPolicy := fs.String("default-policy", "allow", "ACL default: \"allow\" (open mesh) or \"deny\" (only rule-connected pairs see each other)")
+	dnsEnabled := fs.Bool("dns-enabled", false, "push DNS settings to agents")
+	dnsNameservers := fs.String("dns-nameservers", "", "comma-separated DNS server IPs to push to agents (for example your CoreDNS overlay IP)")
+	dnsDomain := fs.String("dns-domain", "vpn", "mesh DNS domain/search suffix to push to agents")
+	dnsSearchDomains := fs.String("dns-search-domains", "", "comma-separated DNS search domains to push to agents (default: --dns-domain when DNS is enabled)")
+	dnsMagic := fs.Bool("dns-magic", true, "enable peer-name style DNS search behavior for the mesh domain")
 	manageFirewall := fs.Bool("manage-firewall", true, "open the API port on the host firewall (removed again on shutdown)")
 	tokenTTL := fs.Duration("token-ttl", 0, "peer auth token lifetime (0 = never expires); agents re-enroll to refresh")
 	auditRetention := fs.Duration("audit-retention", 90*24*time.Hour, "how long to keep audit-log rows")
@@ -230,6 +235,21 @@ func runServe(args []string) error {
 	}
 
 	st.TokenTTL = *tokenTTL
+
+	searchDomains := splitCSV(*dnsSearchDomains)
+	if *dnsEnabled && len(searchDomains) == 0 && strings.TrimSpace(*dnsDomain) != "" {
+		searchDomains = []string{*dnsDomain}
+	}
+	dnsCfg, err := st.LoadOrInitDNSConfig(context.Background(), store.DNSConfig{
+		Enabled:       *dnsEnabled,
+		MagicDNS:      *dnsMagic,
+		Domain:        *dnsDomain,
+		Nameservers:   splitCSV(*dnsNameservers),
+		SearchDomains: searchDomains,
+	})
+	if err != nil {
+		return err
+	}
 
 	networkPSK, err := psk.LoadOrGenerate(*pskFile)
 	if err != nil {
@@ -364,6 +384,8 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /api/network", srv.requireAdmin(srv.handleGetNetwork))
 	mux.HandleFunc("POST /api/network/preview", srv.requireAdmin(srv.handlePreviewNetworkMigration))
 	mux.HandleFunc("POST /api/network/apply", srv.requireAdmin(srv.handleApplyNetworkMigration))
+	mux.HandleFunc("GET /api/dns", srv.requireAdmin(srv.handleGetDNS))
+	mux.HandleFunc("POST /api/dns", srv.requireAdmin(srv.handleUpdateDNS))
 	mux.HandleFunc("GET /api/acl", srv.requireAdmin(srv.handleListACL))
 	mux.HandleFunc("GET /api/acl/export", srv.requireAdmin(srv.handleExportACL))
 	mux.HandleFunc("POST /api/acl/import", srv.requireAdmin(srv.handleImportACL))
@@ -387,6 +409,9 @@ func runServe(args []string) error {
 
 	if srv.relay == nil {
 		slog.Info("relay fallback disabled; direct UDP connectivity between peers is required")
+	}
+	if dnsCfg.Enabled {
+		slog.Info("dns settings enabled", "nameservers", strings.Join(dnsCfg.Nameservers, ","), "domain", dnsCfg.Domain, "search_domains", strings.Join(dnsCfg.SearchDomains, ","))
 	}
 
 	httpSrv := newHTTPServer(*listen, handler)
@@ -450,6 +475,17 @@ func parseNetwork6(raw string) (netip.Prefix, error) {
 	}
 
 	return prefix.Masked(), nil
+}
+
+func splitCSV(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (s *server) network6LogSuffix() string {
@@ -724,6 +760,10 @@ func (s *server) buildResponse(ctx context.Context, res *store.EnrollResult) (pr
 	}
 
 	cfg := s.currentNetworkConfig()
+	dnsCfg, err := s.store.CurrentDNSConfig(ctx)
+	if err != nil {
+		return proto.EnrollResponse{}, err
+	}
 	acl, err := s.buildACLPolicy(ctx)
 	if err != nil {
 		return proto.EnrollResponse{}, err
@@ -735,10 +775,21 @@ func (s *server) buildResponse(ctx context.Context, res *store.EnrollResult) (pr
 		AssignedIP6:  res.Peer.AssignedIP6,
 		NetworkCIDR:  cfg.NetworkCIDR,
 		NetworkCIDR6: cfg.NetworkCIDR6,
+		DNS:          dnsConfigProto(dnsCfg),
 		Peers:        peers,
 		ACL:          acl,
 		AuthToken:    res.AuthToken,
 	}, nil
+}
+
+func dnsConfigProto(cfg store.DNSConfig) proto.DNSConfig {
+	return proto.DNSConfig{
+		Enabled:       cfg.Enabled,
+		MagicDNS:      cfg.MagicDNS,
+		Domain:        cfg.Domain,
+		Nameservers:   append([]string(nil), cfg.Nameservers...),
+		SearchDomains: append([]string(nil), cfg.SearchDomains...),
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

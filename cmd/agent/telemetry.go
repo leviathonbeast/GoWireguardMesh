@@ -69,16 +69,18 @@ type directProbe struct {
 // control plane. Deltas survive failed reports: pending data is only
 // cleared after the server accepts it.
 type telemetryReporter struct {
-	wg        wgBackend
-	client    *http.Client
-	serverURL string
-	authToken string
-	iface     string
-	selfAddr  string
-	selfAddr6 string
-	network   netip.Prefix
-	network6  netip.Prefix
-	interval  time.Duration
+	wg         wgBackend
+	client     *http.Client
+	serverURL  string
+	authToken  string
+	iface      string
+	selfAddr   string
+	selfAddr6  string
+	network    netip.Prefix
+	network6   netip.Prefix
+	lastDNS    string
+	dnsApplied bool
+	interval   time.Duration
 
 	ct        flowDumper   // nil when the platform has no flow source
 	proxyTail *proxyTailer // nil unless --traefik-access-log is set
@@ -558,6 +560,9 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 		slog.Warn("telemetry sync failed", "error", err)
 		return
 	}
+	if err := t.applyDNS(sync.DNS); err != nil {
+		slog.Warn("dns sync failed", "error", err)
+	}
 
 	desired := make([]wgtypes.PeerConfig, 0, len(sync.Peers))
 
@@ -580,6 +585,35 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 	if err := applyOverlayACL(t.iface, sync.ACL); err != nil {
 		slog.Warn("overlay acl sync failed", "error", err)
 	}
+}
+
+func (t *telemetryReporter) applyDNS(cfg proto.DNSConfig) error {
+	if !cfg.Enabled && !t.dnsApplied {
+		return nil
+	}
+
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	digest := string(raw)
+	if digest == t.lastDNS {
+		return nil
+	}
+
+	if err := applyDNSConfig(t.iface, cfg); err != nil {
+		return err
+	}
+
+	t.lastDNS = digest
+	t.dnsApplied = cfg.Enabled
+	if cfg.Enabled {
+		slog.Info("applied dns settings", "nameservers", cfg.Nameservers, "search_domains", cfg.SearchDomains)
+	} else {
+		slog.Info("cleared dns settings")
+	}
+
+	return nil
 }
 
 func (t *telemetryReporter) applySelfAssignment(sync proto.ReportResponse) error {

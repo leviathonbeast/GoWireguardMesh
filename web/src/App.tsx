@@ -7,6 +7,7 @@ import type {
   AclRule,
   AclResponse,
   AuditRow,
+  DNSConfig,
   Flow,
   LinkStat,
   NetworkConfig,
@@ -51,6 +52,13 @@ function humanBytes(n: number): string {
     u++;
   } while (v >= 1024 && u < units.length - 1);
   return `${v.toFixed(1)} ${units[u]}`;
+}
+
+function parseListInput(raw: string): string[] {
+  return raw
+    .split(/[\n,]+/)
+    .map((v) => v.trim())
+    .filter(Boolean);
 }
 
 function peerLabel(hostname: string | undefined, ip: string): string {
@@ -577,6 +585,7 @@ const ADMIN_EVENTS = new Set([
   "acl_create",
   "acl_delete",
   "acl_import",
+  "dns_update",
   "peer_address_update",
   "peer_remove",
   "revoke",
@@ -596,6 +605,7 @@ const EVENT_PHRASE: Record<string, string> = {
   acl_create: "added an ACL rule",
   acl_delete: "deleted an ACL rule",
   acl_import: "imported ACL rules",
+  dns_update: "changed DNS settings",
   network_migrate: "changed the overlay network",
   peer_address_update: "changed a peer address",
   peer_remove: "removed a peer",
@@ -711,10 +721,23 @@ export default function App() {
     network_cidr: "",
     network_cidr6: "",
   });
+  const [dns, setDNS] = useState<DNSConfig>({
+    enabled: false,
+    magic_dns: true,
+    domain: "vpn",
+    nameservers: [],
+    search_domains: ["vpn"],
+  });
   const [networkCIDR, setNetworkCIDR] = useState("");
   const [networkCIDR6, setNetworkCIDR6] = useState("");
   const [networkPlan, setNetworkPlan] = useState<NetworkMigrationPlan | null>(null);
   const [networkConfirm, setNetworkConfirm] = useState("");
+  const [dnsEnabled, setDNSEnabled] = useState(false);
+  const [dnsMagic, setDNSMagic] = useState(true);
+  const [dnsDomain, setDNSDomain] = useState("vpn");
+  const [dnsNameservers, setDNSNameservers] = useState("");
+  const [dnsSearchDomains, setDNSSearchDomains] = useState("vpn");
+  const [dnsDirty, setDNSDirty] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [machineFilter, setMachineFilter] = useState("");
   const [selectedPeerID, setSelectedPeerID] = useState<number | null>(null);
@@ -754,7 +777,7 @@ export default function App() {
   const [aclPortMax, setAclPortMax] = useState("");
 
   const loadDashboard = useCallback(async (authToken: string) => {
-    const [p, k, l, f, a, au, al, n, ce, pe] = await Promise.all([
+    const [p, k, l, f, a, au, al, n, d, ce, pe] = await Promise.all([
       api<Peer[]>("/api/peers", authToken),
       api<SetupKey[]>("/api/setup-keys", authToken),
       api<LinkStat[]>("/api/link-stats", authToken),
@@ -763,6 +786,7 @@ export default function App() {
       api<AuditRow[]>("/api/audit?limit=1000", authToken),
       api<AccessLogRow[]>("/api/access-log?limit=1000", authToken),
       api<NetworkConfig>("/api/network", authToken),
+      api<DNSConfig>("/api/dns", authToken),
       api<ConnectionEvent[]>("/api/connection-events?limit=1000", authToken),
       api<ProxyEvent[]>("/api/proxy-events?limit=1000", authToken),
     ]);
@@ -774,11 +798,19 @@ export default function App() {
     setAudit(au);
     setAccess(al);
     setNetwork(n);
+    setDNS(d);
     setConnEvents(ce);
     setProxyEvents(pe);
     setNetworkCIDR((cur) => cur || n.network_cidr);
     setNetworkCIDR6((cur) => cur || n.network_cidr6);
-  }, []);
+    if (!dnsDirty) {
+      setDNSEnabled(d.enabled);
+      setDNSMagic(d.magic_dns);
+      setDNSDomain(d.domain || "vpn");
+      setDNSNameservers((d.nameservers || []).join("\n"));
+      setDNSSearchDomains((d.search_domains || []).join("\n"));
+    }
+  }, [dnsDirty]);
 
   const lockAdminUI = useCallback((message?: string) => {
     sessionStorage.removeItem("wgmesh-token");
@@ -793,6 +825,8 @@ export default function App() {
     setProxyEvents([]);
     setAudit([]);
     setAccess([]);
+    setDNS({ enabled: false, magic_dns: true, domain: "vpn", nameservers: [], search_domains: ["vpn"] });
+    setDNSDirty(false);
     setError(message ?? "");
   }, []);
 
@@ -1156,6 +1190,33 @@ export default function App() {
       setNetworkConfirm("");
       await refresh();
       showToast("Overlay network updated");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const saveDNSSettings = async () => {
+    setError("");
+    try {
+      const next = await api<DNSConfig>("/api/dns", token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: dnsEnabled,
+          magic_dns: dnsMagic,
+          domain: dnsDomain.trim(),
+          nameservers: parseListInput(dnsNameservers),
+          search_domains: parseListInput(dnsSearchDomains),
+        }),
+      });
+      setDNS(next);
+      setDNSEnabled(next.enabled);
+      setDNSMagic(next.magic_dns);
+      setDNSDomain(next.domain || "vpn");
+      setDNSNameservers((next.nameservers || []).join("\n"));
+      setDNSSearchDomains((next.search_domains || []).join("\n"));
+      setDNSDirty(false);
+      showToast("DNS settings updated");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -2067,6 +2128,116 @@ export default function App() {
                 <div className="form-actions">
                   <button className="primary" onClick={() => void previewNetworkMigration()}>
                     preview changes
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div className="section-title">
+            <h2>DNS</h2>
+            <p className="page-sub">
+              Push CoreDNS resolver settings to peers for names such as jellyfin.vpn.
+            </p>
+          </div>
+
+          <section className="settings-layout">
+            <div className="panel stack settings-card">
+              <div className="section-head">
+                <h2>Current DNS</h2>
+                <span className={dns.enabled ? "badge ok" : "badge warn"}>
+                  {dns.enabled ? "enabled" : "disabled"}
+                </span>
+              </div>
+              <div className="detail-list">
+                <div>
+                  <span>Domain</span>
+                  <strong>{dns.domain || "vpn"}</strong>
+                </div>
+                <div>
+                  <span>Nameservers</span>
+                  <strong className="breakable">
+                    {(dns.nameservers || []).join(", ") || "not configured"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Search domains</span>
+                  <strong>{(dns.search_domains || []).join(", ") || "none"}</strong>
+                </div>
+                <div>
+                  <span>Peer-name DNS</span>
+                  <strong>{dns.magic_dns ? "on" : "off"}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="panel stack settings-card">
+              <div className="section-head">
+                <h2>DNS settings</h2>
+              </div>
+              <div className="notice">
+                Point nameservers at your CoreDNS container or its overlay IP.
+                Agents apply these settings on enroll and on their next report sync.
+              </div>
+              <div className="form-grid dns-form">
+                <label className="toggle setting-toggle">
+                  <input
+                    type="checkbox"
+                    checked={dnsEnabled}
+                    onChange={(e) => {
+                      setDNSEnabled(e.target.checked);
+                      setDNSDirty(true);
+                    }}
+                  />
+                  enable DNS push
+                </label>
+                <label className="toggle setting-toggle">
+                  <input
+                    type="checkbox"
+                    checked={dnsMagic}
+                    onChange={(e) => {
+                      setDNSMagic(e.target.checked);
+                      setDNSDirty(true);
+                    }}
+                  />
+                  peer-name DNS
+                </label>
+                <label>
+                  <span>Domain</span>
+                  <input
+                    value={dnsDomain}
+                    placeholder="vpn"
+                    onChange={(e) => {
+                      setDNSDomain(e.target.value);
+                      setDNSDirty(true);
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>Nameservers</span>
+                  <textarea
+                    value={dnsNameservers}
+                    placeholder={"100.78.0.1\nfd32:d2ad:be4f::1"}
+                    onChange={(e) => {
+                      setDNSNameservers(e.target.value);
+                      setDNSDirty(true);
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>Search domains</span>
+                  <textarea
+                    value={dnsSearchDomains}
+                    placeholder="vpn"
+                    onChange={(e) => {
+                      setDNSSearchDomains(e.target.value);
+                      setDNSDirty(true);
+                    }}
+                  />
+                </label>
+                <div className="form-actions">
+                  <button className="primary" onClick={() => void saveDNSSettings()}>
+                    save DNS settings
                   </button>
                 </div>
               </div>

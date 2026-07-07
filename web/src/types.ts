@@ -125,6 +125,14 @@ export interface NetworkConfig {
   network_cidr6: string;
 }
 
+export interface DNSConfig {
+  enabled: boolean;
+  magic_dns: boolean;
+  domain?: string;
+  nameservers?: string[];
+  search_domains?: string[];
+}
+
 export interface NetworkPeerChange {
   id: number;
   hostname?: string;

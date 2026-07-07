@@ -44,14 +44,16 @@ see [SECURITY.md](SECURITY.md).
   per-source rate limiting, optional peer-token expiry, a durable audit log
   and a redacted JSON access log, and automatic host-firewall management
   with startup reconciliation. See [SECURITY.md](SECURITY.md).
+- **DNS push** — NetBird/Tailscale-style DNS settings distribution: point
+  peers at your CoreDNS resolver, push `.vpn` search domains, and let agents
+  adopt changes on their next sync.
 - **Web UI** — React + TypeScript, embedded in the server binary: peers,
   a NetBird-style traffic/activity feed with search, ACL and setup-key
   management, and the audit log. Bearer-token protected.
 - **Platforms** — Linux (kernel WireGuard). The agent also cross-compiles
   for Windows (embedded userspace wireguard-go + Wintun), experimental.
 
-Not built yet (roadmap): DNS, WireGuard-key signature auth,
-PSK-master rotation.
+Not built yet (roadmap): WireGuard-key signature auth, PSK-master rotation.
 
 ## Layout
 
@@ -136,6 +138,12 @@ Flags for `server`:
 | `--tls-hosts` | `localhost,127.0.0.1` | SANs for a generated certificate |
 | `--admin-token-file` | `admin-token` | admin bearer token file |
 | `--default-policy` | `allow` | ACL default: `allow` (open mesh) or `deny` (rule-connected pairs only) |
+| **DNS** | | |
+| `--dns-enabled` | off | push DNS settings to enrolled agents |
+| `--dns-nameservers` | — | comma-separated DNS server IPs to push, e.g. your CoreDNS overlay IP |
+| `--dns-domain` | `vpn` | mesh DNS domain/search suffix |
+| `--dns-search-domains` | — | comma-separated search domains; defaults to `--dns-domain` when DNS is enabled |
+| `--dns-magic` | on | push peer-name DNS/search behavior for the mesh domain |
 | `--trust-proxy` | off | trust `X-Forwarded-For` for client IPs — uses the **rightmost** entry, i.e. the hop your (single) trusted proxy appended; only set behind a proxy |
 | `--manage-firewall` | on | open the API port on the host firewall; reconciles + removes on exit |
 | **Relay** | | |
@@ -438,12 +446,32 @@ The template runs the server with `--no-tls --trust-proxy`,
 existing WireGuard range, set `WGMESH_NETWORK` and `WGMESH_NETWORK6` in the env
 file before first start.
 
+### DNS with CoreDNS
+
+wgmesh does not need to replace an existing CoreDNS container. Configure your
+CoreDNS `vpn` zone as the authority for names such as `jellyfin.vpn`, then push
+that resolver to agents from the web UI under **Settings → DNS**.
+
+For initial server defaults you can also start the server with:
+
+```bash
+./bin/server \
+  --dns-enabled \
+  --dns-nameservers 100.78.0.1 \
+  --dns-domain vpn
+```
+
+Agents apply DNS settings during enrollment and on the next report sync. Linux
+agents use `resolvectl`/systemd-resolved when available; Windows agents use
+native DNS client settings.
+
 ### Honest production status
 
 Suitable today: trusted-LAN, public-endpoint, and VPS-fronted meshes at
 homelab scale. See [SECURITY.md](SECURITY.md) for the hardening checklist
-before exposing the control plane. Known limits: no DNS; single-writer
-SQLite (fine for hundreds of peers, not thousands); bearer-token (not
+before exposing the control plane. Known limits: DNS push depends on the host
+resolver (`resolvectl` on Linux) and an authoritative DNS server such as
+CoreDNS; single-writer SQLite (fine for hundreds of peers, not thousands); bearer-token (not
 key-signature) peer auth; no PSK-master rotation; relay is store-and-forward
 with no bandwidth accounting; symmetric-to-symmetric NAT may still relay; the
 Windows agent is unvalidated on real hardware.

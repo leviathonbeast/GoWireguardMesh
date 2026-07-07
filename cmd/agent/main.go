@@ -463,6 +463,7 @@ func runWithStop(stop <-chan struct{}) error {
 		enrolledPeers  []wgtypes.PeerConfig
 		authToken      string
 		initialACL     *proto.ACLPolicy
+		initialDNS     proto.DNSConfig
 		networkPrefix  netip.Prefix
 		networkPrefix6 netip.Prefix
 	)
@@ -509,6 +510,7 @@ func runWithStop(stop <-chan struct{}) error {
 
 		authToken = resp.AuthToken
 		initialACL = resp.ACL
+		initialDNS = resp.DNS
 
 		networkPrefix, err = netip.ParsePrefix(resp.NetworkCIDR)
 		if err != nil {
@@ -579,6 +581,11 @@ func runWithStop(stop <-chan struct{}) error {
 
 	if err := bringInterfaceUp(ifaceName); err != nil {
 		return err
+	}
+	if initialDNS.Enabled {
+		if err := applyDNSConfig(ifaceName, initialDNS); err != nil {
+			slog.Warn("initial dns sync failed", "error", err)
+		}
 	}
 
 	// One WireGuard backend serves both the initial configuration and

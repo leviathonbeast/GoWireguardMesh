@@ -355,6 +355,7 @@ h2 {
 }
 
 input,
+textarea,
 select,
 button {
   font: inherit;
@@ -366,6 +367,16 @@ button {
 }
 
 input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+textarea {
+  min-height: 74px;
+  resize: vertical;
+}
+
+textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -661,6 +672,21 @@ td.mono {
   margin-bottom: 0;
 }
 
+.dns-form {
+  grid-template-columns: repeat(2, minmax(160px, 0.5fr));
+  margin-bottom: 0;
+}
+
+.dns-form label:nth-child(n + 3),
+.dns-form .form-actions {
+  grid-column: 1 / -1;
+}
+
+.setting-toggle {
+  align-self: center;
+  padding: 8px 0;
+}
+
 .notice {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -700,6 +726,7 @@ td.mono {
 }
 
 .form-grid input,
+.form-grid textarea,
 .confirm-box input {
   width: 100%;
 }
@@ -957,7 +984,8 @@ label {
   .settings-layout,
   .acl-form,
   .key-form,
-  .network-form {
+  .network-form,
+  .dns-form {
     grid-template-columns: 1fr;
   }
 

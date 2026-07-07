@@ -33,6 +33,7 @@ type ReportResponse struct {
 	AssignedIP6  string               `json:"assigned_ip6,omitempty"`
 	NetworkCIDR  string               `json:"network_cidr,omitempty"`
 	NetworkCIDR6 string               `json:"network_cidr6,omitempty"`
+	DNS          DNSConfig            `json:"dns,omitempty"`
 	Peers        []PeerConfigResponse `json:"peers"`
 	ACL          *ACLPolicy           `json:"acl,omitempty"`
 }

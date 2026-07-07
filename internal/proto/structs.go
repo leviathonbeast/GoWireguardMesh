@@ -19,6 +19,7 @@ type EnrollResponse struct {
 	AssignedIP6  string               `json:"assigned_ip6,omitempty"`
 	NetworkCIDR  string               `json:"network_cidr"`
 	NetworkCIDR6 string               `json:"network_cidr6,omitempty"`
+	DNS          DNSConfig            `json:"dns,omitempty"`
 	Peers        []PeerConfigResponse `json:"peers"`
 	ACL          *ACLPolicy           `json:"acl,omitempty"`
 
@@ -26,6 +27,14 @@ type EnrollResponse struct {
 	// reports). Rotated on every enrollment, including idempotent
 	// re-enrolls; only its hash is stored server-side.
 	AuthToken string `json:"auth_token"`
+}
+
+type DNSConfig struct {
+	Enabled       bool     `json:"enabled"`
+	MagicDNS      bool     `json:"magic_dns"`
+	Domain        string   `json:"domain,omitempty"`
+	Nameservers   []string `json:"nameservers,omitempty"`
+	SearchDomains []string `json:"search_domains,omitempty"`
 }
 
 // PeerConfigResponse is a JSON-safe representation of the peer
