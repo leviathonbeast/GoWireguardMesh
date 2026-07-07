@@ -16,8 +16,29 @@ import type {
   SetupKey,
 } from "./types";
 
+const LONDON_TIME_FORMAT = new Intl.DateTimeFormat("en-GB", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+  timeZone: "Europe/London",
+  timeZoneName: "short",
+});
+
 function formatTime(iso?: string): string {
-  return iso ? iso.replace("T", " ").replace(/\.\d+Z$/, "Z") : "";
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+
+  const parts = LONDON_TIME_FORMAT.formatToParts(date).reduce<Record<string, string>>((acc, part) => {
+    if (part.type !== "literal") acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const tz = parts.timeZoneName ? ` ${parts.timeZoneName}` : "";
+  return `${parts.day}/${parts.month}/${parts.year} ${parts.hour}:${parts.minute}:${parts.second}${tz}`;
 }
 
 function humanBytes(n: number): string {
