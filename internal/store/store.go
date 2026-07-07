@@ -157,18 +157,36 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 9
+const schemaVersion = 10
 
 var migrations = map[int]string{
-	2: migrationV2,
-	3: migrationV3,
-	4: migrationV4,
-	5: migrationV5,
-	6: migrationV6,
-	7: migrationV7,
-	8: migrationV8,
-	9: migrationV9,
+	2:  migrationV2,
+	3:  migrationV3,
+	4:  migrationV4,
+	5:  migrationV5,
+	6:  migrationV6,
+	7:  migrationV7,
+	8:  migrationV8,
+	9:  migrationV9,
+	10: migrationV10,
 }
+
+// migrationV10 records peer-to-peer connection lifecycle events (a direct
+// connection established, a relay fallback) derived from path-state
+// transitions, for the dashboard connection log.
+const migrationV10 = `
+CREATE TABLE connection_events (
+    id               INTEGER PRIMARY KEY,
+    at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    reporter_peer_id INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    remote_peer_id   INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    kind             TEXT NOT NULL,   -- direct | relay
+    from_state       TEXT,            -- previous path state (NULL = first observation)
+    to_state         TEXT NOT NULL    -- new path state (direct/ws-relay/udp-relay)
+);
+
+CREATE INDEX idx_connection_events_at ON connection_events(at);
+`
 
 // migrationV9 adds operator-friendly names for setup keys and turns
 // ACL rules into service-level policies. Peer visibility still uses

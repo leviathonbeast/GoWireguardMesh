@@ -209,6 +209,12 @@ func (s *server) pruneAuditLoop(ctx context.Context, retention time.Duration) {
 			slog.Debug("pruned audit rows", "count", n, "retention", retention)
 		}
 
+		if ce, err := s.store.PruneConnectionEvents(ctx, retention); err != nil {
+			slog.Error("prune connection events failed", "error", err)
+		} else if ce > 0 {
+			slog.Debug("pruned connection events", "count", ce, "retention", retention)
+		}
+
 		select {
 		case <-ctx.Done():
 			return

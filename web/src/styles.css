@@ -137,6 +137,28 @@ body {
   background: rgba(69, 163, 255, 0.12);
 }
 
+.side-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.side-link.group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.side-link.group-head .chev {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.side-link.side-sub {
+  padding-left: 26px;
+  font-size: 13px;
+}
+
 .main {
   min-width: 0;
   padding: 22px 24px 64px;
@@ -680,6 +702,16 @@ td.mono {
   padding: 2px 9px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.pill.pill-p2p {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.pill.pill-relay {
+  border-color: var(--warn);
+  color: var(--warn);
 }
 
 .traffic {

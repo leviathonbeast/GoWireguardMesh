@@ -124,10 +124,35 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 			}
 			defer stmt.Close()
 
+			// Snapshot pre-report states so we can log connection
+			// transitions (direct established / relay fallback) before
+			// the upsert overwrites them.
+			prevStates, err := currentPathStates(ctx, tx, peerID)
+			if err != nil {
+				return err
+			}
+
+			evStmt, err := tx.PrepareContext(ctx,
+				`INSERT INTO connection_events (reporter_peer_id, remote_peer_id, kind, from_state, to_state)
+				 VALUES (?, ?, ?, ?, ?)`,
+			)
+			if err != nil {
+				return fmt.Errorf("prepare connection event insert: %w", err)
+			}
+			defer evStmt.Close()
+
 			for _, p := range report.PathStates {
 				remoteID, known := idByKey[p.PeerPublicKey]
 				if !known {
 					continue
+				}
+
+				if kind, ok := connectionEventKind(prevStates[remoteID], p.State); ok {
+					if _, err := evStmt.ExecContext(ctx,
+						peerID, remoteID, kind, nullable(prevStates[remoteID]), p.State,
+					); err != nil {
+						return fmt.Errorf("insert connection event: %w", err)
+					}
 				}
 
 				if _, err := stmt.ExecContext(ctx,
@@ -165,6 +190,33 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 	}
 
 	return nil
+}
+
+// currentPathStates loads the reporter's stored path state per remote
+// peer, so a report can be diffed against it to detect connection
+// transitions worth logging.
+func currentPathStates(ctx context.Context, tx *sql.Tx, peerID int64) (map[int64]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT remote_peer_id, state FROM peer_paths WHERE peer_id = ?`, peerID)
+	if err != nil {
+		return nil, fmt.Errorf("load path states: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[int64]string)
+
+	for rows.Next() {
+		var (
+			id    int64
+			state string
+		)
+		if err := rows.Scan(&id, &state); err != nil {
+			return nil, fmt.Errorf("scan path state: %w", err)
+		}
+		out[id] = state
+	}
+
+	return out, rows.Err()
 }
 
 // peerIDsByPublicKey loads the full key→id map once, replacing a

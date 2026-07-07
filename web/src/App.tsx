@@ -139,7 +139,7 @@ function PathBadge({ state }: { state?: LinkStat["path_state"] }) {
 }
 
 
-const TABS = ["overview", "machines", "traffic", "policies", "setup", "logs", "settings"] as const;
+const TABS = ["overview", "machines", "traffic", "policies", "setup", "logs", "proxy", "settings"] as const;
 type Tab = (typeof TABS)[number];
 const DEFAULT_PAGE_SIZE = 25;
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
@@ -147,12 +147,18 @@ const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 const TAB_LABEL: Record<Tab, string> = {
   overview: "Overview",
   machines: "Machines",
-  traffic: "Traffic",
+  traffic: "Traffic Events",
   policies: "Policies",
   setup: "Setup keys",
-  logs: "Logs",
+  logs: "Audit Events",
+  proxy: "Proxy Events",
   settings: "Settings",
 };
+
+// Sidebar layout: most tabs are top-level; the activity views (audit,
+// traffic, proxy) are grouped under a collapsible "Activity" section.
+const TOP_TABS: Tab[] = ["overview", "machines", "policies", "setup"];
+const ACTIVITY_TABS: Tab[] = ["logs", "traffic", "proxy"];
 
 function textMatches(q: string, ...parts: unknown[]): boolean {
   const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -425,6 +431,46 @@ function ConfirmModal({
   );
 }
 
+type ConnectionEvent = {
+  id: number;
+  at: string;
+  kind: string; // "direct" | "relay"
+  from_state?: string;
+  to_state: string;
+  reporter_peer_id: number;
+  reporter_hostname?: string;
+  remote_peer_id: number;
+  remote_hostname?: string;
+};
+
+// ConnectionEventRow renders one peer-to-peer connection lifecycle event
+// (a direct/P2P connection established, or a relay fallback), NetBird-style.
+function ConnectionEventRow({ e }: { e: ConnectionEvent }) {
+  const reporter = e.reporter_hostname || `peer ${e.reporter_peer_id}`;
+  const remote = e.remote_hostname || `peer ${e.remote_peer_id}`;
+  const direct = e.kind === "direct";
+
+  return (
+    <div className="activity-row">
+      <div className="event-cell">
+        <span className={`dot ${direct ? "ok" : "warn"}`} />
+        <div>
+          <div className="event-time">{formatTime(e.at)}</div>
+          <div className="event-text">
+            Peer <strong>{reporter}</strong>{" "}
+            {direct ? "established a direct (P2P) connection to" : "connected over relay to"}{" "}
+            Peer <strong>{remote}</strong>
+          </div>
+        </div>
+      </div>
+      <div className="pills">
+        <span className={`pill ${direct ? "pill-p2p" : "pill-relay"}`}>{direct ? "P2P" : "RELAY"}</span>
+        <span className="pill">{e.to_state}</span>
+      </div>
+    </div>
+  );
+}
+
 // FlowEvent renders one observed flow as a NetBird-style traffic
 // event: a sentence, both peer endpoints, protocol/port, and
 // directional byte counts from the reporting peer's vantage.
@@ -596,6 +642,8 @@ export default function App() {
   const [keys, setKeys] = useState<SetupKey[]>([]);
   const [links, setLinks] = useState<LinkStat[]>([]);
   const [flows, setFlows] = useState<Flow[]>([]);
+  const [connEvents, setConnEvents] = useState<ConnectionEvent[]>([]);
+  const [activityOpen, setActivityOpen] = useState(true);
   const [acl, setAcl] = useState<AclResponse>({ default_policy: "allow", rules: [] });
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [access, setAccess] = useState<AccessLogRow[]>([]);
@@ -645,7 +693,7 @@ export default function App() {
   const [aclPortMax, setAclPortMax] = useState("");
 
   const loadDashboard = useCallback(async (authToken: string) => {
-    const [p, k, l, f, a, au, al, n] = await Promise.all([
+    const [p, k, l, f, a, au, al, n, ce] = await Promise.all([
       api<Peer[]>("/api/peers", authToken),
       api<SetupKey[]>("/api/setup-keys", authToken),
       api<LinkStat[]>("/api/link-stats", authToken),
@@ -654,6 +702,7 @@ export default function App() {
       api<AuditRow[]>("/api/audit?limit=1000", authToken),
       api<AccessLogRow[]>("/api/access-log?limit=1000", authToken),
       api<NetworkConfig>("/api/network", authToken),
+      api<ConnectionEvent[]>("/api/connection-events?limit=1000", authToken),
     ]);
     setPeers(p);
     setKeys(k);
@@ -663,6 +712,7 @@ export default function App() {
     setAudit(au);
     setAccess(al);
     setNetwork(n);
+    setConnEvents(ce);
     setNetworkCIDR((cur) => cur || n.network_cidr);
     setNetworkCIDR6((cur) => cur || n.network_cidr6);
   }, []);
@@ -676,6 +726,7 @@ export default function App() {
     setKeys([]);
     setLinks([]);
     setFlows([]);
+    setConnEvents([]);
     setAudit([]);
     setAccess([]);
     setError(message ?? "");
@@ -1070,7 +1121,7 @@ export default function App() {
           </div>
         </div>
         <nav className="side-nav">
-          {TABS.map((t) => (
+          {TOP_TABS.map((t) => (
             <button
               key={t}
               className={tab === t ? "side-link active" : "side-link"}
@@ -1079,6 +1130,32 @@ export default function App() {
               {TAB_LABEL[t]}
             </button>
           ))}
+          <div className="side-group">
+            <button
+              className="side-link group-head"
+              onClick={() => setActivityOpen((o) => !o)}
+              aria-expanded={activityOpen}
+            >
+              <span>Activity</span>
+              <span className="chev">{activityOpen ? "▾" : "▸"}</span>
+            </button>
+            {activityOpen &&
+              ACTIVITY_TABS.map((t) => (
+                <button
+                  key={t}
+                  className={tab === t ? "side-link side-sub active" : "side-link side-sub"}
+                  onClick={() => setTab(t)}
+                >
+                  {TAB_LABEL[t]}
+                </button>
+              ))}
+          </div>
+          <button
+            className={tab === "settings" ? "side-link active" : "side-link"}
+            onClick={() => setTab("settings")}
+          >
+            {TAB_LABEL.settings}
+          </button>
         </nav>
       </aside>
 
@@ -1335,6 +1412,24 @@ export default function App() {
               shown={shownFlows.length + shownLinks.length + shownActivePeers.length}
             />
           </div>
+
+          <h2>Connection events</h2>
+          <div className="panel">
+            {connEvents.length === 0 ? (
+              <div className="muted">no connection events yet</div>
+            ) : (
+              <Paginated items={connEvents} resetKey={trafficFilter}>
+                {(page, pager) => (
+                  <>
+                    {page.map((e) => (
+                      <ConnectionEventRow key={e.id} e={e} />
+                    ))}
+                    {pager}
+                  </>
+                )}
+              </Paginated>
+            )}
+          </div>
 		          <h2>Liveness</h2>
 		          <div className="panel tablewrap">
 		            <Paginated items={shownActivePeers} resetKey={trafficFilter}>
@@ -1455,6 +1550,16 @@ export default function App() {
             </div>
           </div>
           </>
+        )}
+
+        {tab === "proxy" && (
+          <div className="panel">
+            <h2>Proxy Events</h2>
+            <p className="muted">
+              Reverse-proxy access logs — method, host, status, latency, bytes, and client —
+              will appear here once Traefik access-log ingestion is wired up (coming next).
+            </p>
+          </div>
         )}
 
         {tab === "logs" && (
