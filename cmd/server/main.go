@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +27,7 @@ import (
 
 	gowireguard "gowireguard"
 	"gowireguard/internal/firewall"
+	"gowireguard/internal/httpx"
 	"gowireguard/internal/proto"
 	"gowireguard/internal/psk"
 	"gowireguard/internal/relay"
@@ -362,7 +362,7 @@ func runServe(args []string) error {
 			return h
 		}
 
-		return newRateLimiter(*rateLimit, *rateBurst).middleware(srv.clientIP, h)
+		return httpx.NewRateLimiter(*rateLimit, *rateBurst).Middleware(srv.clientIP, h)
 	}
 
 	mux := http.NewServeMux()
@@ -793,17 +793,4 @@ func dnsConfigProto(cfg store.DNSConfig) proto.DNSConfig {
 		Nameservers:   append([]string(nil), cfg.Nameservers...),
 		SearchDomains: append([]string(nil), cfg.SearchDomains...),
 	}
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		slog.Debug("write response failed", "error", err)
-	}
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
 }

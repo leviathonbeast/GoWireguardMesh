@@ -147,6 +147,9 @@ func (t *telemetryReporter) directSilentFor(peer wgtypes.Peer, now time.Time) ti
 }
 
 func (t *telemetryReporter) maybeRetryDirect(peer wgtypes.Key, candidates []*net.UDPAddr, punchEpoch int) {
+	if t.directProbeOff {
+		return
+	}
 	if len(candidates) == 0 || !t.relayed[peer] {
 		return
 	}

@@ -65,6 +65,28 @@ func TestMaybeRetryDirectIgnoresMissingEndpoint(t *testing.T) {
 	}
 }
 
+func TestMaybeRetryDirectDisabledKeepsRelayStable(t *testing.T) {
+	key := wgtypes.Key{1}
+	backend := &fakeWGBackend{}
+	tel := &telemetryReporter{
+		wg:             backend,
+		relayed:        map[wgtypes.Key]bool{key: true},
+		relayedAt:      map[wgtypes.Key]time.Time{key: time.Now().Add(-directRetryAfter - time.Second)},
+		relayEndpoints: map[wgtypes.Key]*net.UDPAddr{key: {IP: net.ParseIP("127.0.0.1"), Port: 40000}},
+		directProbes:   map[wgtypes.Key]directProbe{},
+		directProbeOff: true,
+	}
+
+	tel.maybeRetryDirect(key, []*net.UDPAddr{{IP: net.ParseIP("192.0.2.1"), Port: 51820}}, 99)
+
+	if _, ok := tel.directProbes[key]; ok {
+		t.Fatal("direct probe started even though direct probing is disabled")
+	}
+	if len(backend.configured) != 0 {
+		t.Fatalf("ConfigureDevice called %d times, want 0", len(backend.configured))
+	}
+}
+
 func TestEndpointCandidatesFromProtoKeepsOrderAndDedupes(t *testing.T) {
 	fallback := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 51820}
 

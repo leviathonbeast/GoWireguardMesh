@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -84,6 +85,7 @@ type telemetryReporter struct {
 	network6   netip.Prefix
 	lastDNS    string
 	dnsApplied bool
+	dnsWarned  bool
 	interval   time.Duration
 	syncMu     sync.Mutex
 
@@ -109,6 +111,7 @@ type telemetryReporter struct {
 	lastCandidates map[wgtypes.Key]string // digest of last candidate set; a change re-arms a prompt retry
 	wsProxies      map[wgtypes.Key]*wsRelayProxy
 	relayBroken    bool // control plane said no relay; stop asking
+	directProbeOff bool // keep relay stable after fallback; useful for service sidecars
 }
 
 // relayTransport selects how the agent tunnels to a relayed peer.
@@ -132,6 +135,7 @@ func newTelemetryReporter(
 	network6 netip.Prefix,
 	interval time.Duration,
 	transport relayTransport,
+	enableDirectProbe bool,
 ) (*telemetryReporter, error) {
 	client, err := newHTTPClient(serverCA)
 	if err != nil {
@@ -155,6 +159,7 @@ func newTelemetryReporter(
 		network6:        network6,
 		interval:        interval,
 		relayTransport:  transport,
+		directProbeOff:  !enableDirectProbe,
 		prevLink:        make(map[wgtypes.Key]linkCounters),
 		prevFlow:        make(map[flowKey]flowCounters),
 		pendingCounters: make(map[wgtypes.Key]*proto.PeerCounter),
@@ -627,6 +632,15 @@ func (t *telemetryReporter) applyDNS(cfg proto.DNSConfig) error {
 	}
 
 	if err := applyDNSConfig(t.iface, cfg); err != nil {
+		if errors.Is(err, errDNSUnsupported) {
+			t.lastDNS = digest
+			t.dnsApplied = false
+			if !t.dnsWarned {
+				slog.Warn("dns sync unsupported; configure DNS manually or install systemd-resolved", "error", err)
+				t.dnsWarned = true
+			}
+			return nil
+		}
 		return err
 	}
 

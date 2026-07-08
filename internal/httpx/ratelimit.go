@@ -1,4 +1,4 @@
-package main
+package httpx
 
 import (
 	"math"
@@ -9,12 +9,11 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// rateLimiter is a per-client-IP token bucket guarding the public
-// endpoints (enroll, report, relay). It caps how fast any single
-// source can hit the control plane — brute-forcing setup keys,
-// exhausting relay pairs, or opening relay sessions in a loop. A
-// public VPS control plane needs this; a LAN one benefits from it.
-type rateLimiter struct {
+// RateLimiter is a per-client-IP token bucket for public endpoints.
+// It caps how fast any single source can hit the control plane,
+// limiting setup-key brute force, relay-pair exhaustion, and repeated
+// WebSocket session opens.
+type RateLimiter struct {
 	rate    rate.Limit
 	burst   int
 	mu      sync.Mutex
@@ -26,13 +25,13 @@ type clientLimiter struct {
 	last    time.Time
 }
 
-func newRateLimiter(perSecond, burst float64) *rateLimiter {
+func NewRateLimiter(perSecond, burst float64) *RateLimiter {
 	burstTokens := int(math.Ceil(burst))
 	if burstTokens < 1 {
 		burstTokens = 1
 	}
 
-	rl := &rateLimiter{
+	rl := &RateLimiter{
 		rate:    rate.Limit(perSecond),
 		burst:   burstTokens,
 		clients: make(map[string]*clientLimiter),
@@ -43,8 +42,8 @@ func newRateLimiter(perSecond, burst float64) *rateLimiter {
 	return rl
 }
 
-// allow consumes one token for key, refilling by elapsed time first.
-func (rl *rateLimiter) allow(key string) bool {
+// Allow consumes one token for key, refilling by elapsed time first.
+func (rl *RateLimiter) Allow(key string) bool {
 	rl.mu.Lock()
 	now := time.Now()
 
@@ -64,9 +63,7 @@ func (rl *rateLimiter) allow(key string) bool {
 	return limiter.Allow()
 }
 
-// evictLoop drops idle buckets so the map does not grow without bound
-// under changing source addresses.
-func (rl *rateLimiter) evictLoop() {
+func (rl *RateLimiter) evictLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
@@ -83,12 +80,12 @@ func (rl *rateLimiter) evictLoop() {
 	}
 }
 
-// middleware rejects requests over the limit with 429, keyed on the
-// client's real address (honouring the trust-proxy setting).
-func (rl *rateLimiter) middleware(clientIP func(*http.Request) string, next http.HandlerFunc) http.HandlerFunc {
+// Middleware rejects requests over the limit with 429, keyed on the
+// client's real address.
+func (rl *RateLimiter) Middleware(clientIP func(*http.Request) string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !rl.allow(clientIP(r)) {
-			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		if !rl.Allow(clientIP(r)) {
+			WriteError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
 

@@ -12,7 +12,7 @@ import (
 func applyDNSConfig(iface string, cfg proto.DNSConfig) error {
 	resolvectl, err := exec.LookPath("resolvectl")
 	if err != nil {
-		return fmt.Errorf("resolvectl not found; install/use systemd-resolved or configure DNS manually")
+		return fmt.Errorf("%w: resolvectl not found; install/use systemd-resolved or configure DNS manually", errDNSUnsupported)
 	}
 
 	if !cfg.Enabled {

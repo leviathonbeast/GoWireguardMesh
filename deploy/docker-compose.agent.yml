@@ -42,6 +42,7 @@ services:
       --listen-port ${WGMESH_LISTEN_PORT:-51820}
       --key-file /data/wgkey.key
       --relay-transport ${WGMESH_RELAY_TRANSPORT:-websocket}
+      --direct-probe=${WGMESH_DIRECT_PROBE:-false}
       --manage-firewall=false
       # To surface Traefik access logs as Proxy Events, add the flag below
       # and mount Traefik's JSON access log into this sidecar (see volumes):

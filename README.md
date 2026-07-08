@@ -307,11 +307,12 @@ Connectivity is attempted in this order, all automatic:
 Relayed peers periodically retry direct candidates from config sync. When the
 control plane sees a relayed pair where both peers are online and both have
 direct candidates, it bumps a per-pair punch epoch so both agents enter a
-short coordinated probe window at roughly the same time. The relay stays alive
-while direct candidates are probed, so traffic has a fallback path during the
-test. If WireGuard handshakes from a non-relay endpoint, the agent closes the
-relay and marks the path `direct`; if the probe stays silent, it restores the
-relay endpoint.
+short coordinated probe window at roughly the same time. If WireGuard
+handshakes from a non-relay endpoint, the agent closes the relay and marks the
+path `direct`; if the probe stays silent, it restores the relay endpoint.
+Reverse-proxy and service sidecars that need the most stable path can run with
+`--direct-probe=false`, which keeps a working relay path pinned after fallback
+instead of periodically trying direct candidates.
 
 Agents also keep an authenticated `/signal` WebSocket open to the control
 plane, similar in spirit to NetBird's Signal service but embedded in the
@@ -548,7 +549,8 @@ sudo ./bin/agent --server https://192.168.1.10:8443 --setup-key <token> \
 Useful agent flags: `--listen-port 51820` (pin the WireGuard port — strongly
 recommended so the firewall rule is stable across restarts), `--server-ca`
 (pin a self-signed server cert), `--relay-transport websocket|udp`,
-`--stun-server`, `--key-file`, `--manage-firewall`.
+`--direct-probe=false` (keep relayed service sidecars stable), `--stun-server`,
+`--key-file`, `--manage-firewall`.
 
 The agent will:
 
