@@ -374,6 +374,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("POST /ui-login", publicLimit(srv.handleUILogin))
 	mux.Handle("GET /", srv.uiHandler(ui))
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
+	mux.HandleFunc("POST /api/mobile-peers", srv.requireAdmin(srv.handleCreateMobilePeer))
 	mux.HandleFunc("GET /api/peers/{id}/ping", srv.requireAdmin(srv.handlePingPeer))
 	mux.HandleFunc("POST /api/peers/{id}/address", srv.requireAdmin(srv.handleUpdatePeerAddress))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))

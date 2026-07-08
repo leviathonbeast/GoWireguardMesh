@@ -226,6 +226,7 @@ the signed UI session cookie:
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/peers` | list all peers, including revoked |
+| `POST /api/mobile-peers` | create a static/mobile WireGuard peer and return an importable config |
 | `GET /api/peers/{id}/ping` | heartbeat/liveness status from the peer's last report |
 | `POST /api/peers/{id}/revoke` | revoke a peer (kept out of enrollment responses; IP stays reserved) |
 | `GET /api/network` | current persisted overlay CIDRs |
@@ -470,9 +471,45 @@ For initial server defaults you can also start the server with:
   --dns-domain vpn
 ```
 
-Agents apply DNS settings during enrollment and on the next report sync. Linux
-agents use `resolvectl`/systemd-resolved when available; Windows agents use
-native DNS client settings.
+Agents apply DNS settings during enrollment and on the next report sync. DNS is
+split by default: only the configured mesh/search domains are routed to the
+mesh resolver, while the host's existing DNS remains the default for normal
+internet names. Linux agents use `resolvectl`/systemd-resolved with
+`default-route=false`; Windows agents use NRPT rules instead of installing the
+mesh resolver as the adapter's general DNS server.
+
+### iPhone and Android
+
+iOS and Android cannot run the Linux/Windows wgmesh agent directly because VPN
+clients on those platforms must use the native iOS NetworkExtension or Android
+VpnService APIs. The supported path is a static/mobile WireGuard peer for the
+official WireGuard app.
+
+Create one through the admin API and nominate an active, UDP-reachable gateway
+peer:
+
+```bash
+curl -sS https://mesh.example.com/api/mobile-peers \
+  -H "Authorization: Bearer $WGMESH_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "iphone",
+    "gateway_public_key": "<gateway-peer-public-key>",
+    "gateway_endpoint": "mesh.example.com:51820"
+  }'
+```
+
+The response includes `config`, a complete WireGuard tunnel configuration to
+import into the mobile app. If DNS is enabled, the generated config includes the
+configured IPv4 and IPv6 DNS nameservers. The server stores only the mobile
+peer's public key; when it generates a private key, that private key is returned
+only in this one response.
+
+Limitations: mobile/static peers do not use wgmesh WebSocket relay, signal sync,
+telemetry, or live re-IP. If you change the overlay CIDR, DNS, gateway endpoint,
+or the mobile peer address, re-export/re-import the config. The gateway peer
+must be reachable over UDP and must be able to forward traffic for the overlay
+CIDRs if the phone should reach peers beyond that gateway.
 
 ### Honest production status
 
@@ -521,14 +558,29 @@ with these differences:
 - It can run as a Windows service. From an elevated prompt:
 
 ```powershell
-.\agent.exe service install --server https://mesh.example.com --setup-key <token> `
-  --listen-port 51820 --key-file C:\ProgramData\wgmesh-agent\wgkey.key
-.\agent.exe service start
+mkdir C:\ProgramData\wgmesh-agent
+copy .\agent.exe C:\ProgramData\wgmesh-agent\agent.exe
+copy .\wintun.dll C:\ProgramData\wgmesh-agent\wintun.dll
 
-# Later:
-.\agent.exe service stop
-.\agent.exe service remove
+C:\ProgramData\wgmesh-agent\agent.exe service install --server https://mesh.example.com --setup-key <token> `
+  --listen-port 51820 --key-file C:\ProgramData\wgmesh-agent\wgkey.key
+C:\ProgramData\wgmesh-agent\agent.exe service start
+
+# Later, after downloading a newer agent.exe somewhere else:
+.\agent.exe service update
+
+# Useful maintenance:
+C:\ProgramData\wgmesh-agent\agent.exe service status
+C:\ProgramData\wgmesh-agent\agent.exe service restart
+C:\ProgramData\wgmesh-agent\agent.exe service stop
+C:\ProgramData\wgmesh-agent\agent.exe service remove
 ```
+
+`service update` copies the currently running `agent.exe` command into the
+installed service binary path, stopping and restarting `wgmesh-agent` when
+needed. You do not need to reinstall the service for normal agent updates as
+long as the service was installed once from the stable
+`C:\ProgramData\wgmesh-agent\agent.exe` path.
 
 Treat it as a starting point: it compiles and follows documented Wintun
 behavior, but has not been validated on a real Windows host.

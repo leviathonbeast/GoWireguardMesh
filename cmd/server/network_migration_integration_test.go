@@ -68,6 +68,7 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 	mux.HandleFunc("GET /relay-ws", srv.handleRelayWS)
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
+	mux.HandleFunc("POST /api/mobile-peers", srv.requireAdmin(srv.handleCreateMobilePeer))
 	mux.HandleFunc("POST /api/peers/{id}/address", srv.requireAdmin(srv.handleUpdatePeerAddress))
 	mux.HandleFunc("POST /api/peers/{id}/remove", srv.requireAdmin(srv.handleRemovePeer))
 	mux.HandleFunc("GET /api/network", srv.requireAdmin(srv.handleGetNetwork))

@@ -18,6 +18,10 @@ var ErrNotFound = errors.New("not found or already revoked")
 // address already reserved by another peer, including revoked peers.
 var ErrAddressInUse = errors.New("address already assigned")
 
+// ErrPeerExists is returned when a static/mobile peer is created with a
+// public key that is already registered, including revoked peers.
+var ErrPeerExists = errors.New("peer already exists")
+
 type PeerInfo struct {
 	ID             int64
 	PublicKey      string
