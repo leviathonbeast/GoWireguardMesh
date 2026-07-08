@@ -60,6 +60,7 @@ type server struct {
 	relay        relayAllocator // nil when no relay is configured
 	relayHost    string         // public data-plane address agents dial
 	wsHub        *relay.WSHub   // nil unless the embedded WS relay is enabled
+	signalHub    *signalHub
 	accessLog    *accessLogSink
 	punchMu      sync.Mutex
 	punchEpochs  map[string]punchEpoch
@@ -291,6 +292,7 @@ func runServe(args []string) error {
 		adminToken:   adminToken,
 		trustProxy:   *trustProxy,
 		accessLog:    newAccessLogSink(accessMode, *accessLogSize),
+		signalHub:    newSignalHub(),
 		punchEpochs:  make(map[string]punchEpoch),
 	}
 
@@ -366,6 +368,7 @@ func runServe(args []string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /enroll", publicLimit(srv.handleEnroll))
 	mux.HandleFunc("POST /report", publicLimit(srv.handleReport))
+	mux.HandleFunc("GET /signal", publicLimit(srv.handleSignalWS))
 	mux.HandleFunc("POST /relay-pair", publicLimit(srv.handleRelayPair))
 	mux.HandleFunc("GET /relay-ws", publicLimit(srv.handleRelayWS))
 	mux.HandleFunc("POST /ui-login", publicLimit(srv.handleUILogin))

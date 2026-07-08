@@ -98,6 +98,7 @@ func (s *server) handleImportACL(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("admin imported acl rules", "rules", n, "replace", replace)
 	s.audit(r, "acl_import", http.StatusOK, fmt.Sprintf("rules=%d replace=%v", n, replace))
+	s.signalSync("acl_import")
 
 	imported, err := s.store.ListACLRules(r.Context())
 	if err != nil {
@@ -198,6 +199,7 @@ func (s *server) handleCreateACL(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "acl_create", http.StatusOK, fmt.Sprintf("rule id=%d name=%q src=%s dst=%s proto=%q ports=%s",
 		id, req.Name, peerRef(req.SrcPeerID), peerRef(req.DstPeerID), proto, portRange(req.PortMin, req.PortMax)))
+	s.signalSync("acl_create")
 	writeJSON(w, http.StatusOK, map[string]int64{"id": id})
 }
 
@@ -217,6 +219,7 @@ func (s *server) handleDeleteACL(w http.ResponseWriter, r *http.Request) {
 	default:
 		slog.Info("admin deleted acl rule", "rule_id", id)
 		s.audit(r, "acl_delete", http.StatusOK, fmt.Sprintf("rule id=%d", id))
+		s.signalSync("acl_delete")
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	}
 }

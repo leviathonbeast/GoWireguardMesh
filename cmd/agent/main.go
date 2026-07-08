@@ -24,6 +24,8 @@ import (
 
 	"gowireguard/internal/firewall"
 	"gowireguard/internal/proto"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -242,8 +244,36 @@ func loadOrGenerateKey(path string) (wgtypes.Key, error) {
 func newHTTPClient(caFile string) (*http.Client, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 
+	tlsConfig, err := newPinnedTLSConfig(caFile)
+	if err != nil {
+		return nil, err
+	}
+
+	if tlsConfig != nil {
+		client.Transport = &http.Transport{
+			TLSClientConfig: tlsConfig,
+		}
+	}
+
+	return client, nil
+}
+
+func newWebSocketDialer(caFile string) (*websocket.Dialer, error) {
+	tlsConfig, err := newPinnedTLSConfig(caFile)
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := *websocket.DefaultDialer
+	dialer.HandshakeTimeout = 10 * time.Second
+	dialer.TLSClientConfig = tlsConfig
+
+	return &dialer, nil
+}
+
+func newPinnedTLSConfig(caFile string) (*tls.Config, error) {
 	if caFile == "" {
-		return client, nil
+		return nil, nil
 	}
 
 	pemData, err := os.ReadFile(caFile)
@@ -256,11 +286,7 @@ func newHTTPClient(caFile string) (*http.Client, error) {
 		return nil, fmt.Errorf("server CA file %q contains no valid PEM certificates", caFile)
 	}
 
-	client.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: pool},
-	}
-
-	return client, nil
+	return &tls.Config{RootCAs: pool}, nil
 }
 
 // enroll registers this node with the control plane and returns the

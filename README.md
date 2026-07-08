@@ -140,7 +140,7 @@ Flags for `server`:
 | `--default-policy` | `allow` | ACL default: `allow` (open mesh) or `deny` (rule-connected pairs only) |
 | **DNS** | | |
 | `--dns-enabled` | off | push DNS settings to enrolled agents |
-| `--dns-nameservers` | — | comma-separated DNS server IPs to push, e.g. your CoreDNS overlay IP |
+| `--dns-nameservers` | — | comma-separated IPv4/IPv6 DNS server IPs to push, e.g. your CoreDNS overlay IPs |
 | `--dns-domain` | `vpn` | mesh DNS domain/search suffix |
 | `--dns-search-domains` | — | comma-separated search domains; defaults to `--dns-domain` when DNS is enabled |
 | `--dns-magic` | on | push peer-name DNS/search behavior for the mesh domain |
@@ -313,6 +313,14 @@ test. If WireGuard handshakes from a non-relay endpoint, the agent closes the
 relay and marks the path `direct`; if the probe stays silent, it restores the
 relay endpoint.
 
+Agents also keep an authenticated `/signal` WebSocket open to the control
+plane, similar in spirit to NetBird's Signal service but embedded in the
+server process. It rides the same HTTPS route as the API, needs no extra
+container or port, and lets the server tell connected agents to sync
+immediately after DNS, ACL, peer address, revocation, removal, or network
+changes. The normal `/report` interval remains the fallback if the signal
+socket is unavailable.
+
 Relay setup, two shapes:
 
 - **Embedded (default choice, NetBird-style single binary):** run the
@@ -457,7 +465,7 @@ For initial server defaults you can also start the server with:
 ```bash
 ./bin/server \
   --dns-enabled \
-  --dns-nameservers 100.78.0.1 \
+  --dns-nameservers 100.78.0.7,fd32:d2ad:be4f::7 \
   --dns-domain vpn
 ```
 
@@ -612,8 +620,9 @@ Success (`200`):
 }
 ```
 
-`auth_token` authenticates the agent's subsequent `/report`, `/relay-pair`,
-and `/relay-ws` calls (rotated on every enrollment; only its hash is stored).
+`auth_token` authenticates the agent's subsequent `/report`, `/signal`,
+`/relay-pair`, and `/relay-ws` calls (rotated on every enrollment; only its
+hash is stored).
 `endpoint` is the server's best hint for that peer and may be null when
 unknown. `peers` contains only the peers this node is allowed to reach.
 

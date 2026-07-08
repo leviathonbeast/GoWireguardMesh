@@ -270,6 +270,7 @@ func (s *server) handleUpdateDNS(w http.ResponseWriter, r *http.Request) {
 			cfg.Domain,
 			strings.Join(cfg.SearchDomains, ","),
 		))
+	s.signalSync("dns_update")
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -318,6 +319,7 @@ func (s *server) handleApplyNetworkMigration(w http.ResponseWriter, r *http.Requ
 			plan.Current.NetworkCIDR6, plan.Target.NetworkCIDR6,
 			len(plan.Changes),
 		))
+	s.signalSync("network_migrate")
 
 	writeJSON(w, http.StatusOK, plan)
 }
@@ -406,6 +408,7 @@ func (s *server) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
 	default:
 		slog.Info("admin removed peer", "peer_id", id)
 		s.audit(r, "peer_remove", http.StatusOK, fmt.Sprintf("peer id=%d", id))
+		s.signalSync("peer_remove")
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}
 }
@@ -438,6 +441,7 @@ func (s *server) handleUpdatePeerAddress(w http.ResponseWriter, r *http.Request)
 	slog.Info("admin updated peer address", "peer_id", id, "assigned_ip", peer.AssignedIP, "assigned_ip6", peer.AssignedIP6)
 	s.audit(r, "peer_address_update", http.StatusOK,
 		fmt.Sprintf("peer id=%d assigned_ip=%s assigned_ip6=%s", id, peer.AssignedIP, peer.AssignedIP6))
+	s.signalSync("peer_address_update")
 	writeJSON(w, http.StatusOK, peerInfoJSON(peer))
 }
 
@@ -457,6 +461,9 @@ func (s *server) handleRevoke(w http.ResponseWriter, r *http.Request, revoke fun
 	default:
 		slog.Info("admin revoked", "kind", kind, "id", id)
 		s.audit(r, "revoke", http.StatusOK, fmt.Sprintf("%s id=%d", kind, id))
+		if kind == "peer" {
+			s.signalSync("peer_revoke")
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	}
 }

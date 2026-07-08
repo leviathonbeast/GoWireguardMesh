@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -272,8 +273,21 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// Hijack lets the websocket upgrade work through the recorder.
+// Unwrap lets http.ResponseController reach the underlying writer.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// Hijack lets websocket upgrades work through the recorder.
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := s.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not implement http.Hijacker")
+	}
+	if s.status == 0 {
+		s.status = http.StatusSwitchingProtocols
+	}
+
+	return h.Hijack()
+}
 
 // accessLogLine is one structured request record. It carries the
 // original client IP, the proxy hop chain, the authenticated peer's

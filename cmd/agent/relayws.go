@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/coder/websocket"
+	"github.com/gorilla/websocket"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -49,6 +49,7 @@ type wsRelayProxy struct {
 	stop  context.CancelFunc
 	wgDst *net.UDPAddr // kernel's source addr, learned from first packet
 	mu    sync.Mutex
+	once  sync.Once
 }
 
 // startWSRelay dials the WebSocket relay for peer, binds a loopback
@@ -62,12 +63,9 @@ func (t *telemetryReporter) startWSRelay(peer wgtypes.Key) (*wsRelayProxy, error
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Reuse the agent's HTTP client so a pinned self-signed cert
-	// (--server-ca) is trusted for wss:// too.
-	conn, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
-		HTTPClient: t.client,
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + t.authToken}},
-	})
+	// Reuse the agent's pinned TLS config so a self-signed control
+	// plane cert (--server-ca) is trusted for wss:// too.
+	conn, resp, err := t.wsDialer.DialContext(ctx, wsURL, http.Header{"Authorization": {"Bearer " + t.authToken}})
 	if err != nil {
 		cancel()
 
@@ -82,7 +80,7 @@ func (t *telemetryReporter) startWSRelay(peer wgtypes.Key) (*wsRelayProxy, error
 
 	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		conn.Close(websocket.StatusInternalError, "")
+		conn.Close()
 		cancel()
 
 		return nil, fmt.Errorf("bind loopback udp for relay: %w", err)
@@ -98,7 +96,7 @@ func (t *telemetryReporter) startWSRelay(peer wgtypes.Key) (*wsRelayProxy, error
 		}},
 	}); err != nil {
 		udp.Close()
-		conn.Close(websocket.StatusInternalError, "")
+		conn.Close()
 		cancel()
 
 		return nil, fmt.Errorf("point peer at relay proxy: %w", err)
@@ -149,8 +147,8 @@ func (p *wsRelayProxy) udpToWS() {
 		p.wgDst = src
 		p.mu.Unlock()
 
-		if err := p.ws.Write(p.ctx, websocket.MessageBinary, buf[:n]); err != nil {
-			p.stop()
+		if err := p.ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+			p.close()
 			return
 		}
 	}
@@ -158,10 +156,13 @@ func (p *wsRelayProxy) udpToWS() {
 
 func (p *wsRelayProxy) wsToUDP() {
 	for {
-		_, data, err := p.ws.Read(p.ctx)
+		mt, data, err := p.ws.ReadMessage()
 		if err != nil {
-			p.stop()
+			p.close()
 			return
+		}
+		if mt != websocket.BinaryMessage {
+			continue
 		}
 
 		p.mu.Lock()
@@ -180,9 +181,11 @@ func (p *wsRelayProxy) wsToUDP() {
 }
 
 func (p *wsRelayProxy) close() {
-	p.stop()
-	p.udp.Close()
-	p.ws.Close(websocket.StatusNormalClosure, "")
+	p.once.Do(func() {
+		p.stop()
+		p.udp.Close()
+		p.ws.Close()
+	})
 }
 
 func (p *wsRelayProxy) endpoint() *net.UDPAddr {

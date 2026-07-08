@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/coder/websocket"
+	"github.com/gorilla/websocket"
 
 	"gowireguard/internal/store"
 )
@@ -18,20 +17,26 @@ import (
 // binary message is one WireGuard datagram.
 type wsFrameConn struct {
 	conn *websocket.Conn
-	ctx  context.Context
 }
 
 func (c wsFrameConn) ReadFrame() ([]byte, error) {
-	_, data, err := c.conn.Read(c.ctx)
-	return data, err
+	for {
+		mt, data, err := c.conn.ReadMessage()
+		if err != nil {
+			return nil, err
+		}
+		if mt == websocket.BinaryMessage {
+			return data, nil
+		}
+	}
 }
 
 func (c wsFrameConn) WriteFrame(b []byte) error {
-	return c.conn.Write(c.ctx, websocket.MessageBinary, b)
+	return c.conn.WriteMessage(websocket.BinaryMessage, b)
 }
 
 func (c wsFrameConn) Close() error {
-	return c.conn.Close(websocket.StatusNormalClosure, "")
+	return c.conn.Close()
 }
 
 // handleRelayWS bridges two authenticated peers over WebSocket. The
@@ -97,9 +102,9 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 	// (hijackLocked does SetDeadline(time.Time{})), so the upgraded
 	// connection is deliberately deadline-free from here on.
 	// TestRelayWSSurvivesServerTimeouts pins that behavior.
-	conn, err := websocket.Accept(w, r, nil)
+	conn, err := websocket.Upgrade(w, r, nil, 1024, 1024)
 	if err != nil {
-		// Accept already wrote a response.
+		// Upgrade already wrote a response.
 		return
 	}
 
@@ -107,15 +112,15 @@ func (s *server) handleRelayWS(w http.ResponseWriter, r *http.Request) {
 	// loop ends when either side disconnects.
 	conn.SetReadLimit(1 << 16)
 
-	fc := wsFrameConn{conn: conn, ctx: context.Background()}
+	fc := wsFrameConn{conn: conn}
 
 	slog.Info("relay-ws session opened", "peer_id", peerID, "pair", pairID[:8])
 	s.audit(r, "relay_ws_open", http.StatusOK, "websocket relay pair "+pairID[:8])
 
 	if err := s.wsHub.Serve(pairID, selfKey, fc); err != nil {
-		conn.Close(websocket.StatusInternalError, "relay closed")
+		conn.Close()
 	} else {
-		conn.Close(websocket.StatusNormalClosure, "")
+		conn.Close()
 	}
 
 	slog.Info("relay-ws session closed", "peer_id", peerID, "pair", pairID[:8])

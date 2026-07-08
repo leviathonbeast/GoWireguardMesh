@@ -15,7 +15,7 @@ import (
 
 	gowireguard "gowireguard"
 
-	"github.com/coder/websocket"
+	"github.com/gorilla/websocket"
 )
 
 // TestClientIPUsesRightmostForwardedFor: with a trusted proxy in
@@ -219,9 +219,7 @@ func dialRelayWS(t *testing.T, ctx context.Context, ts *httptest.Server, authTok
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/relay-ws?peer=" + url.QueryEscape(targetPubKey)
 
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + authToken}},
-	})
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, http.Header{"Authorization": []string{"Bearer " + authToken}})
 	if err != nil {
 		t.Fatalf("dial %s: %v", wsURL, err)
 	}
@@ -267,9 +265,9 @@ func TestRelayWSSurvivesServerTimeouts(t *testing.T) {
 	defer cancel()
 
 	connA := dialRelayWS(t, ctx, tight, a.AuthToken, keyB.PublicKey().String())
-	defer connA.Close(websocket.StatusNormalClosure, "")
+	defer connA.Close()
 	connB := dialRelayWS(t, ctx, tight, b.AuthToken, keyA.PublicKey().String())
-	defer connB.Close(websocket.StatusNormalClosure, "")
+	defer connB.Close()
 
 	// The hub drops frames until BOTH members have joined (by design —
 	// WireGuard keepalives retransmit), and a dial returning only
@@ -285,11 +283,17 @@ func TestRelayWSSurvivesServerTimeouts(t *testing.T) {
 	}
 
 	exchange := func(stage string) {
-		if err := connA.Write(ctx, websocket.MessageBinary, []byte("ping-"+stage)); err != nil {
+		if err := connA.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("%s: A write deadline: %v", stage, err)
+		}
+		if err := connA.WriteMessage(websocket.BinaryMessage, []byte("ping-"+stage)); err != nil {
 			t.Fatalf("%s: A write: %v", stage, err)
 		}
 
-		_, data, err := connB.Read(ctx)
+		if err := connB.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("%s: B read deadline: %v", stage, err)
+		}
+		_, data, err := connB.ReadMessage()
 		if err != nil {
 			t.Fatalf("%s: B read: %v", stage, err)
 		}
@@ -297,11 +301,17 @@ func TestRelayWSSurvivesServerTimeouts(t *testing.T) {
 			t.Fatalf("%s: B got %q", stage, data)
 		}
 
-		if err := connB.Write(ctx, websocket.MessageBinary, []byte("pong-"+stage)); err != nil {
+		if err := connB.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("%s: B write deadline: %v", stage, err)
+		}
+		if err := connB.WriteMessage(websocket.BinaryMessage, []byte("pong-"+stage)); err != nil {
 			t.Fatalf("%s: B write: %v", stage, err)
 		}
 
-		_, data, err = connA.Read(ctx)
+		if err := connA.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("%s: A read deadline: %v", stage, err)
+		}
+		_, data, err = connA.ReadMessage()
 		if err != nil {
 			t.Fatalf("%s: A read: %v", stage, err)
 		}
@@ -323,8 +333,8 @@ func TestRelayWSSurvivesServerTimeouts(t *testing.T) {
 	// final relay_ws_close audit row. httptest.Server.Close does not
 	// wait for hijacked connections, so without this the handlers'
 	// last DB writes race the store close and TempDir cleanup.
-	connA.Close(websocket.StatusNormalClosure, "")
-	connB.Close(websocket.StatusNormalClosure, "")
+	connA.Close()
+	connB.Close()
 
 	deadline := time.Now().Add(3 * time.Second)
 

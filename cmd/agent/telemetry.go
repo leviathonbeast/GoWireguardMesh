@@ -9,11 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"gowireguard/internal/proto"
+
+	"github.com/gorilla/websocket"
 )
 
 // ctFlow is one connection-tracking entry in platform-neutral form.
@@ -71,6 +74,7 @@ type directProbe struct {
 type telemetryReporter struct {
 	wg         wgBackend
 	client     *http.Client
+	wsDialer   *websocket.Dialer
 	serverURL  string
 	authToken  string
 	iface      string
@@ -81,6 +85,7 @@ type telemetryReporter struct {
 	lastDNS    string
 	dnsApplied bool
 	interval   time.Duration
+	syncMu     sync.Mutex
 
 	ct        flowDumper   // nil when the platform has no flow source
 	proxyTail *proxyTailer // nil unless --traefik-access-log is set
@@ -132,10 +137,15 @@ func newTelemetryReporter(
 	if err != nil {
 		return nil, err
 	}
+	wsDialer, err := newWebSocketDialer(serverCA)
+	if err != nil {
+		return nil, err
+	}
 
 	t := &telemetryReporter{
 		wg:              wg,
 		client:          client,
+		wsDialer:        wsDialer,
 		serverURL:       serverURL,
 		authToken:       authToken,
 		iface:           iface,
@@ -194,11 +204,17 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 	ticker := time.NewTicker(t.interval)
 	defer ticker.Stop()
 
+	signalDone := make(chan struct{})
+	go func() {
+		defer close(signalDone)
+		t.runSignal(stop)
+	}()
+
 	for {
 		select {
 		case <-stop:
-			t.collect()
-			t.send()
+			<-signalDone
+			t.syncOnce(false)
 
 			for _, p := range t.wsProxies {
 				p.close()
@@ -214,10 +230,19 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 
 			return
 		case <-ticker.C:
-			t.collect()
-			t.send()
-			t.checkHandshakes()
+			t.syncOnce(true)
 		}
+	}
+}
+
+func (t *telemetryReporter) syncOnce(checkPaths bool) {
+	t.syncMu.Lock()
+	defer t.syncMu.Unlock()
+
+	t.collect()
+	t.send()
+	if checkPaths {
+		t.checkHandshakes()
 	}
 }
 

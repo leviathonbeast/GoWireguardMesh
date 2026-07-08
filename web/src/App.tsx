@@ -61,6 +61,17 @@ function parseListInput(raw: string): string[] {
     .filter(Boolean);
 }
 
+function splitNameservers(nameservers: string[] = []): { v4: string[]; v6: string[] } {
+  return nameservers.reduce(
+    (acc, ns) => {
+      if (ns.includes(":")) acc.v6.push(ns);
+      else acc.v4.push(ns);
+      return acc;
+    },
+    { v4: [] as string[], v6: [] as string[] },
+  );
+}
+
 function peerLabel(hostname: string | undefined, ip: string): string {
   return hostname ? `${hostname} (${ip})` : ip;
 }
@@ -735,7 +746,8 @@ export default function App() {
   const [dnsEnabled, setDNSEnabled] = useState(false);
   const [dnsMagic, setDNSMagic] = useState(true);
   const [dnsDomain, setDNSDomain] = useState("vpn");
-  const [dnsNameservers, setDNSNameservers] = useState("");
+  const [dnsNameservers4, setDNSNameservers4] = useState("");
+  const [dnsNameservers6, setDNSNameservers6] = useState("");
   const [dnsSearchDomains, setDNSSearchDomains] = useState("vpn");
   const [dnsDirty, setDNSDirty] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -807,7 +819,9 @@ export default function App() {
       setDNSEnabled(d.enabled);
       setDNSMagic(d.magic_dns);
       setDNSDomain(d.domain || "vpn");
-      setDNSNameservers((d.nameservers || []).join("\n"));
+      const nameservers = splitNameservers(d.nameservers);
+      setDNSNameservers4(nameservers.v4.join("\n"));
+      setDNSNameservers6(nameservers.v6.join("\n"));
       setDNSSearchDomains((d.search_domains || []).join("\n"));
     }
   }, [dnsDirty]);
@@ -1205,7 +1219,10 @@ export default function App() {
           enabled: dnsEnabled,
           magic_dns: dnsMagic,
           domain: dnsDomain.trim(),
-          nameservers: parseListInput(dnsNameservers),
+          nameservers: [
+            ...parseListInput(dnsNameservers4),
+            ...parseListInput(dnsNameservers6),
+          ],
           search_domains: parseListInput(dnsSearchDomains),
         }),
       });
@@ -1213,7 +1230,9 @@ export default function App() {
       setDNSEnabled(next.enabled);
       setDNSMagic(next.magic_dns);
       setDNSDomain(next.domain || "vpn");
-      setDNSNameservers((next.nameservers || []).join("\n"));
+      const nameservers = splitNameservers(next.nameservers);
+      setDNSNameservers4(nameservers.v4.join("\n"));
+      setDNSNameservers6(nameservers.v6.join("\n"));
       setDNSSearchDomains((next.search_domains || []).join("\n"));
       setDNSDirty(false);
       showToast("DNS settings updated");
@@ -2155,9 +2174,15 @@ export default function App() {
                   <strong>{dns.domain || "vpn"}</strong>
                 </div>
                 <div>
-                  <span>Nameservers</span>
+                  <span>IPv4 nameservers</span>
                   <strong className="breakable">
-                    {(dns.nameservers || []).join(", ") || "not configured"}
+                    {splitNameservers(dns.nameservers).v4.join(", ") || "not configured"}
+                  </strong>
+                </div>
+                <div>
+                  <span>IPv6 nameservers</span>
+                  <strong className="breakable">
+                    {splitNameservers(dns.nameservers).v6.join(", ") || "not configured"}
                   </strong>
                 </div>
                 <div>
@@ -2214,12 +2239,23 @@ export default function App() {
                   />
                 </label>
                 <label>
-                  <span>Nameservers</span>
+                  <span>IPv4 nameservers</span>
                   <textarea
-                    value={dnsNameservers}
-                    placeholder={"100.78.0.1\nfd32:d2ad:be4f::1"}
+                    value={dnsNameservers4}
+                    placeholder="100.78.0.7"
                     onChange={(e) => {
-                      setDNSNameservers(e.target.value);
+                      setDNSNameservers4(e.target.value);
+                      setDNSDirty(true);
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>IPv6 nameservers</span>
+                  <textarea
+                    value={dnsNameservers6}
+                    placeholder="fd32:d2ad:be4f::7"
+                    onChange={(e) => {
+                      setDNSNameservers6(e.target.value);
                       setDNSDirty(true);
                     }}
                   />

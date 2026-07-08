@@ -57,12 +57,14 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 		adminToken:   "test-admin",
 		accessLog:    newAccessLogSink(accessLogMemory, 100),
 		wsHub:        relay.NewWSHub(),
+		signalHub:    newSignalHub(),
 		punchEpochs:  make(map[string]punchEpoch),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /enroll", srv.handleEnroll)
 	mux.HandleFunc("POST /report", srv.handleReport)
+	mux.HandleFunc("GET /signal", srv.handleSignalWS)
 	mux.HandleFunc("GET /relay-ws", srv.handleRelayWS)
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
