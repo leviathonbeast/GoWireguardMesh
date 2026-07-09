@@ -95,21 +95,23 @@ func (s *server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 }
 
 type peerJSON struct {
-	ID             int64  `json:"id"`
-	PublicKey      string `json:"public_key"`
-	AssignedIP     string `json:"assigned_ip"`
-	AssignedIP6    string `json:"assigned_ip6,omitempty"`
-	PeerType       string `json:"peer_type"`
-	GatewayPeerID  int64  `json:"gateway_peer_id,omitempty"` // routing gateway for a mobile peer
-	HealthStatus   string `json:"health_status"`
-	LastSeenAgeSec int64  `json:"last_seen_age_seconds,omitempty"`
-	Hostname       string `json:"hostname,omitempty"`
-	ListenPort     int    `json:"listen_port,omitempty"`
-	ObservedIP     string `json:"observed_ip,omitempty"`
-	PublicEndpoint string `json:"public_endpoint,omitempty"`
-	CreatedAt      string `json:"created_at"`
-	LastSeenAt     string `json:"last_seen_at,omitempty"`
-	RevokedAt      string `json:"revoked_at,omitempty"`
+	ID              int64  `json:"id"`
+	PublicKey       string `json:"public_key"`
+	AssignedIP      string `json:"assigned_ip"`
+	AssignedIP6     string `json:"assigned_ip6,omitempty"`
+	PeerType        string `json:"peer_type"`
+	GatewayPeerID   int64  `json:"gateway_peer_id,omitempty"`   // routing gateway for a mobile peer
+	GatewayEndpoint string `json:"gateway_endpoint,omitempty"`  // address a static peer dials
+	HasStoredConfig bool   `json:"has_stored_config,omitempty"` // GET /api/peers/{id}/config can rebuild it
+	HealthStatus    string `json:"health_status"`
+	LastSeenAgeSec  int64  `json:"last_seen_age_seconds,omitempty"`
+	Hostname        string `json:"hostname,omitempty"`
+	ListenPort      int    `json:"listen_port,omitempty"`
+	ObservedIP      string `json:"observed_ip,omitempty"`
+	PublicEndpoint  string `json:"public_endpoint,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	LastSeenAt      string `json:"last_seen_at,omitempty"`
+	RevokedAt       string `json:"revoked_at,omitempty"`
 }
 
 type setupKeyJSON struct {
@@ -170,21 +172,23 @@ func (s *server) handleListPeers(w http.ResponseWriter, r *http.Request) {
 func peerInfoJSON(p store.PeerInfo) peerJSON {
 	health, age := peerHealth(p.LastSeenAt, p.RevokedAt, p.PeerType)
 	return peerJSON{
-		ID:             p.ID,
-		PublicKey:      p.PublicKey,
-		AssignedIP:     p.AssignedIP,
-		AssignedIP6:    p.AssignedIP6,
-		PeerType:       peerType(p.PeerType),
-		GatewayPeerID:  p.GatewayPeerID,
-		HealthStatus:   health,
-		LastSeenAgeSec: age,
-		Hostname:       p.Hostname,
-		ListenPort:     p.ListenPort,
-		ObservedIP:     p.ObservedIP,
-		PublicEndpoint: p.PublicEndpoint,
-		CreatedAt:      p.CreatedAt,
-		LastSeenAt:     p.LastSeenAt,
-		RevokedAt:      p.RevokedAt,
+		ID:              p.ID,
+		PublicKey:       p.PublicKey,
+		AssignedIP:      p.AssignedIP,
+		AssignedIP6:     p.AssignedIP6,
+		PeerType:        peerType(p.PeerType),
+		GatewayPeerID:   p.GatewayPeerID,
+		GatewayEndpoint: p.GatewayEndpoint,
+		HasStoredConfig: p.HasStoredConfig,
+		HealthStatus:    health,
+		LastSeenAgeSec:  age,
+		Hostname:        p.Hostname,
+		ListenPort:      p.ListenPort,
+		ObservedIP:      p.ObservedIP,
+		PublicEndpoint:  p.PublicEndpoint,
+		CreatedAt:       p.CreatedAt,
+		LastSeenAt:      p.LastSeenAt,
+		RevokedAt:       p.RevokedAt,
 	}
 }
 

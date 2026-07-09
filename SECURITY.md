@@ -240,7 +240,19 @@ Sidecar specifics:
   deliberate UX tradeoff so keys stay copyable. Hash-at-rest with
   show-once-at-creation was considered and deferred; treat the database
   file's confidentiality accordingly.
-- No PSK-master rotation without re-enrolling the fleet.
+- Static (phone/appliance) peers' private keys are stored, so the admin
+  UI can show their config and QR code again. They are sealed with
+  AES-256-GCM under an HKDF subkey of the PSK master and bound to the
+  peer's public key, so `mesh.db` alone does not disclose them — but an
+  attacker holding both `mesh.db` and `mesh-psk.key` recovers every
+  device key, just as they already recover every pair PSK. Keep the two
+  files in different backup domains, or supply your own private key at
+  creation (`private_key`), which is never stored and forgoes re-showing
+  the config. Reads of a stored config are audited as
+  `mobile_peer_config_view`.
+- No PSK-master rotation without re-enrolling the fleet. Rotating it also
+  strands every stored device config: the sealed keys no longer open, and
+  those devices must be re-created.
 - Single-writer SQLite: fine for hundreds of peers, not thousands.
 - Relay is store-and-forward UDP/WebSocket with no bandwidth accounting.
 - The Windows agent has not been exercised on real hardware.

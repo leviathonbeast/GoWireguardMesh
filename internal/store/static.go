@@ -11,19 +11,33 @@ import (
 	"time"
 )
 
+// StaticPeer describes a peer to register that will not run the wgmesh
+// agent. PrivateKeyEnc and GatewayEndpoint are what let the admin UI show
+// the peer's config again later; leave PrivateKeyEnc empty when the
+// operator supplied their own key, since the control plane never saw it.
+type StaticPeer struct {
+	PublicKey     string
+	Hostname      string
+	GatewayPeerID int64
+	// PrivateKeyEnc is sealed by internal/keyseal, never plaintext.
+	PrivateKeyEnc   string
+	GatewayEndpoint string
+}
+
 // CreateStaticPeer registers a peer that will not run the wgmesh agent.
 // This is intended for official WireGuard clients such as iOS/Android:
 // the control plane owns IP allocation and visibility, while the client
 // imports a conventional WireGuard config.
 //
-// gatewayPeerID is the active agent peer that routes this peer's overlay
+// GatewayPeerID is the active agent peer that routes this peer's overlay
 // /32 into the mesh (its WireGuard endpoint). It must reference an active
 // agent peer; 0 is rejected. The gateway forwards — it does not NAT — so
 // the mobile peer keeps its overlay source IP end-to-end, and every other
 // agent learns the /32 via the gateway peer's AllowedIPs.
-func (s *Store) CreateStaticPeer(ctx context.Context, publicKey, hostname string, gatewayPeerID int64) (PeerInfo, error) {
-	publicKey = strings.TrimSpace(publicKey)
-	hostname = strings.TrimSpace(hostname)
+func (s *Store) CreateStaticPeer(ctx context.Context, spec StaticPeer) (PeerInfo, error) {
+	publicKey := strings.TrimSpace(spec.PublicKey)
+	hostname := strings.TrimSpace(spec.Hostname)
+	gatewayPeerID := spec.GatewayPeerID
 	if publicKey == "" {
 		return PeerInfo{}, fmt.Errorf("public_key is required")
 	}
@@ -107,9 +121,11 @@ func (s *Store) CreateStaticPeer(ctx context.Context, publicKey, hostname string
 	now := time.Now().UTC().Format(timeFormat)
 
 	insertPeer, err := tx.ExecContext(ctx,
-		`INSERT INTO peers (public_key, assigned_ip, assigned_ip6, peer_type, gateway_peer_id, hostname, setup_key_id, auth_token_hash, auth_token_issued_at)
-		 VALUES (?, ?, ?, 'static', ?, ?, ?, ?, ?)`,
-		publicKey, ip, nullable(ip6), gatewayPeerID, nullable(hostname), setupKeyID, tokenHash, now,
+		`INSERT INTO peers (public_key, assigned_ip, assigned_ip6, peer_type, gateway_peer_id, gateway_endpoint,
+		                    private_key_enc, hostname, setup_key_id, auth_token_hash, auth_token_issued_at)
+		 VALUES (?, ?, ?, 'static', ?, ?, ?, ?, ?, ?, ?)`,
+		publicKey, ip, nullable(ip6), gatewayPeerID, nullable(spec.GatewayEndpoint),
+		nullable(spec.PrivateKeyEnc), nullable(hostname), setupKeyID, tokenHash, now,
 	)
 	if err != nil {
 		return PeerInfo{}, fmt.Errorf("insert static peer: %w", err)
@@ -129,6 +145,34 @@ func (s *Store) CreateStaticPeer(ctx context.Context, publicKey, hostname string
 	}
 
 	return peer, nil
+}
+
+// ErrNoStoredConfig reports a static peer whose private key the control
+// plane cannot produce: an agent, a pre-v15 peer, or one enrolled with an
+// operator-supplied key. Its config can never be rebuilt.
+var ErrNoStoredConfig = errors.New("peer has no stored configuration")
+
+// SealedPrivateKey returns the static peer's sealed private key, for the
+// caller to open with internal/keyseal. It is the only path out of the
+// store for that column, deliberately narrow so that no listing or peer
+// lookup can leak it by accident.
+func (s *Store) SealedPrivateKey(ctx context.Context, peerID int64) (string, error) {
+	var sealed sql.NullString
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT private_key_enc FROM peers WHERE id = ? AND COALESCE(peer_type, 'agent') = 'static'`,
+		peerID,
+	).Scan(&sealed)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", fmt.Errorf("peer %d: %w", peerID, ErrNoStoredConfig)
+	case err != nil:
+		return "", fmt.Errorf("look up sealed key for peer %d: %w", peerID, err)
+	case !sealed.Valid || sealed.String == "":
+		return "", fmt.Errorf("peer %d: %w", peerID, ErrNoStoredConfig)
+	}
+
+	return sealed.String, nil
 }
 
 func randomStaticSetupKey() (string, error) {

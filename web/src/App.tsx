@@ -498,13 +498,88 @@ function configFileName(peer: Peer): string {
 }
 
 /**
+ * DeviceConfig renders a static peer's WireGuard config as a QR code to
+ * scan, a listing to copy, and a .conf to download. It is shown when the
+ * device is created and again from the peer's details page, which rebuilds
+ * the same config from the sealed private key.
+ */
+function DeviceConfig({ result, peers }: { result: MobilePeerResponse; peers: Peer[] }) {
+  const label = result.peer.hostname || `peer ${result.peer.id}`;
+
+  return (
+    <>
+      <div className="qr-result">
+        <div className="qr-frame">
+          <QRCodeSVG
+            className="qr-code"
+            value={result.config}
+            size={256}
+            level="L"
+            marginSize={4}
+            title={`WireGuard configuration for ${label}`}
+          />
+        </div>
+        <div className="stack">
+          <p>
+            In the WireGuard app, add a tunnel by <strong>scanning from a QR code</strong>. Or
+            download the config and import it.
+          </p>
+          <div className="detail-list">
+            <div>
+              <span>Overlay IPv4</span>
+              <strong>{result.peer.assigned_ip}</strong>
+            </div>
+            {result.peer.assigned_ip6 && (
+              <div>
+                <span>Overlay IPv6</span>
+                <strong>{result.peer.assigned_ip6}</strong>
+              </div>
+            )}
+            <div>
+              <span>Gateway</span>
+              <strong>
+                {result.peer.gateway_peer_id
+                  ? gatewayName(peers, result.peer.gateway_peer_id)
+                  : "none"}
+              </strong>
+            </div>
+          </div>
+          <div className="row">
+            <CopyButton text={result.config} />
+            <button
+              onClick={() => downloadText(configFileName(result.peer), result.config, "text/plain")}
+            >
+              download .conf
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <p className="qr-secret">
+        This config contains the device's private key. Anyone who scans this code can join the mesh
+        as {label}.
+      </p>
+
+      <pre className="config-block">{result.config}</pre>
+
+      {result.warnings?.map((warning) => (
+        <p className="muted" key={warning}>
+          {warning}
+        </p>
+      ))}
+    </>
+  );
+}
+
+/**
  * StaticPeerDialog enrolls a device that runs stock WireGuard rather than
  * the wgmesh agent — a phone, a router, an appliance — and hands back its
  * config as a QR code to scan and a .conf to download.
  *
- * The control plane generates the private key, embeds it in the config,
- * and forgets it. There is no second chance to see this config: closing
- * the dialog without capturing it means creating a new peer.
+ * When the control plane generates the key it also stores it sealed, so
+ * the config can be shown again later from the peer's details page. A
+ * key supplied by the operator is never stored, and that config is shown
+ * exactly once.
  */
 function StaticPeerDialog({
   token,
@@ -607,71 +682,7 @@ function StaticPeerDialog({
           </>
         )}
 
-        {result && (
-          <>
-            <div className="qr-result">
-              <div className="qr-frame">
-                <QRCodeSVG
-                  className="qr-code"
-                  value={result.config}
-                  size={256}
-                  level="L"
-                  marginSize={4}
-                  title={`WireGuard configuration for ${result.peer.hostname || `peer ${result.peer.id}`}`}
-                />
-              </div>
-              <div className="stack">
-                <p>
-                  In the WireGuard app, add a tunnel by <strong>scanning from a QR code</strong>.
-                  Or download the config and import it.
-                </p>
-                <div className="detail-list">
-                  <div>
-                    <span>Overlay IPv4</span>
-                    <strong>{result.peer.assigned_ip}</strong>
-                  </div>
-                  {result.peer.assigned_ip6 && (
-                    <div>
-                      <span>Overlay IPv6</span>
-                      <strong>{result.peer.assigned_ip6}</strong>
-                    </div>
-                  )}
-                  <div>
-                    <span>Gateway</span>
-                    <strong>
-                      {result.peer.gateway_peer_id
-                        ? gatewayName(peers, result.peer.gateway_peer_id)
-                        : "none"}
-                    </strong>
-                  </div>
-                </div>
-                <div className="row">
-                  <CopyButton text={result.config} />
-                  <button
-                    onClick={() =>
-                      downloadText(configFileName(result.peer), result.config, "text/plain")
-                    }
-                  >
-                    download .conf
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <p className="qr-secret">
-              This config contains the device's private key. The control plane does not store it,
-              so this is the only time it is shown.
-            </p>
-
-            <pre className="config-block">{result.config}</pre>
-
-            {result.warnings?.map((warning) => (
-              <p className="muted" key={warning}>
-                {warning}
-              </p>
-            ))}
-          </>
-        )}
+        {result && <DeviceConfig result={result} peers={peers} />}
 
         {error && <div className="error">{error}</div>}
 
@@ -1018,6 +1029,8 @@ export default function App() {
   const [machineFilter, setMachineFilter] = useState("");
   const [staticPeerOpen, setStaticPeerOpen] = useState(false);
   const [selectedPeerID, setSelectedPeerID] = useState<number | null>(null);
+  const [peerConfig, setPeerConfig] = useState<MobilePeerResponse | null>(null);
+  const [peerConfigLoading, setPeerConfigLoading] = useState(false);
   const [trafficFilter, setTrafficFilter] = useState("");
   const [auditFilter, setAuditFilter] = useState("");
   const [accessFilter, setAccessFilter] = useState("");
@@ -1171,6 +1184,12 @@ export default function App() {
     const id = window.setTimeout(() => setToast(""), 3200);
     return () => window.clearTimeout(id);
   }, [toast]);
+
+  // A fetched config holds a private key. Drop it the moment the operator
+  // leaves the peer, so it neither lingers nor renders under another peer.
+  useEffect(() => {
+    setPeerConfig(null);
+  }, [selectedPeerID]);
 
   useEffect(() => {
     if (selectedPeerID == null) return;
@@ -1358,6 +1377,21 @@ export default function App() {
 
   const confirmPost = (action: ConfirmAction) => {
     setConfirmAction(action);
+  };
+
+  // loadPeerConfig fetches a static peer's config on demand rather than
+  // with the dashboard: it embeds a private key, so it is only pulled when
+  // an admin explicitly asks, and the read is audited server-side.
+  const loadPeerConfig = async (p: Peer) => {
+    setError("");
+    setPeerConfigLoading(true);
+    try {
+      setPeerConfig(await api<MobilePeerResponse>(`/api/peers/${p.id}/config`, token));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPeerConfigLoading(false);
+    }
   };
 
   const startPeerAddressEdit = (p: Peer) => {
@@ -1835,7 +1869,11 @@ export default function App() {
                     </div>
                     <div>
                       <span>Endpoint</span>
-                      <strong>{endpointOf(selectedPeer) || "unknown"}</strong>
+                      <strong>
+                        {selectedPeer.peer_type === "static"
+                          ? selectedPeer.gateway_endpoint || "unknown"
+                          : endpointOf(selectedPeer) || "unknown"}
+                      </strong>
                     </div>
                     <div>
                       <span>Observed address</span>
@@ -1872,6 +1910,42 @@ export default function App() {
                   )}
                 </div>
               </section>
+
+              {selectedPeer.peer_type === "static" && !selectedPeer.revoked_at && (
+                <section className="panel stack">
+                  <div className="section-head">
+                    <h2>WireGuard configuration</h2>
+                    {selectedPeer.has_stored_config && !peerConfig && (
+                      <button
+                        className="primary"
+                        disabled={peerConfigLoading}
+                        onClick={() => void loadPeerConfig(selectedPeer)}
+                      >
+                        {peerConfigLoading ? "loading" : "show config & QR"}
+                      </button>
+                    )}
+                    {peerConfig && <button onClick={() => setPeerConfig(null)}>hide</button>}
+                  </div>
+
+                  {!selectedPeer.has_stored_config && (
+                    <p className="muted">
+                      This device's private key is not stored, so its config cannot be shown again.
+                      That happens when the key was supplied by an operator rather than generated
+                      here, or when the device predates config storage. Create a new device to issue
+                      a fresh config.
+                    </p>
+                  )}
+
+                  {selectedPeer.has_stored_config && !peerConfig && (
+                    <p className="muted">
+                      Rebuilds this device's config from its stored key, using the current overlay
+                      network and DNS settings. Reading it is recorded in the audit log.
+                    </p>
+                  )}
+
+                  {peerConfig && <DeviceConfig result={peerConfig} peers={peers} />}
+                </section>
+              )}
 
               <section className="panel stack">
                 <div className="section-head">

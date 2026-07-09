@@ -17,6 +17,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	gowireguard "gowireguard"
+	"gowireguard/internal/keyseal"
 	"gowireguard/internal/proto"
 	"gowireguard/internal/relay"
 	"gowireguard/internal/store"
@@ -50,6 +51,11 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 		t.Fatalf("generate psk master: %v", err)
 	}
 
+	deviceKeys, err := keyseal.New(pskMaster)
+	if err != nil {
+		t.Fatalf("keyseal.New: %v", err)
+	}
+
 	sessionKey := make([]byte, 32)
 	if _, err := rand.Read(sessionKey); err != nil {
 		t.Fatalf("session key: %v", err)
@@ -60,6 +66,7 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 		networkCIDR:  cfg.NetworkCIDR,
 		network6CIDR: cfg.NetworkCIDR6,
 		pskMaster:    pskMaster,
+		deviceKeys:   deviceKeys,
 		adminToken:   "test-admin",
 		sessionKey:   sessionKey,
 		accessLog:    newAccessLogSink(accessLogMemory, 100),
@@ -82,6 +89,7 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
 	mux.HandleFunc("POST /api/mobile-peers", srv.requireAdmin(srv.handleCreateMobilePeer))
+	mux.HandleFunc("GET /api/peers/{id}/config", srv.requireAdmin(srv.handleStaticPeerConfig))
 	mux.HandleFunc("POST /api/peers/{id}/address", srv.requireAdmin(srv.handleUpdatePeerAddress))
 	mux.HandleFunc("POST /api/peers/{id}/remove", srv.requireAdmin(srv.handleRemovePeer))
 	mux.HandleFunc("GET /api/network", srv.requireAdmin(srv.handleGetNetwork))

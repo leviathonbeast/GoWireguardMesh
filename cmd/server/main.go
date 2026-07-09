@@ -28,6 +28,7 @@ import (
 	gowireguard "gowireguard"
 	"gowireguard/internal/firewall"
 	"gowireguard/internal/httpx"
+	"gowireguard/internal/keyseal"
 	"gowireguard/internal/proto"
 	"gowireguard/internal/psk"
 	"gowireguard/internal/relay"
@@ -54,7 +55,8 @@ type server struct {
 	networkMu    sync.RWMutex
 	networkCIDR  string
 	network6CIDR string
-	pskMaster    wgtypes.Key // never distributed; per-pair PSKs derive from it
+	pskMaster    wgtypes.Key     // never distributed; per-pair PSKs derive from it
+	deviceKeys   *keyseal.Sealer // seals static peers' private keys at rest
 	adminToken   string
 	sessionKey   []byte // HMAC key for UI session cookies; independent of adminToken
 	trustProxy   bool
@@ -301,11 +303,17 @@ func runServe(args []string) error {
 		}
 	}
 
+	deviceKeys, err := keyseal.New(networkPSK)
+	if err != nil {
+		return err
+	}
+
 	srv := &server{
 		store:        st,
 		networkCIDR:  networkCfg.NetworkCIDR,
 		network6CIDR: networkCfg.NetworkCIDR6,
 		pskMaster:    networkPSK,
+		deviceKeys:   deviceKeys,
 		adminToken:   adminToken,
 		sessionKey:   sessionKey,
 		trustProxy:   *trustProxy,
@@ -393,6 +401,7 @@ func runServe(args []string) error {
 	mux.Handle("GET /", srv.uiHandler(ui))
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
 	mux.HandleFunc("POST /api/mobile-peers", srv.requireAdmin(srv.handleCreateMobilePeer))
+	mux.HandleFunc("GET /api/peers/{id}/config", srv.requireAdmin(srv.handleStaticPeerConfig))
 	mux.HandleFunc("GET /api/peers/{id}/ping", srv.requireAdmin(srv.handlePingPeer))
 	mux.HandleFunc("POST /api/peers/{id}/address", srv.requireAdmin(srv.handleUpdatePeerAddress))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))

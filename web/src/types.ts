@@ -7,6 +7,8 @@ export interface Peer {
   assigned_ip6?: string;
   peer_type: "agent" | "static";
   gateway_peer_id?: number; // for a routed mobile peer, the agent that carries its /32
+  gateway_endpoint?: string; // the address a static peer dials
+  has_stored_config?: boolean; // GET /api/peers/{id}/config can rebuild its WireGuard config
   health_status: "online" | "stale" | "offline" | "revoked" | "static" | "unknown";
   last_seen_age_seconds?: number;
   hostname?: string;
@@ -37,13 +39,14 @@ export interface SetupKey {
   uses_consumed: number;
 }
 
-// MobilePeerResponse is the one and only time the control plane hands
-// back a static peer's private key: it is generated, embedded in the
-// config, and never stored. Mirrors mobilePeerResponse in mobile.go.
+// MobilePeerResponse carries a static peer's complete WireGuard config,
+// private key included. Returned when the peer is created and again from
+// GET /api/peers/{id}/config, which rebuilds it from the sealed key.
+// Mirrors mobilePeerResponse in mobile.go.
 export interface MobilePeerResponse {
   peer: Peer;
   config: string;
-  private_key?: string;
+  private_key?: string; // only on create; on re-show the key rides inside config
   preshared_key: string;
   warnings?: string[];
 }

@@ -166,7 +166,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 14
+const schemaVersion = 15
 
 var migrations = map[int]string{
 	2:  migrationV2,
@@ -182,7 +182,25 @@ var migrations = map[int]string{
 	12: migrationV12,
 	13: migrationV13,
 	14: migrationV14,
+	15: migrationV15,
 }
+
+// migrationV15 lets the admin UI show a static peer's WireGuard config
+// again after it was created, instead of only once at creation time.
+//
+// private_key_enc holds the device's private key sealed by internal/keyseal
+// (AES-GCM under a subkey of the mesh PSK master, bound to the peer's public
+// key), so the database alone does not disclose it. gateway_endpoint records
+// the address the device dials, which is chosen per device at creation and
+// is not recoverable from the gateway peer's row.
+//
+// Both are NULL for agents, and for static peers created before v15 or
+// enrolled with an operator-supplied key that the control plane never saw;
+// those peers simply have no config to re-show.
+const migrationV15 = `
+ALTER TABLE peers ADD COLUMN private_key_enc TEXT;
+ALTER TABLE peers ADD COLUMN gateway_endpoint TEXT;
+`
 
 // migrationV14 adds admin user accounts for username/password login to the
 // web UI. auth_source distinguishes local (password_hash set) from future

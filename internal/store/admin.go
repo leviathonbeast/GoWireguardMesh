@@ -23,19 +23,24 @@ var ErrAddressInUse = errors.New("address already assigned")
 var ErrPeerExists = errors.New("peer already exists")
 
 type PeerInfo struct {
-	ID             int64
-	PublicKey      string
-	AssignedIP     string
-	AssignedIP6    string // "" when the IPv6 overlay is not configured
-	PeerType       string // agent | static
-	GatewayPeerID  int64  // routing gateway for a static/mobile peer; 0 if unset
-	Hostname       string // "" if unset
-	ListenPort     int    // 0 if unset
-	ObservedIP     string // "" if unknown
-	PublicEndpoint string // "" if unknown
-	CreatedAt      string
-	LastSeenAt     string // "" if never
-	RevokedAt      string // "" if active
+	ID              int64
+	PublicKey       string
+	AssignedIP      string
+	AssignedIP6     string // "" when the IPv6 overlay is not configured
+	PeerType        string // agent | static
+	GatewayPeerID   int64  // routing gateway for a static/mobile peer; 0 if unset
+	GatewayEndpoint string // address a static peer dials; "" if unset
+	// HasStoredConfig reports whether the control plane sealed this static
+	// peer's private key and can therefore rebuild its config. The sealed
+	// key itself is never carried on PeerInfo.
+	HasStoredConfig bool
+	Hostname        string // "" if unset
+	ListenPort      int    // 0 if unset
+	ObservedIP      string // "" if unknown
+	PublicEndpoint  string // "" if unknown
+	CreatedAt       string
+	LastSeenAt      string // "" if never
+	RevokedAt       string // "" if active
 }
 
 type SetupKeyInfo struct {
@@ -52,7 +57,8 @@ type SetupKeyInfo struct {
 func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), COALESCE(peer_type, 'agent'),
-		        COALESCE(gateway_peer_id, 0), hostname, listen_port,
+		        COALESCE(gateway_peer_id, 0), COALESCE(gateway_endpoint, ''),
+		        private_key_enc IS NOT NULL, hostname, listen_port,
 		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''),
 		        created_at, last_seen_at, revoked_at
 		 FROM peers ORDER BY id`,
@@ -74,7 +80,7 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 		)
 
 		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &p.PeerType,
-			&p.GatewayPeerID, &hostname, &port,
+			&p.GatewayPeerID, &p.GatewayEndpoint, &p.HasStoredConfig, &hostname, &port,
 			&p.ObservedIP, &p.PublicEndpoint,
 			&p.CreatedAt, &lastSeen, &revoked); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
@@ -273,6 +279,11 @@ func ensurePeerAddressFree(ctx context.Context, tx *sql.Tx, column string, selfI
 	}
 }
 
+// Peer looks up a single peer, returning ErrNotFound if it does not exist.
+func (s *Store) Peer(ctx context.Context, id int64) (PeerInfo, error) {
+	return getPeerInfo(ctx, s.db, id)
+}
+
 func getPeerInfo(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, id int64) (PeerInfo, error) {
@@ -286,12 +297,14 @@ func getPeerInfo(ctx context.Context, q interface {
 
 	err := q.QueryRowContext(ctx,
 		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), COALESCE(peer_type, 'agent'),
-		        COALESCE(gateway_peer_id, 0), hostname, listen_port,
+		        COALESCE(gateway_peer_id, 0), COALESCE(gateway_endpoint, ''),
+		        private_key_enc IS NOT NULL, hostname, listen_port,
 		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''),
 		        created_at, last_seen_at, revoked_at
 		 FROM peers WHERE id = ?`,
 		id,
-	).Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &p.PeerType, &p.GatewayPeerID, &hostname, &port,
+	).Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &p.PeerType, &p.GatewayPeerID,
+		&p.GatewayEndpoint, &p.HasStoredConfig, &hostname, &port,
 		&p.ObservedIP, &p.PublicEndpoint,
 		&p.CreatedAt, &lastSeen, &revoked)
 	if err != nil {

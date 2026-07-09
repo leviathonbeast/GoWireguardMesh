@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -38,7 +39,7 @@ func TestCreateStaticPeerPersistsGateway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratePrivateKey: %v", err)
 	}
-	peer, err := st.CreateStaticPeer(ctx, mobKey.PublicKey().String(), "iphone", gateway.ID)
+	peer, err := st.CreateStaticPeer(ctx, StaticPeer{PublicKey: mobKey.PublicKey().String(), Hostname: "iphone", GatewayPeerID: gateway.ID})
 	if err != nil {
 		t.Fatalf("CreateStaticPeer: %v", err)
 	}
@@ -47,6 +48,74 @@ func TestCreateStaticPeerPersistsGateway(t *testing.T) {
 	}
 	if peer.GatewayPeerID != gateway.ID {
 		t.Fatalf("gateway_peer_id = %d, want %d", peer.GatewayPeerID, gateway.ID)
+	}
+}
+
+// The sealed key and endpoint are what let the admin UI rebuild a config
+// later; a peer created without a sealed key must report that it has none.
+func TestCreateStaticPeerPersistsSealedKeyAndEndpoint(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t, "100.64.0.0/16")
+
+	setupKey, err := st.CreateSetupKey(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+	gateway := enrollAgent(t, st, setupKey, "gateway")
+
+	sealedKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey: %v", err)
+	}
+	sealed, err := st.CreateStaticPeer(ctx, StaticPeer{
+		PublicKey:       sealedKey.PublicKey().String(),
+		Hostname:        "iphone",
+		GatewayPeerID:   gateway.ID,
+		PrivateKeyEnc:   "sealed-blob",
+		GatewayEndpoint: "mesh.example.com:51820",
+	})
+	if err != nil {
+		t.Fatalf("CreateStaticPeer: %v", err)
+	}
+	if !sealed.HasStoredConfig {
+		t.Fatal("HasStoredConfig = false, want true")
+	}
+	if sealed.GatewayEndpoint != "mesh.example.com:51820" {
+		t.Fatalf("gateway_endpoint = %q, want mesh.example.com:51820", sealed.GatewayEndpoint)
+	}
+
+	got, err := st.SealedPrivateKey(ctx, sealed.ID)
+	if err != nil {
+		t.Fatalf("SealedPrivateKey: %v", err)
+	}
+	if got != "sealed-blob" {
+		t.Fatalf("SealedPrivateKey = %q, want sealed-blob", got)
+	}
+
+	// A peer whose key the operator supplied stores nothing to unseal.
+	byoKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey: %v", err)
+	}
+	byo, err := st.CreateStaticPeer(ctx, StaticPeer{
+		PublicKey:       byoKey.PublicKey().String(),
+		Hostname:        "byo",
+		GatewayPeerID:   gateway.ID,
+		GatewayEndpoint: "mesh.example.com:51820",
+	})
+	if err != nil {
+		t.Fatalf("CreateStaticPeer: %v", err)
+	}
+	if byo.HasStoredConfig {
+		t.Fatal("HasStoredConfig = true for an operator-supplied key")
+	}
+	if _, err := st.SealedPrivateKey(ctx, byo.ID); !errors.Is(err, ErrNoStoredConfig) {
+		t.Fatalf("SealedPrivateKey: err = %v, want ErrNoStoredConfig", err)
+	}
+
+	// Agents never have one either, and must not be reachable by peer id.
+	if _, err := st.SealedPrivateKey(ctx, gateway.ID); !errors.Is(err, ErrNoStoredConfig) {
+		t.Fatalf("SealedPrivateKey(agent): err = %v, want ErrNoStoredConfig", err)
 	}
 }
 
@@ -66,17 +135,17 @@ func TestCreateStaticPeerRejectsBadGateway(t *testing.T) {
 	}
 
 	// Missing gateway id.
-	if _, err := st.CreateStaticPeer(ctx, mobKey.PublicKey().String(), "iphone", 0); err == nil {
+	if _, err := st.CreateStaticPeer(ctx, StaticPeer{PublicKey: mobKey.PublicKey().String(), Hostname: "iphone", GatewayPeerID: 0}); err == nil {
 		t.Fatal("CreateStaticPeer with gateway 0 should fail")
 	}
 
 	// Nonexistent gateway.
-	if _, err := st.CreateStaticPeer(ctx, mobKey.PublicKey().String(), "iphone", 999999); err == nil {
+	if _, err := st.CreateStaticPeer(ctx, StaticPeer{PublicKey: mobKey.PublicKey().String(), Hostname: "iphone", GatewayPeerID: 999999}); err == nil {
 		t.Fatal("CreateStaticPeer with unknown gateway should fail")
 	}
 
 	// A static peer cannot be another static peer's gateway.
-	firstMobile, err := st.CreateStaticPeer(ctx, mobKey.PublicKey().String(), "iphone", gateway.ID)
+	firstMobile, err := st.CreateStaticPeer(ctx, StaticPeer{PublicKey: mobKey.PublicKey().String(), Hostname: "iphone", GatewayPeerID: gateway.ID})
 	if err != nil {
 		t.Fatalf("CreateStaticPeer: %v", err)
 	}
@@ -84,7 +153,7 @@ func TestCreateStaticPeerRejectsBadGateway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratePrivateKey: %v", err)
 	}
-	_, err = st.CreateStaticPeer(ctx, secondKey.PublicKey().String(), "ipad", firstMobile.ID)
+	_, err = st.CreateStaticPeer(ctx, StaticPeer{PublicKey: secondKey.PublicKey().String(), Hostname: "ipad", GatewayPeerID: firstMobile.ID})
 	if err == nil || !strings.Contains(err.Error(), "must be a wgmesh agent") {
 		t.Fatalf("static-peer-as-gateway error = %v, want 'must be a wgmesh agent'", err)
 	}
@@ -109,7 +178,7 @@ func TestGatewaySeesOwnMobileUnderDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratePrivateKey: %v", err)
 	}
-	mobile, err := st.CreateStaticPeer(ctx, mobKey.PublicKey().String(), "iphone", gateway.ID)
+	mobile, err := st.CreateStaticPeer(ctx, StaticPeer{PublicKey: mobKey.PublicKey().String(), Hostname: "iphone", GatewayPeerID: gateway.ID})
 	if err != nil {
 		t.Fatalf("CreateStaticPeer: %v", err)
 	}

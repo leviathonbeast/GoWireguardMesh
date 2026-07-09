@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -195,4 +197,221 @@ func TestCreateMobilePeerCanGeneratePrivateKey(t *testing.T) {
 	if len(out.Warnings) == 0 {
 		t.Fatal("generated-key response has no warnings")
 	}
+	if !out.Peer.HasStoredConfig {
+		t.Fatal("a control-plane-generated key must be stored so the config can be shown again")
+	}
+}
+
+// createMobilePeer creates a static peer through the admin API, returning
+// the create response. A blank privateKey lets the control plane generate
+// (and therefore store) the key.
+func createMobilePeer(t *testing.T, ts *httptest.Server, name, gatewayPub, privateKey string) mobilePeerResponse {
+	t.Helper()
+
+	payload := map[string]any{
+		"name":               name,
+		"gateway_public_key": gatewayPub,
+		"gateway_endpoint":   "mesh.example.com:51820",
+	}
+	if privateKey != "" {
+		payload["private_key"] = privateKey
+	}
+
+	status, body := adminDo(t, ts, http.MethodPost, "/api/mobile-peers", payload)
+	if status != http.StatusOK {
+		t.Fatalf("POST /api/mobile-peers status = %d: %s", status, body)
+	}
+
+	var out mobilePeerResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode mobile response: %v", err)
+	}
+
+	return out
+}
+
+// The whole point of sealing the key: the config an admin downloads later
+// is byte-for-byte the one the device imported at creation.
+func TestStaticPeerConfigRebuildsTheSameConfig(t *testing.T) {
+	srv, ts := newTestServer(t)
+
+	setupKey, err := srv.store.CreateSetupKey(context.Background(), 1, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+	_, gatewayKey := enrollPeerKey(t, ts, setupKey, "gateway")
+
+	created := createMobilePeer(t, ts, "iphone", gatewayKey.PublicKey().String(), "")
+
+	status, body := adminDo(t, ts, http.MethodGet, fmt.Sprintf("/api/peers/%d/config", created.Peer.ID), nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET config status = %d: %s", status, body)
+	}
+
+	var shown mobilePeerResponse
+	if err := json.Unmarshal(body, &shown); err != nil {
+		t.Fatalf("decode config response: %v", err)
+	}
+
+	if shown.Config != created.Config {
+		t.Fatalf("rebuilt config differs from the created one:\n--- created ---\n%s\n--- rebuilt ---\n%s",
+			created.Config, shown.Config)
+	}
+	if shown.PresharedKey != created.PresharedKey {
+		t.Fatalf("preshared key = %q, want %q", shown.PresharedKey, created.PresharedKey)
+	}
+	// The key rides inside Config; echoing it in its own field would put it
+	// in one more place for no benefit.
+	if shown.PrivateKey != "" {
+		t.Fatalf("re-show response should not carry private_key separately, got %q", shown.PrivateKey)
+	}
+	if !strings.Contains(shown.Config, "PrivateKey = "+created.PrivateKey) {
+		t.Fatal("rebuilt config does not carry the device's original private key")
+	}
+}
+
+// The key is sealed at rest: the raw database must not contain it.
+func TestStaticPeerPrivateKeyIsSealedAtRest(t *testing.T) {
+	srv, ts := newTestServer(t)
+
+	setupKey, err := srv.store.CreateSetupKey(context.Background(), 1, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+	_, gatewayKey := enrollPeerKey(t, ts, setupKey, "gateway")
+
+	created := createMobilePeer(t, ts, "iphone", gatewayKey.PublicKey().String(), "")
+
+	sealed, err := srv.store.SealedPrivateKey(context.Background(), created.Peer.ID)
+	if err != nil {
+		t.Fatalf("SealedPrivateKey: %v", err)
+	}
+	if sealed == created.PrivateKey || strings.Contains(sealed, created.PrivateKey) {
+		t.Fatal("stored column contains the plaintext private key")
+	}
+
+	opened, err := srv.deviceKeys.Open(created.Peer.PublicKey, sealed)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if opened != created.PrivateKey {
+		t.Fatalf("unsealed key = %q, want %q", opened, created.PrivateKey)
+	}
+}
+
+// An operator-supplied key is never stored, so its config cannot be shown
+// again — the admin keeps sole custody.
+func TestStaticPeerConfigAbsentForOperatorSuppliedKey(t *testing.T) {
+	srv, ts := newTestServer(t)
+
+	setupKey, err := srv.store.CreateSetupKey(context.Background(), 1, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+	_, gatewayKey := enrollPeerKey(t, ts, setupKey, "gateway")
+
+	own, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey: %v", err)
+	}
+	created := createMobilePeer(t, ts, "byo", gatewayKey.PublicKey().String(), own.String())
+
+	if created.Peer.HasStoredConfig {
+		t.Fatal("an operator-supplied key must not be stored")
+	}
+
+	status, body := adminDo(t, ts, http.MethodGet, fmt.Sprintf("/api/peers/%d/config", created.Peer.ID), nil)
+	if status != http.StatusConflict {
+		t.Fatalf("GET config status = %d, want 409: %s", status, body)
+	}
+}
+
+func TestStaticPeerConfigRejectsAgentsRevokedAndMissing(t *testing.T) {
+	srv, ts := newTestServer(t)
+
+	setupKey, err := srv.store.CreateSetupKey(context.Background(), 1, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+	_, gatewayKey := enrollPeerKey(t, ts, setupKey, "gateway")
+
+	created := createMobilePeer(t, ts, "iphone", gatewayKey.PublicKey().String(), "")
+
+	// An agent has no static config to show.
+	gatewayID := peerIDForKey(t, srv, gatewayKey.PublicKey().String())
+	if status, body := adminDo(t, ts, http.MethodGet, fmt.Sprintf("/api/peers/%d/config", gatewayID), nil); status != http.StatusBadRequest {
+		t.Fatalf("GET config for agent status = %d, want 400: %s", status, body)
+	}
+
+	if status, body := adminDo(t, ts, http.MethodGet, "/api/peers/99999/config", nil); status != http.StatusNotFound {
+		t.Fatalf("GET config for unknown peer status = %d, want 404: %s", status, body)
+	}
+
+	// A revoked device's config would not connect, so it is not handed out.
+	if err := srv.store.RevokePeer(context.Background(), created.Peer.ID); err != nil {
+		t.Fatalf("RevokePeer: %v", err)
+	}
+	if status, body := adminDo(t, ts, http.MethodGet, fmt.Sprintf("/api/peers/%d/config", created.Peer.ID), nil); status != http.StatusConflict {
+		t.Fatalf("GET config for revoked peer status = %d, want 409: %s", status, body)
+	}
+}
+
+// Reading a device's private key is a sensitive operation and must be
+// admin-gated and audited, exactly like creating one.
+func TestStaticPeerConfigRequiresAdminAndIsAudited(t *testing.T) {
+	srv, ts := newTestServer(t)
+
+	setupKey, err := srv.store.CreateSetupKey(context.Background(), 1, 0)
+	if err != nil {
+		t.Fatalf("CreateSetupKey: %v", err)
+	}
+	_, gatewayKey := enrollPeerKey(t, ts, setupKey, "gateway")
+	created := createMobilePeer(t, ts, "iphone", gatewayKey.PublicKey().String(), "")
+
+	path := fmt.Sprintf("%s/api/peers/%d/config", ts.URL, created.Peer.ID)
+	resp, err := http.Get(path)
+	if err != nil {
+		t.Fatalf("unauthenticated GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET status = %d, want 401", resp.StatusCode)
+	}
+
+	if status, body := adminDo(t, ts, http.MethodGet, fmt.Sprintf("/api/peers/%d/config", created.Peer.ID), nil); status != http.StatusOK {
+		t.Fatalf("admin GET config status = %d: %s", status, body)
+	}
+
+	rows, err := srv.store.ListAuditLog(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.Event == "mobile_peer_config_view" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("viewing a device config was not audited")
+	}
+}
+
+// peerIDForKey resolves a public key to its peer id.
+func peerIDForKey(t *testing.T, srv *server, publicKey string) int64 {
+	t.Helper()
+
+	peers, err := srv.store.ListPeers(context.Background())
+	if err != nil {
+		t.Fatalf("ListPeers: %v", err)
+	}
+	for _, p := range peers {
+		if p.PublicKey == publicKey {
+			return p.ID
+		}
+	}
+
+	t.Fatalf("no peer with public key %s", publicKey)
+	return 0
 }

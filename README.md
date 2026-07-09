@@ -217,7 +217,8 @@ rotating one never silently affects the other). Use the sidebar:
   and ACL posture at a glance.
 - **Machines** — registered peers with online/stale/offline status, overlay IP,
   endpoint, last seen, and inline revoke. **add device** generates a static
-  WireGuard config for a phone or appliance and shows it as a scannable QR code
+  WireGuard config for a phone or appliance and shows it as a scannable QR code;
+  a static peer's details page can show that config and QR again at any time
   (see [iPhone and Android](#iphone-and-android)).
 - **Traffic** — liveness, per-link totals, and a NetBird-style traffic-event
   feed (both peer names resolved, protocol/port, ingress/egress ports, and
@@ -244,6 +245,7 @@ the signed UI session cookie:
 |---|---|
 | `GET /api/peers` | list all peers, including revoked |
 | `POST /api/mobile-peers` | create a static/mobile WireGuard peer and return an importable config |
+| `GET /api/peers/{id}/config` | rebuild a static peer's config from its stored key (audited) |
 | `GET /api/peers/{id}/ping` | heartbeat/liveness status from the peer's last report |
 | `POST /api/peers/{id}/revoke` | revoke a peer (kept out of enrollment responses; IP stays reserved) |
 | `GET /api/network` | current persisted overlay CIDRs |
@@ -508,9 +510,18 @@ name the device, pick a gateway agent, and confirm the endpoint it should dial
 code to scan straight into the official WireGuard app — **Add tunnel → Create
 from QR code** — plus the config text to copy and a `.conf` to download.
 
-The config carries the device's private key, which the control plane generates
-and does not store, so the dialog shows it exactly once. Closing it means
-creating a new device.
+You can come back to it later: open the device from the Peers list and its
+details page has a **WireGuard configuration** section that shows the same QR
+code and `.conf` again, rebuilt from the stored key against the *current*
+overlay network and DNS settings. Each such read is recorded in the audit log
+as `mobile_peer_config_view`.
+
+To make that possible the control plane stores the device's private key,
+sealed with AES-256-GCM under a subkey of `mesh-psk.key` and bound to the
+device's public key. The database alone does not disclose it; the database
+*plus* `mesh-psk.key` does. If you would rather the control plane never hold
+the key, pass your own `private_key` when creating the device — it is not
+stored, and that config is shown exactly once. See [SECURITY.md](SECURITY.md).
 
 The same thing is available over the admin API, nominating an active,
 UDP-reachable gateway peer:
@@ -538,9 +549,15 @@ must be a wgmesh **agent** (not another static/mobile peer).
 
 The response includes `config`, a complete WireGuard tunnel configuration to
 import into the mobile app. If DNS is enabled, the generated config includes the
-configured IPv4 and IPv6 DNS nameservers. The server stores only the mobile
-peer's public key; when it generates a private key, that private key is returned
-only in this one response.
+configured IPv4 and IPv6 DNS nameservers. To fetch that config again later:
+
+```bash
+curl -sS https://mesh.example.com/api/peers/7/config \
+  -H "Authorization: Bearer $WGMESH_ADMIN_TOKEN"
+```
+
+That returns `409` for a peer whose key the control plane never held, for a
+revoked peer, and for one whose gateway agent has since been removed.
 
 For the same QR code from a terminal, without the web UI:
 
@@ -575,8 +592,8 @@ is shared.
 
 Limitations: mobile/static peers do not use wgmesh WebSocket relay, signal sync,
 telemetry, or live re-IP. If you change the overlay CIDR, DNS, gateway endpoint,
-or the mobile peer address, re-export/re-import the config. The gateway peer
-must be reachable over UDP.
+or the mobile peer address, re-import the config — the details page will show
+the current one. The gateway peer must be reachable over UDP.
 
 Legacy NAT mode: the older `--gateway-nat-cidrs 100.78.0.9/32` flag still works
 and masquerades the given overlay CIDRs through the agent instead of routing
