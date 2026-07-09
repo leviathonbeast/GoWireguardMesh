@@ -216,7 +216,9 @@ rotating one never silently affects the other). Use the sidebar:
 - **Overview** — active machines, direct/relayed path counts, setup-key count,
   and ACL posture at a glance.
 - **Machines** — registered peers with online/stale/offline status, overlay IP,
-  endpoint, last seen, and inline revoke.
+  endpoint, last seen, and inline revoke. **add device** generates a static
+  WireGuard config for a phone or appliance and shows it as a scannable QR code
+  (see [iPhone and Android](#iphone-and-android)).
 - **Traffic** — liveness, per-link totals, and a NetBird-style traffic-event
   feed (both peer names resolved, protocol/port, ingress/egress ports, and
   `↓ rx / ↑ tx`) with a **search box** (ip / port / hostname / protocol).
@@ -500,8 +502,18 @@ clients on those platforms must use the native iOS NetworkExtension or Android
 VpnService APIs. The supported path is a static/mobile WireGuard peer for the
 official WireGuard app.
 
-Create one through the admin API and nominate an active, UDP-reachable gateway
-peer:
+The quickest route is the web UI. On the **Peers** tab, click **add device**,
+name the device, pick a gateway agent, and confirm the endpoint it should dial
+(prefilled from the gateway's known public endpoint). The dialog then shows a QR
+code to scan straight into the official WireGuard app — **Add tunnel → Create
+from QR code** — plus the config text to copy and a `.conf` to download.
+
+The config carries the device's private key, which the control plane generates
+and does not store, so the dialog shows it exactly once. Closing it means
+creating a new device.
+
+The same thing is available over the admin API, nominating an active,
+UDP-reachable gateway peer:
 
 ```bash
 curl -sS https://mesh.example.com/api/mobile-peers \
@@ -530,7 +542,7 @@ configured IPv4 and IPv6 DNS nameservers. The server stores only the mobile
 peer's public key; when it generates a private key, that private key is returned
 only in this one response.
 
-For a phone-friendly flow, generate a terminal QR code:
+For the same QR code from a terminal, without the web UI:
 
 ```bash
 sudo apt install jq qrencode

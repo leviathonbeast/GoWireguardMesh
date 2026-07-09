@@ -37,6 +37,17 @@ export interface SetupKey {
   uses_consumed: number;
 }
 
+// MobilePeerResponse is the one and only time the control plane hands
+// back a static peer's private key: it is generated, embedded in the
+// config, and never stored. Mirrors mobilePeerResponse in mobile.go.
+export interface MobilePeerResponse {
+  peer: Peer;
+  config: string;
+  private_key?: string;
+  preshared_key: string;
+  warnings?: string[];
+}
+
 export interface LinkStat {
   peer_id: number;
   peer_hostname?: string;

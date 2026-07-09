@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { ApiError, api } from "./api";
 import type {
   AccessLogRow,
@@ -11,6 +12,7 @@ import type {
   DNSConfig,
   Flow,
   LinkStat,
+  MobilePeerResponse,
   NetworkConfig,
   NetworkPeerChange,
   NetworkMigrationPlan,
@@ -114,6 +116,20 @@ async function copyToClipboard(text: string): Promise<boolean> {
 
   ta.remove();
   return ok;
+}
+
+// downloadText saves a string the browser already holds, without a second
+// trip to the server. A static peer's config carries its private key and
+// exists only in the create response, so re-fetching it is not an option.
+function downloadText(filename: string, contents: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([contents], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -451,6 +467,233 @@ type ConfirmAction = {
   onConfirm: () => Promise<void> | void;
 };
 
+// Only an active agent can act as a static peer's gateway: it is the peer
+// that routes the device's overlay /32 into the mesh. Static peers run
+// stock WireGuard, so they cannot route for each other.
+function gatewayCandidates(peers: Peer[]): Peer[] {
+  return peers.filter((p) => p.peer_type === "agent" && !p.revoked_at);
+}
+
+function hostPort(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
+// suggestEndpoint prefills the address the device will dial. A gateway's
+// observed_ip is the source of its last report, so its listen port — not
+// that report's ephemeral source port — is what accepts WireGuard.
+function suggestEndpoint(gateway?: Peer): string {
+  if (!gateway) return "";
+  if (gateway.public_endpoint) return gateway.public_endpoint;
+  if (!gateway.observed_ip) return "";
+
+  return hostPort(gateway.observed_ip, gateway.listen_port || 51820);
+}
+
+// configFileName is also the tunnel name the WireGuard apps display, and
+// they only accept [a-zA-Z0-9_=+.-] up to 15 characters.
+function configFileName(peer: Peer): string {
+  const cleaned = (peer.hostname || "").replace(/[^a-zA-Z0-9_=+.-]/g, "-").slice(0, 15);
+
+  return `${cleaned || `wgmesh-${peer.id}`}.conf`;
+}
+
+/**
+ * StaticPeerDialog enrolls a device that runs stock WireGuard rather than
+ * the wgmesh agent — a phone, a router, an appliance — and hands back its
+ * config as a QR code to scan and a .conf to download.
+ *
+ * The control plane generates the private key, embeds it in the config,
+ * and forgets it. There is no second chance to see this config: closing
+ * the dialog without capturing it means creating a new peer.
+ */
+function StaticPeerDialog({
+  token,
+  peers,
+  onCreated,
+  onClose,
+}: {
+  token: string;
+  peers: Peer[];
+  onCreated: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const gateways = gatewayCandidates(peers);
+  const [name, setName] = useState("");
+  const [gatewayKey, setGatewayKey] = useState(gateways[0]?.public_key ?? "");
+  const [endpoint, setEndpoint] = useState(() => suggestEndpoint(gateways[0]));
+  const [endpointEdited, setEndpointEdited] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<MobilePeerResponse | null>(null);
+
+  const selectGateway = (key: string) => {
+    setGatewayKey(key);
+    if (!endpointEdited) setEndpoint(suggestEndpoint(gateways.find((p) => p.public_key === key)));
+  };
+
+  const create = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const created = await api<MobilePeerResponse>("/api/mobile-peers", token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          gateway_public_key: gatewayKey,
+          gateway_endpoint: endpoint.trim(),
+        }),
+      });
+      setResult(created);
+      await onCreated();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="static-title">
+        <h2 id="static-title">
+          {result ? `Scan to configure ${result.peer.hostname || `peer ${result.peer.id}`}` : "Add a WireGuard device"}
+        </h2>
+
+        {!result && (
+          <>
+            <p className="muted">
+              For devices that run the official WireGuard client instead of the wgmesh agent.
+              The device joins as a static peer routed through a gateway agent, keeping its own
+              overlay address end to end.
+            </p>
+
+            <div className="form-grid device-form">
+              <label>
+                <span>Name</span>
+                <input
+                  placeholder="pixel-8"
+                  value={name}
+                  autoFocus
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>Gateway</span>
+                <select value={gatewayKey} onChange={(e) => selectGateway(e.target.value)}>
+                  {gateways.map((p) => (
+                    <option key={p.id} value={p.public_key}>
+                      {p.hostname || `peer ${p.id}`} ({p.assigned_ip})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Gateway endpoint</span>
+                <input
+                  placeholder="vpn.example.com:51820"
+                  value={endpoint}
+                  onChange={(e) => {
+                    setEndpointEdited(true);
+                    setEndpoint(e.target.value);
+                  }}
+                />
+              </label>
+            </div>
+            <p className="muted">
+              The device dials this address over UDP, so it must be reachable from wherever the
+              device roams. Static peers cannot use the wgmesh relay.
+            </p>
+          </>
+        )}
+
+        {result && (
+          <>
+            <div className="qr-result">
+              <div className="qr-frame">
+                <QRCodeSVG
+                  className="qr-code"
+                  value={result.config}
+                  size={256}
+                  level="L"
+                  marginSize={4}
+                  title={`WireGuard configuration for ${result.peer.hostname || `peer ${result.peer.id}`}`}
+                />
+              </div>
+              <div className="stack">
+                <p>
+                  In the WireGuard app, add a tunnel by <strong>scanning from a QR code</strong>.
+                  Or download the config and import it.
+                </p>
+                <div className="detail-list">
+                  <div>
+                    <span>Overlay IPv4</span>
+                    <strong>{result.peer.assigned_ip}</strong>
+                  </div>
+                  {result.peer.assigned_ip6 && (
+                    <div>
+                      <span>Overlay IPv6</span>
+                      <strong>{result.peer.assigned_ip6}</strong>
+                    </div>
+                  )}
+                  <div>
+                    <span>Gateway</span>
+                    <strong>
+                      {result.peer.gateway_peer_id
+                        ? gatewayName(peers, result.peer.gateway_peer_id)
+                        : "none"}
+                    </strong>
+                  </div>
+                </div>
+                <div className="row">
+                  <CopyButton text={result.config} />
+                  <button
+                    onClick={() =>
+                      downloadText(configFileName(result.peer), result.config, "text/plain")
+                    }
+                  >
+                    download .conf
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <p className="qr-secret">
+              This config contains the device's private key. The control plane does not store it,
+              so this is the only time it is shown.
+            </p>
+
+            <pre className="config-block">{result.config}</pre>
+
+            {result.warnings?.map((warning) => (
+              <p className="muted" key={warning}>
+                {warning}
+              </p>
+            ))}
+          </>
+        )}
+
+        {error && <div className="error">{error}</div>}
+
+        <div className="modal-actions">
+          <button disabled={busy} onClick={onClose}>
+            {result ? "done" : "cancel"}
+          </button>
+          {!result && (
+            <button
+              className="primary"
+              disabled={busy || !gatewayKey || !endpoint.trim()}
+              onClick={() => void create()}
+            >
+              {busy ? "creating" : "create device"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ConfirmModal({
   action,
   busy,
@@ -773,6 +1016,7 @@ export default function App() {
   const [newUserPassword, setNewUserPassword] = useState("");
   const [accountMsg, setAccountMsg] = useState("");
   const [machineFilter, setMachineFilter] = useState("");
+  const [staticPeerOpen, setStaticPeerOpen] = useState(false);
   const [selectedPeerID, setSelectedPeerID] = useState<number | null>(null);
   const [trafficFilter, setTrafficFilter] = useState("");
   const [auditFilter, setAuditFilter] = useState("");
@@ -1182,17 +1426,11 @@ export default function App() {
     setError("");
     try {
       const payload = await api<AclExport>("/api/acl/export", token);
-      const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `wgmesh-acl-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      downloadText(
+        `wgmesh-acl-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
+        JSON.stringify(payload, null, 2) + "\n",
+        "application/json",
+      );
       showToast("ACL export downloaded");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1726,6 +1964,18 @@ export default function App() {
             <>
           <div className="row page-tools">
             <h2 style={{ margin: 0 }}>Peers</h2>
+            <button
+              className="primary"
+              disabled={gatewayCandidates(peers).length === 0}
+              title={
+                gatewayCandidates(peers).length === 0
+                  ? "Enroll an agent first: a static peer is routed through one"
+                  : "Generate a WireGuard config and QR code for a phone or appliance"
+              }
+              onClick={() => setStaticPeerOpen(true)}
+            >
+              add device
+            </button>
             <SearchBox
               value={machineFilter}
               onChange={setMachineFilter}
@@ -2887,6 +3137,14 @@ export default function App() {
           busy={confirmBusy}
           onCancel={() => !confirmBusy && setConfirmAction(null)}
           onConfirm={() => void runConfirmAction()}
+        />
+      )}
+      {staticPeerOpen && (
+        <StaticPeerDialog
+          token={token}
+          peers={peers}
+          onCreated={refresh}
+          onClose={() => setStaticPeerOpen(false)}
         />
       )}
       {toast && <div className="toast">{toast}</div>}

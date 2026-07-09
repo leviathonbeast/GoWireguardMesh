@@ -334,10 +334,73 @@ h2 {
   color: var(--text);
 }
 
+.modal p.muted {
+  color: var(--muted);
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* The device dialog carries a QR code, a config listing and warnings, so
+   it is wider than a confirmation and scrolls on short viewports. */
+.modal-wide {
+  width: min(100%, 720px);
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+}
+
+.device-form {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.device-form select {
+  width: 100%;
+}
+
+.qr-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+/* The symbol carries its own 4-module quiet zone, but it must be light:
+   the frame keeps it white regardless of the surrounding dark console. */
+.qr-frame {
+  display: grid;
+  place-items: center;
+  width: 272px;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
+}
+
+.qr-code {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.qr-secret {
+  border-left: 3px solid var(--warn);
+  padding-left: 10px;
+  color: var(--warn);
+}
+
+.config-block {
+  margin: 0 0 12px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+  color: var(--text);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .toast {
@@ -992,6 +1055,15 @@ label {
   .peer-detail-head {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .qr-result {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .qr-frame {
+    width: min(100%, 272px);
   }
 
   .detail-list > div {
