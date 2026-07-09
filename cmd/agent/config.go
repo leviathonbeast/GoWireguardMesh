@@ -18,6 +18,7 @@ type agentConfig struct {
 	STUNServer       string
 	RelayTransport   string
 	DirectProbe      bool
+	GatewayNATCIDRs  string
 	ManageFirewall   bool
 	KeyFile          string
 	LogLevel         string
@@ -42,6 +43,7 @@ func agentConfigFromFlags() agentConfig {
 		STUNServer:       *stunServerFlag,
 		RelayTransport:   *relayTransportFlag,
 		DirectProbe:      *directProbeFlag,
+		GatewayNATCIDRs:  *gatewayNATCIDRsFlag,
 		ManageFirewall:   *manageFirewallFlag,
 		KeyFile:          *keyFileFlag,
 		LogLevel:         *logLevelFlag,

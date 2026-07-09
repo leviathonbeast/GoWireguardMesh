@@ -50,6 +50,33 @@ func loadOrGenerateAdminToken(path string) (string, error) {
 	return token, nil
 }
 
+// loadOrGenerateSessionKey returns the HMAC key that signs web-UI session
+// cookies. It is stored separately from the admin token so that rotating
+// UI passwords or the bearer token does not silently invalidate the other,
+// and so a leaked bearer token cannot be used to forge session cookies.
+func loadOrGenerateSessionKey(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		key, derr := hex.DecodeString(strings.TrimSpace(string(data)))
+		if derr != nil || len(key) < 32 {
+			return nil, fmt.Errorf("session key file %q is malformed", path)
+		}
+		return key, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read session key file %q: %w", path, err)
+	}
+
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generate session key: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(key)+"\n"), 0600); err != nil {
+		return nil, fmt.Errorf("write session key file %q: %w", path, err)
+	}
+	return key, nil
+}
+
 // requireAdmin wraps admin handlers with bearer-token auth. The web UI
 // can also authenticate with a signed HttpOnly session cookie, so the
 // dashboard bundle does not need to be public just to render a login
@@ -72,6 +99,8 @@ type peerJSON struct {
 	PublicKey      string `json:"public_key"`
 	AssignedIP     string `json:"assigned_ip"`
 	AssignedIP6    string `json:"assigned_ip6,omitempty"`
+	PeerType       string `json:"peer_type"`
+	GatewayPeerID  int64  `json:"gateway_peer_id,omitempty"` // routing gateway for a mobile peer
 	HealthStatus   string `json:"health_status"`
 	LastSeenAgeSec int64  `json:"last_seen_age_seconds,omitempty"`
 	Hostname       string `json:"hostname,omitempty"`
@@ -139,12 +168,14 @@ func (s *server) handleListPeers(w http.ResponseWriter, r *http.Request) {
 }
 
 func peerInfoJSON(p store.PeerInfo) peerJSON {
-	health, age := peerHealth(p.LastSeenAt, p.RevokedAt)
+	health, age := peerHealth(p.LastSeenAt, p.RevokedAt, p.PeerType)
 	return peerJSON{
 		ID:             p.ID,
 		PublicKey:      p.PublicKey,
 		AssignedIP:     p.AssignedIP,
 		AssignedIP6:    p.AssignedIP6,
+		PeerType:       peerType(p.PeerType),
+		GatewayPeerID:  p.GatewayPeerID,
 		HealthStatus:   health,
 		LastSeenAgeSec: age,
 		Hostname:       p.Hostname,
@@ -176,7 +207,7 @@ func (s *server) handlePingPeer(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		status, age := peerHealth(p.LastSeenAt, p.RevokedAt)
+		status, age := peerHealth(p.LastSeenAt, p.RevokedAt, p.PeerType)
 		writeJSON(w, http.StatusOK, peerPingJSON{
 			PeerID:         p.ID,
 			Status:         status,
@@ -189,9 +220,12 @@ func (s *server) handlePingPeer(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, "peer not found")
 }
 
-func peerHealth(lastSeenAt, revokedAt string) (string, int64) {
+func peerHealth(lastSeenAt, revokedAt, kind string) (string, int64) {
 	if revokedAt != "" {
 		return "revoked", 0
+	}
+	if peerType(kind) == "static" {
+		return "static", 0
 	}
 	if lastSeenAt == "" {
 		return "offline", 0
@@ -210,6 +244,15 @@ func peerHealth(lastSeenAt, revokedAt string) (string, int64) {
 		return "stale", age
 	default:
 		return "offline", age
+	}
+}
+
+func peerType(kind string) string {
+	switch kind {
+	case "static":
+		return "static"
+	default:
+		return "agent"
 	}
 }
 

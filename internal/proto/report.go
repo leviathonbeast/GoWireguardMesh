@@ -36,6 +36,11 @@ type ReportResponse struct {
 	DNS          DNSConfig            `json:"dns,omitempty"`
 	Peers        []PeerConfigResponse `json:"peers"`
 	ACL          *ACLPolicy           `json:"acl,omitempty"`
+
+	// GatewayRoutes lists the overlay CIDRs this agent is the routing
+	// gateway for (a routed mobile peer's /32 and /128). Non-empty ⇒
+	// the agent enables forwarding without NAT for its overlay iface.
+	GatewayRoutes []string `json:"gateway_routes,omitempty"`
 }
 
 // PeerCounter is the reporting agent's view of one WireGuard link.

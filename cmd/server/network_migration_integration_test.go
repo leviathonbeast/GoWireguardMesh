@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,16 +50,28 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 		t.Fatalf("generate psk master: %v", err)
 	}
 
+	sessionKey := make([]byte, 32)
+	if _, err := rand.Read(sessionKey); err != nil {
+		t.Fatalf("session key: %v", err)
+	}
+
 	srv := &server{
 		store:        st,
 		networkCIDR:  cfg.NetworkCIDR,
 		network6CIDR: cfg.NetworkCIDR6,
 		pskMaster:    pskMaster,
 		adminToken:   "test-admin",
+		sessionKey:   sessionKey,
 		accessLog:    newAccessLogSink(accessLogMemory, 100),
 		wsHub:        relay.NewWSHub(),
 		signalHub:    newSignalHub(),
 		punchEpochs:  make(map[string]punchEpoch),
+	}
+
+	// Seed the default admin user (username "admin", password = admin token)
+	// so session-based endpoints work in tests, mirroring first-boot.
+	if _, err := st.EnsureSeedUser(context.Background(), "admin", "test-admin"); err != nil {
+		t.Fatalf("seed admin user: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -77,6 +90,14 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 	mux.HandleFunc("GET /api/acl", srv.requireAdmin(srv.handleListACL))
 	mux.HandleFunc("GET /api/acl/export", srv.requireAdmin(srv.handleExportACL))
 	mux.HandleFunc("POST /api/acl/import", srv.requireAdmin(srv.handleImportACL))
+	mux.HandleFunc("POST /api/setup-keys", srv.requireAdmin(srv.handleCreateSetupKey))
+	mux.HandleFunc("POST /ui-login", srv.handleUILogin)
+	mux.HandleFunc("POST /api/logout", srv.handleLogout)
+	mux.HandleFunc("GET /api/account", srv.requireSession(srv.handleAccount))
+	mux.HandleFunc("POST /api/account/password", srv.requireSession(srv.handleChangePassword))
+	mux.HandleFunc("GET /api/users", srv.requireAdmin(srv.handleListUsers))
+	mux.HandleFunc("POST /api/users", srv.requireAdmin(srv.handleCreateUser))
+	mux.HandleFunc("POST /api/users/{id}/delete", srv.requireAdmin(srv.handleDeleteUser))
 
 	// Mirror the production middleware chain (logRequests wrapping
 	// securityHeaders) AND the production server limits, so tests

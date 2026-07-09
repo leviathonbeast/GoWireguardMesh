@@ -56,6 +56,7 @@ type server struct {
 	network6CIDR string
 	pskMaster    wgtypes.Key // never distributed; per-pair PSKs derive from it
 	adminToken   string
+	sessionKey   []byte // HMAC key for UI session cookies; independent of adminToken
 	trustProxy   bool
 	relay        relayAllocator // nil when no relay is configured
 	relayHost    string         // public data-plane address agents dial
@@ -161,6 +162,8 @@ func runServe(args []string) error {
 	tlsKey := fs.String("tls-key", "key.pem", "path to TLS private key (generated if missing)")
 	tlsHosts := fs.String("tls-hosts", "localhost,127.0.0.1", "comma-separated SANs for a generated certificate; include the address agents will dial")
 	adminTokenFile := fs.String("admin-token-file", "admin-token", "path to admin API token file (generated if missing)")
+	sessionKeyFile := fs.String("session-key-file", "session.key", "path to the web-UI session signing key (generated if missing)")
+	adminUser := fs.String("admin-user", "admin", "username seeded on first boot with the admin token as its initial password")
 	flowRetention := fs.Duration("flow-retention", 7*24*time.Hour, "how long to keep flow log rows")
 	trustProxy := fs.Bool("trust-proxy", false, "trust X-Forwarded-For for client addresses (only behind a reverse proxy)")
 	relayHost := fs.String("relay-host", "", "address agents dial for relayed traffic (enables relay fallback)")
@@ -262,6 +265,20 @@ func runServe(args []string) error {
 		return err
 	}
 
+	sessionKey, err := loadOrGenerateSessionKey(*sessionKeyFile)
+	if err != nil {
+		return err
+	}
+
+	// Seed the initial admin account on first boot so existing deployments
+	// keep working: sign in as --admin-user with the admin token, then set
+	// a real password from the UI. No-op once any user exists.
+	if seeded, err := st.EnsureSeedUser(context.Background(), *adminUser, adminToken); err != nil {
+		return fmt.Errorf("seed admin user: %w", err)
+	} else if seeded {
+		slog.Info("seeded initial admin user; log in with the admin token as the password and change it", "user", *adminUser)
+	}
+
 	if *manageFirewall {
 		if _, portStr, err := net.SplitHostPort(*listen); err == nil {
 			if port, err := strconv.Atoi(portStr); err == nil {
@@ -290,6 +307,7 @@ func runServe(args []string) error {
 		network6CIDR: networkCfg.NetworkCIDR6,
 		pskMaster:    networkPSK,
 		adminToken:   adminToken,
+		sessionKey:   sessionKey,
 		trustProxy:   *trustProxy,
 		accessLog:    newAccessLogSink(accessMode, *accessLogSize),
 		signalHub:    newSignalHub(),
@@ -398,6 +416,17 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /api/audit", srv.requireAdmin(srv.handleListAudit))
 	mux.HandleFunc("GET /api/connection-events", srv.requireAdmin(srv.handleListConnectionEvents))
 	mux.HandleFunc("GET /api/proxy-events", srv.requireAdmin(srv.handleListProxyEvents))
+
+	// Auth: session (who am I / change own password) and admin user
+	// management. Account endpoints require a UI session, not the bearer
+	// token, because they act as a specific user.
+	mux.HandleFunc("POST /api/logout", srv.handleLogout)
+	mux.HandleFunc("GET /api/account", srv.requireSession(srv.handleAccount))
+	mux.HandleFunc("POST /api/account/password", srv.requireSession(srv.handleChangePassword))
+	mux.HandleFunc("GET /api/users", srv.requireAdmin(srv.handleListUsers))
+	mux.HandleFunc("POST /api/users", srv.requireAdmin(srv.handleCreateUser))
+	mux.HandleFunc("POST /api/users/{id}/delete", srv.requireAdmin(srv.handleDeleteUser))
+
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 
 	// Every request gets security headers and a structured access-log
@@ -654,12 +683,37 @@ func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 	return out
 }
 
+// buildPeerEntries renders the WireGuard peer list for self out of the
+// peers it may reach. Routed static/mobile peers (an iPhone importing a
+// plain WireGuard config, pinned to a gateway agent) are handled by route,
+// not NAT, so the mobile keeps its overlay source IP:
+//
+//   - To every OTHER agent, a routed mobile is invisible as its own peer;
+//     instead its /32 (+/128) is folded into its gateway agent's
+//     AllowedIPs, so mesh traffic to the mobile routes through the gateway.
+//   - To its OWN gateway agent, the mobile IS a direct WireGuard peer
+//     (PSK'd, no endpoint hint — it roams in — AllowedIPs = its /32,/128),
+//     and the gateway is told (via GatewayRoutes) to forward without NAT.
 func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([]proto.PeerConfigResponse, error) {
 	keepalive := keepaliveSeconds
+
+	// Group routed mobiles by the gateway agent that carries their /32.
+	mobilesByGateway := make(map[int64][]store.PeerRow)
+	for _, o := range others {
+		if o.PeerType == "static" && o.GatewayPeerID != 0 {
+			mobilesByGateway[o.GatewayPeerID] = append(mobilesByGateway[o.GatewayPeerID], o)
+		}
+	}
 
 	peers := make([]proto.PeerConfigResponse, 0, len(others))
 
 	for _, o := range others {
+		// A routed mobile is a real WireGuard peer only for its own
+		// gateway; every other agent reaches it via the gateway's route.
+		if o.PeerType == "static" && o.GatewayPeerID != 0 && o.GatewayPeerID != self.ID {
+			continue
+		}
+
 		pairKey, err := psk.DerivePairKey(s.pskMaster, self.PublicKey, o.PublicKey)
 		if err != nil {
 			return nil, err
@@ -667,18 +721,49 @@ func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([
 
 		pairPSK := pairKey.String()
 
-		peers = append(peers, proto.PeerConfigResponse{
+		allowed := allowedIPsForPeer(o)
+
+		entry := proto.PeerConfigResponse{
 			PublicKey:                   o.PublicKey,
 			PresharedKey:                &pairPSK,
-			Endpoint:                    endpointHint(self, o),
-			EndpointCandidates:          endpointCandidates(self, o),
 			PunchEpoch:                  s.punchEpoch(self.PublicKey, o.PublicKey),
 			PersistentKeepaliveInterval: &keepalive,
-			AllowedIPs:                  allowedIPsForPeer(o),
-		})
+		}
+
+		if o.PeerType == "static" {
+			// The mobile has no wgmesh signalling: it dials its gateway
+			// and roams in. The gateway must not push an endpoint hint
+			// (there is none) and lets WireGuard learn the source.
+			entry.AllowedIPs = allowed
+		} else {
+			// A normal agent peer, plus the /32s of any routed mobiles
+			// it is the gateway for — this is what teaches every other
+			// agent to route mobile traffic through this gateway.
+			for _, m := range mobilesByGateway[o.ID] {
+				allowed = append(allowed, allowedIPsForPeer(m)...)
+			}
+			entry.Endpoint = endpointHint(self, o)
+			entry.EndpointCandidates = endpointCandidates(self, o)
+			entry.AllowedIPs = allowed
+		}
+
+		peers = append(peers, entry)
 	}
 
 	return peers, nil
+}
+
+// gatewayRoutesFor returns the overlay CIDRs self is the routing gateway
+// for — the /32 (+/128) of every routed mobile pinned to it. Drives the
+// agent's forward-without-NAT setup.
+func gatewayRoutesFor(self store.PeerRow, others []store.PeerRow) []string {
+	var routes []string
+	for _, o := range others {
+		if o.PeerType == "static" && o.GatewayPeerID == self.ID {
+			routes = append(routes, allowedIPsForPeer(o)...)
+		}
+	}
+	return routes
 }
 
 func (s *server) buildACLPolicy(ctx context.Context) (*proto.ACLPolicy, error) {
@@ -774,15 +859,16 @@ func (s *server) buildResponse(ctx context.Context, res *store.EnrollResult) (pr
 	}
 
 	return proto.EnrollResponse{
-		PeerID:       int(res.Peer.ID),
-		AssignedIP:   res.Peer.AssignedIP,
-		AssignedIP6:  res.Peer.AssignedIP6,
-		NetworkCIDR:  cfg.NetworkCIDR,
-		NetworkCIDR6: cfg.NetworkCIDR6,
-		DNS:          dnsConfigProto(dnsCfg),
-		Peers:        peers,
-		ACL:          acl,
-		AuthToken:    res.AuthToken,
+		PeerID:        int(res.Peer.ID),
+		AssignedIP:    res.Peer.AssignedIP,
+		AssignedIP6:   res.Peer.AssignedIP6,
+		NetworkCIDR:   cfg.NetworkCIDR,
+		NetworkCIDR6:  cfg.NetworkCIDR6,
+		DNS:           dnsConfigProto(dnsCfg),
+		Peers:         peers,
+		ACL:           acl,
+		GatewayRoutes: gatewayRoutesFor(res.Peer, res.Others),
+		AuthToken:     res.AuthToken,
 	}, nil
 }
 

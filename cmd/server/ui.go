@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gowireguard/internal/store"
 )
 
 const (
@@ -26,22 +28,45 @@ func (s *server) handleUILogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := strings.TrimSpace(r.Form.Get("token"))
-	if subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) != 1 {
-		writeUILogin(w, http.StatusUnauthorized, "admin token rejected")
+	username := strings.TrimSpace(r.Form.Get("username"))
+	password := r.Form.Get("password")
+
+	user, err := s.store.Authenticate(r.Context(), username, password)
+	if err != nil {
+		s.audit(r, "ui_login_failed", http.StatusUnauthorized, "user="+username)
+		writeUILogin(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     uiSessionCookie,
-		Value:    s.signUISession(time.Now().UTC()),
+		Value:    s.signUISession(user, time.Now().UTC()),
 		Path:     "/",
 		MaxAge:   int(uiSessionTTL.Seconds()),
 		HttpOnly: true,
-		Secure:   r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+		Secure:   s.requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 	})
+	s.audit(r, "ui_login", http.StatusOK, "user="+user.Username)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleLogout clears the session cookie.
+func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     uiSessionCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   s.requestIsHTTPS(r),
+		SameSite: http.SameSiteStrictMode,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
+}
+
+func (s *server) requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func (s *server) uiHandler(ui fs.FS) http.Handler {
@@ -62,52 +87,72 @@ func (s *server) uiHandler(ui fs.FS) http.Handler {
 	})
 }
 
-func (s *server) validUISession(r *http.Request) bool {
+// sessionUser returns the authenticated user for a request's session
+// cookie, or ok=false. It validates the HMAC (keyed by the server session
+// key, not the admin token), the TTL, and that the user still exists with a
+// matching session epoch — so a password change or user deletion revokes
+// outstanding cookies.
+func (s *server) sessionUser(r *http.Request) (store.User, bool) {
 	cookie, err := r.Cookie(uiSessionCookie)
 	if err != nil {
-		return false
+		return store.User{}, false
 	}
 
 	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
 	if err != nil {
-		return false
+		return store.User{}, false
 	}
 
-	tsRaw, macRaw, ok := strings.Cut(string(raw), ".")
+	payload, macRaw, ok := strings.Cut(string(raw), "|")
 	if !ok {
-		return false
+		return store.User{}, false
 	}
 
-	issued, err := strconv.ParseInt(tsRaw, 10, 64)
-	if err != nil {
-		return false
+	// payload = userID.epoch.issued
+	fields := strings.Split(payload, ".")
+	if len(fields) != 3 {
+		return store.User{}, false
+	}
+	userID, err1 := strconv.ParseInt(fields[0], 10, 64)
+	epoch, err2 := strconv.ParseInt(fields[1], 10, 64)
+	issued, err3 := strconv.ParseInt(fields[2], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return store.User{}, false
+	}
+
+	got, err := base64.RawURLEncoding.DecodeString(macRaw)
+	if err != nil || subtle.ConstantTimeCompare(got, s.uiSessionMAC(payload)) != 1 {
+		return store.User{}, false
 	}
 
 	issuedAt := time.Unix(issued, 0)
 	now := time.Now()
 	if issuedAt.After(now.Add(1*time.Minute)) || now.Sub(issuedAt) > uiSessionTTL {
-		return false
+		return store.User{}, false
 	}
 
-	want := s.uiSessionMAC(tsRaw)
-	got, err := base64.RawURLEncoding.DecodeString(macRaw)
-	if err != nil {
-		return false
+	user, err := s.store.UserByID(r.Context(), userID)
+	if err != nil || user.SessionEpoch != epoch {
+		return store.User{}, false
 	}
-
-	return subtle.ConstantTimeCompare(got, want) == 1
+	return user, true
 }
 
-func (s *server) signUISession(t time.Time) string {
-	ts := strconv.FormatInt(t.Unix(), 10)
-	mac := base64.RawURLEncoding.EncodeToString(s.uiSessionMAC(ts))
-	return base64.RawURLEncoding.EncodeToString([]byte(ts + "." + mac))
+func (s *server) validUISession(r *http.Request) bool {
+	_, ok := s.sessionUser(r)
+	return ok
 }
 
-func (s *server) uiSessionMAC(ts string) []byte {
-	mac := hmac.New(sha256.New, []byte(s.adminToken))
+func (s *server) signUISession(user store.User, t time.Time) string {
+	payload := fmt.Sprintf("%d.%d.%d", user.ID, user.SessionEpoch, t.Unix())
+	mac := base64.RawURLEncoding.EncodeToString(s.uiSessionMAC(payload))
+	return base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + mac))
+}
+
+func (s *server) uiSessionMAC(payload string) []byte {
+	mac := hmac.New(sha256.New, s.sessionKey)
 	_, _ = io.WriteString(mac, "wgmesh-ui-session.")
-	_, _ = io.WriteString(mac, ts)
+	_, _ = io.WriteString(mac, payload)
 	return mac.Sum(nil)
 }
 
@@ -147,8 +192,9 @@ func writeUILogin(w http.ResponseWriter, status int, message string) {
   <main>
     <div class="brand"><div class="mark">wg</div><div><div class="name">wgmesh</div><div class="sub">control plane</div></div></div>
     <form method="post" action="/ui-login">
-      <label>Admin token<input type="password" name="token" autocomplete="current-password" autofocus></label>
-      <button type="submit">connect</button>
+      <label>Username<input type="text" name="username" autocomplete="username" autofocus value="admin"></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password"></label>
+      <button type="submit">sign in</button>
     </form>
     %s
   </main>

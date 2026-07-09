@@ -73,21 +73,23 @@ type directProbe struct {
 // control plane. Deltas survive failed reports: pending data is only
 // cleared after the server accepts it.
 type telemetryReporter struct {
-	wg         wgBackend
-	client     *http.Client
-	wsDialer   *websocket.Dialer
-	serverURL  string
-	authToken  string
-	iface      string
-	selfAddr   string
-	selfAddr6  string
-	network    netip.Prefix
-	network6   netip.Prefix
-	lastDNS    string
-	dnsApplied bool
-	dnsWarned  bool
-	interval   time.Duration
-	syncMu     sync.Mutex
+	wg               wgBackend
+	client           *http.Client
+	wsDialer         *websocket.Dialer
+	serverURL        string
+	authToken        string
+	iface            string
+	selfAddr         string
+	selfAddr6        string
+	network          netip.Prefix
+	network6         netip.Prefix
+	lastDNS          string
+	dnsApplied       bool
+	dnsWarned        bool
+	interval         time.Duration
+	gatewayNATCIDRs  string
+	gatewayForwardOn bool // routed-mobile FORWARD accept currently installed
+	syncMu           sync.Mutex
 
 	ct        flowDumper   // nil when the platform has no flow source
 	proxyTail *proxyTailer // nil unless --traefik-access-log is set
@@ -136,6 +138,7 @@ func newTelemetryReporter(
 	interval time.Duration,
 	transport relayTransport,
 	enableDirectProbe bool,
+	gatewayNATCIDRs string,
 ) (*telemetryReporter, error) {
 	client, err := newHTTPClient(serverCA)
 	if err != nil {
@@ -158,6 +161,7 @@ func newTelemetryReporter(
 		network:         network,
 		network6:        network6,
 		interval:        interval,
+		gatewayNATCIDRs: gatewayNATCIDRs,
 		relayTransport:  transport,
 		directProbeOff:  !enableDirectProbe,
 		prevLink:        make(map[wgtypes.Key]linkCounters),
@@ -231,6 +235,11 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 
 			if t.proxyTail != nil {
 				t.proxyTail.Close()
+			}
+
+			// Remove the routed-mobile FORWARD accept if we installed it.
+			if err := applyGatewayRoutes(t.iface, nil, &t.gatewayForwardOn); err != nil {
+				slog.Warn("gateway route teardown failed", "error", err)
 			}
 
 			return
@@ -614,6 +623,12 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 
 	if err := applyOverlayACL(t.iface, sync.ACL); err != nil {
 		slog.Warn("overlay acl sync failed", "error", err)
+	}
+	if err := refreshGatewayNAT(t.iface, t.gatewayNATCIDRs); err != nil {
+		slog.Warn("gateway NAT refresh failed", "error", err)
+	}
+	if err := applyGatewayRoutes(t.iface, sync.GatewayRoutes, &t.gatewayForwardOn); err != nil {
+		slog.Warn("gateway route forwarding failed", "error", err)
 	}
 }
 

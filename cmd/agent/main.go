@@ -56,6 +56,7 @@ var (
 	stunServerFlag       = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables)")
 	relayTransportFlag   = flag.String("relay-transport", "websocket", "relay fallback transport: \"websocket\" (rides the control-plane port, needs no extra firewall holes) or \"udp\" (faster, needs the relay port range reachable)")
 	directProbeFlag      = flag.Bool("direct-probe", true, "probe direct endpoints while on relay (disable for reverse-proxy/service sidecars that prefer relay stability)")
+	gatewayNATCIDRsFlag  = flag.String("gateway-nat-cidrs", "", "comma-separated IPv4 CIDRs or addresses to masquerade through this peer (for static/mobile WireGuard clients)")
 	manageFirewallFlag   = flag.Bool("manage-firewall", true, "open the WireGuard listen port on the host firewall (removed again on shutdown)")
 	keyFileFlag          = flag.String("key-file", "wgkey.key", "path to private key file")
 	logLevelFlag         = flag.String("log-level", "info", "minimum log level: debug, info, warn, or error")

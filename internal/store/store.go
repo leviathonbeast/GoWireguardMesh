@@ -83,6 +83,15 @@ type PeerRow struct {
 	AssignedIP  string
 	AssignedIP6 string // "" when the IPv6 overlay is not configured
 
+	// PeerType is "agent" (runs the wgmesh agent) or "static" (an
+	// imported WireGuard client such as an iPhone).
+	PeerType string
+
+	// GatewayPeerID is the agent peer that routes this static/mobile
+	// peer's overlay /32 into the mesh; 0 when unset (unrouted static
+	// peer or a normal agent).
+	GatewayPeerID int64
+
 	// Endpoint hint material, in preference order.
 	PublicEndpoint string // STUN-discovered ip:port, "" if unknown
 	ObservedIP     string // enroll/report source IP, "" if unknown
@@ -157,7 +166,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 11
+const schemaVersion = 14
 
 var migrations = map[int]string{
 	2:  migrationV2,
@@ -170,7 +179,51 @@ var migrations = map[int]string{
 	9:  migrationV9,
 	10: migrationV10,
 	11: migrationV11,
+	12: migrationV12,
+	13: migrationV13,
+	14: migrationV14,
 }
+
+// migrationV14 adds admin user accounts for username/password login to the
+// web UI. auth_source distinguishes local (password_hash set) from future
+// OIDC-provisioned users. session_epoch is bumped on password change / forced
+// logout to invalidate that user's existing session cookies. The agent enroll
+// path and programmatic API keep using the bearer admin token, unaffected.
+const migrationV14 = `
+CREATE TABLE users (
+    id            INTEGER PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL DEFAULT '',
+    auth_source   TEXT NOT NULL DEFAULT 'local',
+    session_epoch INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+`
+
+// migrationV13 records which agent peer routes each static/mobile peer's
+// overlay /32 into the mesh. A routed mobile peer keeps its own overlay
+// source IP end-to-end: its gateway agent forwards (does not NAT) between
+// the mobile and the mesh, and every other agent learns the mobile's /32
+// via that gateway peer's AllowedIPs. NULL means "no gateway" (an
+// unrouted/legacy static peer). ON DELETE SET NULL so revoking a gateway
+// agent detaches its mobiles rather than cascading them away.
+const migrationV13 = `
+ALTER TABLE peers ADD COLUMN gateway_peer_id INTEGER REFERENCES peers(id) ON DELETE SET NULL;
+`
+
+// migrationV12 distinguishes normal wgmesh agents, which report telemetry,
+// from static/mobile WireGuard peers, which are managed by config import and
+// will never call /report.
+const migrationV12 = `
+ALTER TABLE peers ADD COLUMN peer_type TEXT NOT NULL DEFAULT 'agent';
+
+UPDATE peers
+SET peer_type = 'static'
+WHERE setup_key_id IN (
+    SELECT id FROM setup_keys WHERE COALESCE(name, '') LIKE 'static peer%'
+);
+`
 
 // migrationV11 records reverse-proxy access-log entries (e.g. from
 // Traefik) that agents tail and ship, for the dashboard Proxy Events log.
@@ -741,16 +794,17 @@ type querier interface {
 func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool) ([]PeerRow, error) {
 	rows, err := q.QueryContext(ctx,
 		`SELECT p.id, p.public_key, p.assigned_ip, COALESCE(p.assigned_ip6, ''),
+		        COALESCE(p.peer_type, 'agent'), COALESCE(p.gateway_peer_id, 0),
 		        COALESCE(p.public_endpoint, ''), COALESCE(p.observed_ip, ''), COALESCE(p.listen_port, 0)
 		 FROM peers p
 		 WHERE p.revoked_at IS NULL AND p.id != ?
-		   AND (? OR EXISTS (
+		   AND (? OR p.gateway_peer_id = ? OR EXISTS (
 		       SELECT 1 FROM acl_rules r
 		       WHERE (r.src_peer_id IS NULL OR r.src_peer_id IN (?, p.id))
 		         AND (r.dst_peer_id IS NULL OR r.dst_peer_id IN (?, p.id))
 		   ))
 		 ORDER BY p.id`,
-		selfID, defaultAllow, selfID, selfID,
+		selfID, defaultAllow, selfID, selfID, selfID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list peers: %w", err)
@@ -762,6 +816,7 @@ func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool
 	for rows.Next() {
 		var p PeerRow
 		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6,
+			&p.PeerType, &p.GatewayPeerID,
 			&p.PublicEndpoint, &p.ObservedIP, &p.ListenPort); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
@@ -783,9 +838,11 @@ func (s *Store) PeersForID(ctx context.Context, id int64) (PeerRow, []PeerRow, e
 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT public_key, assigned_ip, COALESCE(assigned_ip6, ''),
+		        COALESCE(peer_type, 'agent'), COALESCE(gateway_peer_id, 0),
 		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0)
 		 FROM peers WHERE id = ?`, id,
 	).Scan(&self.PublicKey, &self.AssignedIP, &self.AssignedIP6,
+		&self.PeerType, &self.GatewayPeerID,
 		&self.PublicEndpoint, &self.ObservedIP, &self.ListenPort)
 	if err != nil {
 		return PeerRow{}, nil, fmt.Errorf("look up peer %d: %w", id, err)

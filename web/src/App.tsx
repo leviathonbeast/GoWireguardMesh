@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { ApiError, api } from "./api";
 import type {
   AccessLogRow,
+  Account,
   AclExport,
   AclRule,
   AclResponse,
@@ -76,6 +77,13 @@ function peerLabel(hostname: string | undefined, ip: string): string {
   return hostname ? `${hostname} (${ip})` : ip;
 }
 
+// gatewayName resolves a routed mobile peer's gateway_peer_id to a label.
+function gatewayName(peers: Peer[], gatewayID: number): string {
+  const g = peers.find((p) => p.id === gatewayID);
+  if (!g) return `peer ${gatewayID}`;
+  return g.hostname || g.assigned_ip || `peer ${gatewayID}`;
+}
+
 // copyToClipboard works in secure contexts via the Clipboard API and
 // falls back to the legacy execCommand path on plain-HTTP origins,
 // where navigator.clipboard does not exist at all.
@@ -132,6 +140,8 @@ function PeerBadge({ peer }: { peer: Peer }) {
       return <span className="badge warn">stale</span>;
     case "revoked":
       return <span className="badge bad">revoked</span>;
+    case "static":
+      return <span className="badge warn">static</span>;
     case "offline":
       return <span className="badge bad">offline</span>;
     default:
@@ -155,6 +165,7 @@ function endpointOf(p: Peer): string {
 
 function lastSeenLabel(p: Peer): string {
   if (p.revoked_at) return "revoked";
+  if (p.peer_type === "static" || p.health_status === "static") return "WireGuard-only";
   if (!p.last_seen_at) return "never seen";
   if (p.last_seen_age_seconds == null) return formatTime(p.last_seen_at);
   if (p.last_seen_age_seconds < 60) return `${p.last_seen_age_seconds}s ago`;
@@ -179,7 +190,7 @@ function PathBadge({ state }: { state?: LinkStat["path_state"] }) {
 }
 
 
-const TABS = ["overview", "machines", "traffic", "policies", "setup", "logs", "proxy", "settings"] as const;
+const TABS = ["overview", "machines", "traffic", "policies", "setup", "logs", "proxy", "settings", "account"] as const;
 type Tab = (typeof TABS)[number];
 const DEFAULT_PAGE_SIZE = 10;
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
@@ -193,11 +204,13 @@ const TAB_LABEL: Record<Tab, string> = {
   logs: "Audit Events",
   proxy: "Proxy Events",
   settings: "Settings",
+  account: "Account",
 };
 
 // Sidebar layout: most tabs are top-level; the activity views (audit,
 // traffic, proxy) are grouped under a collapsible "Activity" section.
 const TOP_TABS: Tab[] = ["overview", "machines", "policies", "setup"];
+const BOTTOM_TABS: Tab[] = ["settings", "account"];
 const ACTIVITY_TABS: Tab[] = ["logs", "traffic", "proxy"];
 
 function textMatches(q: string, ...parts: unknown[]): boolean {
@@ -241,7 +254,7 @@ function accessMatches(a: AccessLogRow, q: string): boolean {
 function peerMatches(p: Peer, q: string): boolean {
   return textMatches(
     q,
-    p.id, p.hostname, p.assigned_ip, p.assigned_ip6, p.health_status,
+    p.id, p.hostname, p.assigned_ip, p.assigned_ip6, p.peer_type, p.health_status,
     p.public_key, p.public_endpoint, p.observed_ip, p.listen_port,
     lastSeenLabel(p), p.created_at, p.revoked_at,
   );
@@ -751,6 +764,14 @@ export default function App() {
   const [dnsSearchDomains, setDNSSearchDomains] = useState("vpn");
   const [dnsDirty, setDNSDirty] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [account, setAccount] = useState<Account | null>(null);
+  const [users, setUsers] = useState<Account[]>([]);
+  const [curPassword, setCurPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPassword2, setNewPassword2] = useState("");
+  const [newUsername, setNewUsername] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [accountMsg, setAccountMsg] = useState("");
   const [machineFilter, setMachineFilter] = useState("");
   const [selectedPeerID, setSelectedPeerID] = useState<number | null>(null);
   const [trafficFilter, setTrafficFilter] = useState("");
@@ -802,6 +823,11 @@ export default function App() {
       api<ConnectionEvent[]>("/api/connection-events?limit=1000", authToken),
       api<ProxyEvent[]>("/api/proxy-events?limit=1000", authToken),
     ]);
+    // Account/users are session-scoped and optional: a bearer-only session
+    // (no UI cookie) can't read them, so failures here must not break the
+    // dashboard load that gates authentication.
+    api<Account>("/api/account", authToken).then(setAccount).catch(() => setAccount(null));
+    api<Account[]>("/api/users", authToken).then(setUsers).catch(() => setUsers([]));
     setPeers(p);
     setKeys(k);
     setLinks(l);
@@ -944,6 +970,63 @@ export default function App() {
       }
     } finally {
       setAuthChecking(false);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await api("/api/logout", token, { method: "POST" });
+    } catch {
+      // ignore; we clear local state regardless
+    }
+    lockAdminUI("signed out");
+  };
+
+  const changePassword = async () => {
+    setAccountMsg("");
+    if (newPassword !== newPassword2) {
+      setAccountMsg("new passwords do not match");
+      return;
+    }
+    try {
+      await api("/api/account/password", token, {
+        method: "POST",
+        body: JSON.stringify({ current_password: curPassword, new_password: newPassword }),
+      });
+      setCurPassword("");
+      setNewPassword("");
+      setNewPassword2("");
+      setAccountMsg("password changed");
+      setToast("password changed");
+    } catch (e) {
+      setAccountMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const createUser = async () => {
+    setAccountMsg("");
+    try {
+      await api("/api/users", token, {
+        method: "POST",
+        body: JSON.stringify({ username: newUsername.trim(), password: newUserPassword }),
+      });
+      setNewUsername("");
+      setNewUserPassword("");
+      setUsers(await api<Account[]>("/api/users", token));
+      setToast("user created");
+    } catch (e) {
+      setAccountMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const deleteUser = async (id: number) => {
+    setAccountMsg("");
+    try {
+      await api(`/api/users/${id}/delete`, token, { method: "POST" });
+      setUsers(await api<Account[]>("/api/users", token));
+      setToast("user deleted");
+    } catch (e) {
+      setAccountMsg(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -1314,12 +1397,15 @@ export default function App() {
                 </button>
               ))}
           </div>
-          <button
-            className={tab === "settings" ? "side-link active" : "side-link"}
-            onClick={() => setTab("settings")}
-          >
-            {TAB_LABEL.settings}
-          </button>
+          {BOTTOM_TABS.map((t) => (
+            <button
+              key={t}
+              className={tab === t ? "side-link active" : "side-link"}
+              onClick={() => setTab(t)}
+            >
+              {TAB_LABEL[t]}
+            </button>
+          ))}
         </nav>
       </aside>
 
@@ -1693,7 +1779,13 @@ export default function App() {
                               {p.public_key} <CopyButton text={p.public_key} />
                             </td>
                             <td>
-                              {endpointOf(p) || <span className="muted">unknown</span>}
+                              {p.gateway_peer_id ? (
+                                <span className="muted" title="routed (no NAT) through this gateway; keeps its overlay source IP">
+                                  via {gatewayName(peers, p.gateway_peer_id)}
+                                </span>
+                              ) : (
+                                endpointOf(p) || <span className="muted">unknown</span>
+                              )}
                             </td>
                             <td className="muted">{formatTime(p.created_at)}</td>
                             <td>
@@ -2666,6 +2758,126 @@ export default function App() {
 	              </Paginated>
 	            </div>
           </div>
+          </>
+        )}
+
+        {tab === "account" && (
+          <>
+            <section className="panel">
+              <h2>Signed in</h2>
+              <p className="muted">
+                {account
+                  ? `${account.username} · ${account.auth_source} account`
+                  : "Using an admin bearer token (no user session). Sign in with a username and password to manage your account."}
+              </p>
+              <div className="row">
+                <button onClick={() => void logout()}>sign out</button>
+              </div>
+            </section>
+
+            {account && (
+              <section className="panel">
+                <h2>Change password</h2>
+                <div className="form-grid">
+                  <label>
+                    <span>Current password</span>
+                    <input
+                      type="password"
+                      autoComplete="current-password"
+                      value={curPassword}
+                      onChange={(e) => setCurPassword(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>New password</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Confirm new password</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={newPassword2}
+                      onChange={(e) => setNewPassword2(e.target.value)}
+                    />
+                  </label>
+                </div>
+                <div className="row">
+                  <button
+                    className="primary"
+                    disabled={!curPassword || newPassword.length < 8}
+                    onClick={() => void changePassword()}
+                  >
+                    update password
+                  </button>
+                </div>
+              </section>
+            )}
+
+            <section className="panel">
+              <h2>Admin users</h2>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>id</th>
+                    <th>username</th>
+                    <th>source</th>
+                    <th>created</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="muted">
+                        no users (bearer-token session)
+                      </td>
+                    </tr>
+                  )}
+                  {users.map((u) => (
+                    <tr key={u.id}>
+                      <td>{u.id}</td>
+                      <td>{u.username}</td>
+                      <td>{u.auth_source}</td>
+                      <td className="muted">{formatTime(u.created_at)}</td>
+                      <td>
+                        {users.length > 1 && (!account || u.id !== account.id) && (
+                          <button onClick={() => void deleteUser(u.id)}>delete</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <h3>Add admin user</h3>
+              <div className="row">
+                <input
+                  placeholder="username"
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                />
+                <input
+                  type="password"
+                  placeholder="password (min 8)"
+                  autoComplete="new-password"
+                  value={newUserPassword}
+                  onChange={(e) => setNewUserPassword(e.target.value)}
+                />
+                <button
+                  className="primary"
+                  disabled={!newUsername.trim() || newUserPassword.length < 8}
+                  onClick={() => void createUser()}
+                >
+                  create
+                </button>
+              </div>
+              {accountMsg && <div className="muted account-msg">{accountMsg}</div>}
+            </section>
           </>
         )}
       </main>

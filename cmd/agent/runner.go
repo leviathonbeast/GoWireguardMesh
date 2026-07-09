@@ -20,6 +20,7 @@ type agentStartupState struct {
 	overlayAddr    string
 	overlayAddr6   string
 	enrolledPeers  []wgtypes.PeerConfig
+	gatewayRoutes  []string
 	authToken      string
 	initialACL     *proto.ACLPolicy
 	initialDNS     proto.DNSConfig
@@ -96,6 +97,21 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 		if err := applyOverlayACL(ifaceName, state.initialACL); err != nil {
 			slog.Warn("initial overlay acl sync failed", "error", err)
 		}
+	}
+
+	cleanupGatewayNAT, err := enableGatewayNAT(ifaceName, r.cfg.GatewayNATCIDRs)
+	if err != nil {
+		return err
+	}
+	defer cleanupGatewayNAT()
+
+	// Route-based mobile gateways: enable forwarding (no NAT) up front so
+	// a mobile peer already pinned to this agent is reachable before the
+	// first /report. The reporter keeps this in sync thereafter and tears
+	// the FORWARD rules down when it stops.
+	gatewayForwardOn := false
+	if err := applyGatewayRoutes(ifaceName, state.gatewayRoutes, &gatewayForwardOn); err != nil {
+		slog.Warn("initial gateway route forwarding failed", "error", err)
 	}
 
 	fmt.Println("[agent] wireguard interface setup complete")
@@ -175,6 +191,7 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 	state.authToken = resp.AuthToken
 	state.initialACL = resp.ACL
 	state.initialDNS = resp.DNS
+	state.gatewayRoutes = resp.GatewayRoutes
 
 	state.networkPrefix, err = netip.ParsePrefix(resp.NetworkCIDR)
 	if err != nil {
@@ -312,6 +329,7 @@ func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) 
 		r.cfg.ReportInterval,
 		transport,
 		r.cfg.DirectProbe,
+		r.cfg.GatewayNATCIDRs,
 	)
 	if err != nil {
 		slog.Error("telemetry init failed", "error", err)

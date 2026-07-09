@@ -32,7 +32,21 @@ import (
 const (
 	idleTimeout   = 10 * time.Minute
 	cleanupPeriod = time.Minute
+
+	// socketBuffer sizes the relay's UDP send/receive buffers. The
+	// default (~208KB) drops packets under the bursty, bidirectional
+	// load a busy relayed pair generates; a few MB absorbs bursts
+	// without adding latency. Best-effort: the kernel silently clamps
+	// to net.core.{r,w}mem_max, so this never fails a bind.
+	socketBuffer = 4 << 20
 )
+
+// tuneUDPBuffers enlarges a forwarding socket's kernel buffers. Errors
+// are non-fatal — the socket still works at the default size.
+func tuneUDPBuffers(conn *net.UDPConn) {
+	_ = conn.SetReadBuffer(socketBuffer)
+	_ = conn.SetWriteBuffer(socketBuffer)
+}
 
 // ErrPortsExhausted means the configured port range has no room for
 // another pair. Callers should surface this distinctly (the control
@@ -99,12 +113,17 @@ func (s *Server) Close() {
 // bind and are skipped; expired pairs release theirs on cleanup.
 func (s *Server) listenUDP() (*net.UDPConn, error) {
 	if s.cfg.PortMin == 0 {
-		return net.ListenUDP("udp", &net.UDPAddr{IP: s.cfg.DataIP})
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: s.cfg.DataIP})
+		if err == nil {
+			tuneUDPBuffers(conn)
+		}
+		return conn, err
 	}
 
 	for p := s.cfg.PortMin; p <= s.cfg.PortMax; p++ {
 		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: s.cfg.DataIP, Port: p})
 		if err == nil {
+			tuneUDPBuffers(conn)
 			return conn, nil
 		}
 	}

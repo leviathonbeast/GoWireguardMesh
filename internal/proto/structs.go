@@ -23,6 +23,13 @@ type EnrollResponse struct {
 	Peers        []PeerConfigResponse `json:"peers"`
 	ACL          *ACLPolicy           `json:"acl,omitempty"`
 
+	// GatewayRoutes lists the overlay CIDRs (a routed mobile peer's
+	// /32 and /128) for which THIS agent is the gateway. When non-empty
+	// the agent enables IP forwarding and a FORWARD accept for its
+	// overlay interface WITHOUT masquerading, so the mobile peer keeps
+	// its overlay source IP end-to-end. Empty for non-gateway agents.
+	GatewayRoutes []string `json:"gateway_routes,omitempty"`
+
 	// AuthToken authenticates subsequent agent requests (telemetry
 	// reports). Rotated on every enrollment, including idempotent
 	// re-enrolls; only its hash is stored server-side.

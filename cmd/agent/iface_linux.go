@@ -18,10 +18,21 @@ func ensurePrivileged() error {
 	return nil
 }
 
+// wireGuardMTU is the overlay interface MTU. WireGuard adds a fixed
+// header of 60 bytes over IPv4 and 80 over IPv6 to every encapsulated
+// packet; 1420 = 1500 (typical Ethernet underlay) − 80 leaves headroom
+// for the worse (IPv6) case, so a full-size overlay packet never needs
+// underlay fragmentation. This is the same value wg-quick installs, and
+// getting it wrong is the classic "handshakes work but bulk transfers
+// stall" failure: without it the link inherits the 1500 default and
+// every large packet fragments or is silently PMTU-blackholed.
+const wireGuardMTU = 1420
+
 func createInterface(name string) error {
 	link := &netlink.GenericLink{
 		LinkAttrs: netlink.LinkAttrs{
 			Name: name,
+			MTU:  wireGuardMTU,
 		},
 		LinkType: "wireguard",
 	}
@@ -30,7 +41,15 @@ func createInterface(name string) error {
 		return fmt.Errorf("create interface %q: %w", name, err)
 	}
 
-	fmt.Printf("Created interface %s\n", name)
+	// Some kernels ignore MTU on LinkAdd for virtual links; set it
+	// explicitly so the value is guaranteed regardless of kernel quirk.
+	if created, err := netlink.LinkByName(name); err == nil {
+		if err := netlink.LinkSetMTU(created, wireGuardMTU); err != nil {
+			fmt.Printf("warning: could not set MTU %d on %s: %v\n", wireGuardMTU, name, err)
+		}
+	}
+
+	fmt.Printf("Created interface %s (mtu %d)\n", name, wireGuardMTU)
 
 	return nil
 }

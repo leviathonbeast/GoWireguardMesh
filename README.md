@@ -112,7 +112,10 @@ Generated secrets, all 0600, all worth backing up alongside `mesh.db`:
 
 - `mesh-psk.key` — network-wide WireGuard preshared key handed to every
   peer; losing it strands enrolled peers on a different PSK than new ones
-- `admin-token` — bearer token for the web UI and admin API
+- `admin-token` — bearer token for the admin API and the seeded admin user's
+  first-boot password
+- `session.key` — HMAC key signing web-UI session cookies (rotating it logs
+  everyone out)
 - `key.pem` — TLS private key (`cert.pem` is the public half agents pin)
 
 Mint a setup key from the CLI (or use the web UI):
@@ -136,7 +139,9 @@ Flags for `server`:
 | `--no-tls` | off | plain HTTP: behind a TLS-terminating proxy, or dev (warns if exposed) |
 | `--tls-cert` / `--tls-key` | `cert.pem` / `key.pem` | TLS cert/key; self-signed pair generated if missing |
 | `--tls-hosts` | `localhost,127.0.0.1` | SANs for a generated certificate |
-| `--admin-token-file` | `admin-token` | admin bearer token file |
+| `--admin-token-file` | `admin-token` | admin bearer token file (API auth + first-boot admin password) |
+| `--session-key-file` | `session.key` | HMAC key for web-UI session cookies (generated if missing) |
+| `--admin-user` | `admin` | username seeded on first boot with the admin token as its initial password |
 | `--default-policy` | `allow` | ACL default: `allow` (open mesh) or `deny` (rule-connected pairs only) |
 | **DNS** | | |
 | `--dns-enabled` | off | push DNS settings to enrolled agents |
@@ -195,10 +200,18 @@ cleartext.
 ## Web UI
 
 The server serves the admin interface at `/` (same port as the API). Anonymous
-visitors only receive a small admin-token form; the React dashboard bundle and
-assets are served after the token validates and the server sets a signed
-HttpOnly UI session cookie. Open it, paste the contents of `admin-token`, and
-use the sidebar:
+visitors only receive a small username/password form; the React dashboard bundle
+and assets are served after the credentials validate and the server sets a
+signed HttpOnly UI session cookie.
+
+On first boot the server seeds one admin account (`--admin-user`, default
+`admin`) whose initial password is the generated **admin token** — so existing
+deployments keep working. Sign in with that, then open **Account** to set a real
+password. From **Account** you can also add or remove additional admin users.
+Passwords are stored as argon2id hashes; changing a password or deleting a user
+immediately invalidates that user's outstanding session cookies. Session cookies
+are signed with a separate `session.key` (kept apart from the admin token, so
+rotating one never silently affects the other). Use the sidebar:
 
 - **Overview** — active machines, direct/relayed path counts, setup-key count,
   and ACL posture at a glance.
@@ -216,6 +229,8 @@ use the sidebar:
   `--access-log=memory`.
 - **Settings** — overlay-network migration preview/apply. The header has the
   admin token control, manual refresh, and the default 5s auto-refresh toggle.
+- **Account** — who you are signed in as, sign out, change your own password,
+  and add/remove admin users.
 
 The UI lives in `web/` (React + TypeScript); `npm run dev` starts a Vite dev
 server that proxies API calls to a control plane on `127.0.0.1:8080`.
@@ -499,17 +514,63 @@ curl -sS https://mesh.example.com/api/mobile-peers \
   }'
 ```
 
+The nominated gateway is stored as the mobile peer's routing gateway. The mesh
+then reaches the phone by **route, not NAT**: every other agent learns the
+mobile's `/32` (and `/128`) folded into that gateway peer's WireGuard
+`AllowedIPs`, and the gateway agent forwards between the phone and the mesh
+**without masquerading**. So the iPhone keeps its own overlay source IP
+end-to-end — a peer that receives a connection from the phone sees
+`100.64.0.x`, the mobile's address, not the gateway's. This makes ACLs, flow
+telemetry, and audit logs attribute traffic to the phone correctly. The gateway
+must be a wgmesh **agent** (not another static/mobile peer).
+
 The response includes `config`, a complete WireGuard tunnel configuration to
 import into the mobile app. If DNS is enabled, the generated config includes the
 configured IPv4 and IPv6 DNS nameservers. The server stores only the mobile
 peer's public key; when it generates a private key, that private key is returned
 only in this one response.
 
+For a phone-friendly flow, generate a terminal QR code:
+
+```bash
+sudo apt install jq qrencode
+
+WGMESH_ADMIN_TOKEN=<admin-token> deploy/mobile-peer-qr.sh \
+  --server https://mesh.example.com \
+  --name iphone \
+  --gateway-public-key <gateway-peer-public-key> \
+  --gateway-endpoint mesh.example.com:51820 \
+  --out iphone.conf
+```
+
+Then open the official WireGuard app and choose **Add tunnel → Create from QR
+code**.
+
+The gateway agent enables routing automatically: when the control plane pins a
+mobile peer to it, its next config sync carries the mobile's `/32` in
+`gateway_routes`, and the agent turns on `net.ipv4.ip_forward` (and IPv6
+forwarding when a `/128` is present) plus an idempotent `iptables` FORWARD
+`ACCEPT` for the overlay interface — **no MASQUERADE**. No extra agent flag is
+required. The rules are removed when the last routed mobile detaches or the
+agent stops. This is Linux-only today; on a non-Linux gateway the agent warns
+and you must enable OS-level forwarding yourself.
+
+For Docker sidecars that share a service network namespace, keep `NET_ADMIN`
+enabled on the gateway sidecar. If Docker exposes the forwarding sysctls as
+read-only, set `net.ipv4.ip_forward: "1"` (and, for IPv6 mobiles,
+`net.ipv6.conf.all.forwarding: "1"`) under the service whose network namespace
+is shared.
+
 Limitations: mobile/static peers do not use wgmesh WebSocket relay, signal sync,
 telemetry, or live re-IP. If you change the overlay CIDR, DNS, gateway endpoint,
 or the mobile peer address, re-export/re-import the config. The gateway peer
-must be reachable over UDP and must be able to forward traffic for the overlay
-CIDRs if the phone should reach peers beyond that gateway.
+must be reachable over UDP.
+
+Legacy NAT mode: the older `--gateway-nat-cidrs 100.78.0.9/32` flag still works
+and masquerades the given overlay CIDRs through the agent instead of routing
+them. Prefer the routed default above unless you specifically want the phone's
+traffic to appear to originate from the gateway (it hides the phone's source IP
+from ACLs and telemetry).
 
 ### Honest production status
 
@@ -602,6 +663,7 @@ Useful agent flags: `--listen-port 51820` (pin the WireGuard port — strongly
 recommended so the firewall rule is stable across restarts), `--server-ca`
 (pin a self-signed server cert), `--relay-transport websocket|udp`,
 `--direct-probe=false` (keep relayed service sidecars stable), `--stun-server`,
+`--gateway-nat-cidrs 100.78.0.9/32` (gateway NAT for static/mobile peers),
 `--key-file`, `--manage-firewall`.
 
 The agent will:

@@ -112,7 +112,9 @@ func TestWebUIStructureHiddenUntilSessionCookie(t *testing.T) {
 		t.Fatalf("locate embedded ui: %v", err)
 	}
 
-	srv := &server{adminToken: "test-admin"}
+	// A real store is required now that session validation checks the user
+	// table; newTestServer seeds admin/test-admin and a session key.
+	srv, _ := newTestServer(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /ui-login", srv.handleUILogin)
 	mux.Handle("GET /", srv.uiHandler(ui))
@@ -145,7 +147,7 @@ func TestWebUIStructureHiddenUntilSessionCookie(t *testing.T) {
 		t.Fatalf("anonymous asset status = %d, want 404", resp.StatusCode)
 	}
 
-	resp, err = http.PostForm(ts.URL+"/ui-login", url.Values{"token": {"wrong"}})
+	resp, err = http.PostForm(ts.URL+"/ui-login", url.Values{"username": {"admin"}, "password": {"wrong"}})
 	if err != nil {
 		t.Fatalf("POST bad /ui-login: %v", err)
 	}
@@ -158,7 +160,7 @@ func TestWebUIStructureHiddenUntilSessionCookie(t *testing.T) {
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
-	resp, err = client.PostForm(ts.URL+"/ui-login", url.Values{"token": {"test-admin"}})
+	resp, err = client.PostForm(ts.URL+"/ui-login", url.Values{"username": {"admin"}, "password": {"test-admin"}})
 	if err != nil {
 		t.Fatalf("POST good /ui-login: %v", err)
 	}

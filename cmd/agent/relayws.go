@@ -85,6 +85,10 @@ func (t *telemetryReporter) startWSRelay(peer wgtypes.Key) (*wsRelayProxy, error
 
 		return nil, fmt.Errorf("bind loopback udp for relay: %w", err)
 	}
+	// Absorb bursts between the kernel WireGuard socket and this proxy;
+	// best-effort, clamped by the kernel to net.core.{r,w}mem_max.
+	_ = udp.SetReadBuffer(4 << 20)
+	_ = udp.SetWriteBuffer(4 << 20)
 
 	local := udp.LocalAddr().(*net.UDPAddr)
 

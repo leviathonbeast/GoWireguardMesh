@@ -5,7 +5,9 @@ export interface Peer {
   public_key: string;
   assigned_ip: string;
   assigned_ip6?: string;
-  health_status: "online" | "stale" | "offline" | "revoked" | "unknown";
+  peer_type: "agent" | "static";
+  gateway_peer_id?: number; // for a routed mobile peer, the agent that carries its /32
+  health_status: "online" | "stale" | "offline" | "revoked" | "static" | "unknown";
   last_seen_age_seconds?: number;
   hostname?: string;
   listen_port?: number;
@@ -14,6 +16,14 @@ export interface Peer {
   created_at: string;
   last_seen_at?: string;
   revoked_at?: string;
+}
+
+export interface Account {
+  id: number;
+  username: string;
+  auth_source: "local" | "oidc";
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SetupKey {

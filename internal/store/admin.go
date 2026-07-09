@@ -27,6 +27,8 @@ type PeerInfo struct {
 	PublicKey      string
 	AssignedIP     string
 	AssignedIP6    string // "" when the IPv6 overlay is not configured
+	PeerType       string // agent | static
+	GatewayPeerID  int64  // routing gateway for a static/mobile peer; 0 if unset
 	Hostname       string // "" if unset
 	ListenPort     int    // 0 if unset
 	ObservedIP     string // "" if unknown
@@ -49,7 +51,8 @@ type SetupKeyInfo struct {
 
 func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), hostname, listen_port,
+		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), COALESCE(peer_type, 'agent'),
+		        COALESCE(gateway_peer_id, 0), hostname, listen_port,
 		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''),
 		        created_at, last_seen_at, revoked_at
 		 FROM peers ORDER BY id`,
@@ -70,7 +73,8 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 			revoked  sql.NullString
 		)
 
-		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &hostname, &port,
+		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &p.PeerType,
+			&p.GatewayPeerID, &hostname, &port,
 			&p.ObservedIP, &p.PublicEndpoint,
 			&p.CreatedAt, &lastSeen, &revoked); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
@@ -281,12 +285,13 @@ func getPeerInfo(ctx context.Context, q interface {
 	)
 
 	err := q.QueryRowContext(ctx,
-		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), hostname, listen_port,
+		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), COALESCE(peer_type, 'agent'),
+		        COALESCE(gateway_peer_id, 0), hostname, listen_port,
 		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''),
 		        created_at, last_seen_at, revoked_at
 		 FROM peers WHERE id = ?`,
 		id,
-	).Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &hostname, &port,
+	).Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &p.PeerType, &p.GatewayPeerID, &hostname, &port,
 		&p.ObservedIP, &p.PublicEndpoint,
 		&p.CreatedAt, &lastSeen, &revoked)
 	if err != nil {

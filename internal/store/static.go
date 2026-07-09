@@ -15,11 +15,20 @@ import (
 // This is intended for official WireGuard clients such as iOS/Android:
 // the control plane owns IP allocation and visibility, while the client
 // imports a conventional WireGuard config.
-func (s *Store) CreateStaticPeer(ctx context.Context, publicKey, hostname string) (PeerInfo, error) {
+//
+// gatewayPeerID is the active agent peer that routes this peer's overlay
+// /32 into the mesh (its WireGuard endpoint). It must reference an active
+// agent peer; 0 is rejected. The gateway forwards — it does not NAT — so
+// the mobile peer keeps its overlay source IP end-to-end, and every other
+// agent learns the /32 via the gateway peer's AllowedIPs.
+func (s *Store) CreateStaticPeer(ctx context.Context, publicKey, hostname string, gatewayPeerID int64) (PeerInfo, error) {
 	publicKey = strings.TrimSpace(publicKey)
 	hostname = strings.TrimSpace(hostname)
 	if publicKey == "" {
 		return PeerInfo{}, fmt.Errorf("public_key is required")
+	}
+	if gatewayPeerID <= 0 {
+		return PeerInfo{}, fmt.Errorf("gateway_peer_id is required")
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -27,6 +36,24 @@ func (s *Store) CreateStaticPeer(ctx context.Context, publicKey, hostname string
 		return PeerInfo{}, fmt.Errorf("begin static peer create: %w", err)
 	}
 	defer tx.Rollback()
+
+	var (
+		gatewayType    string
+		gatewayRevoked sql.NullString
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(peer_type, 'agent'), revoked_at FROM peers WHERE id = ?`, gatewayPeerID,
+	).Scan(&gatewayType, &gatewayRevoked)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return PeerInfo{}, fmt.Errorf("gateway peer %d not found", gatewayPeerID)
+	case err != nil:
+		return PeerInfo{}, fmt.Errorf("check gateway peer: %w", err)
+	case gatewayRevoked.Valid:
+		return PeerInfo{}, fmt.Errorf("gateway peer %d is revoked", gatewayPeerID)
+	case gatewayType != "agent":
+		return PeerInfo{}, fmt.Errorf("gateway peer %d must be a wgmesh agent, not a %s peer", gatewayPeerID, gatewayType)
+	}
 
 	var existingID int64
 	err = tx.QueryRowContext(ctx, `SELECT id FROM peers WHERE public_key = ?`, publicKey).Scan(&existingID)
@@ -80,9 +107,9 @@ func (s *Store) CreateStaticPeer(ctx context.Context, publicKey, hostname string
 	now := time.Now().UTC().Format(timeFormat)
 
 	insertPeer, err := tx.ExecContext(ctx,
-		`INSERT INTO peers (public_key, assigned_ip, assigned_ip6, hostname, setup_key_id, auth_token_hash, auth_token_issued_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		publicKey, ip, nullable(ip6), nullable(hostname), setupKeyID, tokenHash, now,
+		`INSERT INTO peers (public_key, assigned_ip, assigned_ip6, peer_type, gateway_peer_id, hostname, setup_key_id, auth_token_hash, auth_token_issued_at)
+		 VALUES (?, ?, ?, 'static', ?, ?, ?, ?, ?)`,
+		publicKey, ip, nullable(ip6), gatewayPeerID, nullable(hostname), setupKeyID, tokenHash, now,
 	)
 	if err != nil {
 		return PeerInfo{}, fmt.Errorf("insert static peer: %w", err)

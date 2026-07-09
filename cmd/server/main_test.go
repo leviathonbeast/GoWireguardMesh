@@ -96,24 +96,29 @@ func TestAccessLogMemoryRingNewestFirst(t *testing.T) {
 }
 
 func TestPeerHealthClassifiesLastSeen(t *testing.T) {
-	online, age := peerHealth(time.Now().UTC().Add(-30*time.Second).Format(time.RFC3339Nano), "")
+	online, age := peerHealth(time.Now().UTC().Add(-30*time.Second).Format(time.RFC3339Nano), "", "agent")
 	if online != "online" || age < 0 {
 		t.Fatalf("peerHealth(30s ago) = %q, %d; want online", online, age)
 	}
 
-	stale, _ := peerHealth(time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339Nano), "")
+	stale, _ := peerHealth(time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339Nano), "", "agent")
 	if stale != "stale" {
 		t.Fatalf("peerHealth(2m ago) = %q, want stale", stale)
 	}
 
-	offline, _ := peerHealth(time.Now().UTC().Add(-10*time.Minute).Format(time.RFC3339Nano), "")
+	offline, _ := peerHealth(time.Now().UTC().Add(-10*time.Minute).Format(time.RFC3339Nano), "", "agent")
 	if offline != "offline" {
 		t.Fatalf("peerHealth(10m ago) = %q, want offline", offline)
 	}
 
-	revoked, _ := peerHealth(time.Now().UTC().Format(time.RFC3339Nano), "revoked")
+	revoked, _ := peerHealth(time.Now().UTC().Format(time.RFC3339Nano), "revoked", "static")
 	if revoked != "revoked" {
 		t.Fatalf("peerHealth(revoked) = %q, want revoked", revoked)
+	}
+
+	static, _ := peerHealth("", "", "static")
+	if static != "static" {
+		t.Fatalf("peerHealth(static) = %q, want static", static)
 	}
 }
 

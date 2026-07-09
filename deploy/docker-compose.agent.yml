@@ -44,6 +44,14 @@ services:
       --relay-transport ${WGMESH_RELAY_TRANSPORT:-websocket}
       --direct-probe=${WGMESH_DIRECT_PROBE:-false}
       --manage-firewall=false
+      # To act as the routing gateway for static/mobile WireGuard clients
+      # (iPhone/Android), no extra flag is needed: pin the mobile peer to this
+      # agent's public key via POST /api/mobile-peers and the agent enables IP
+      # forwarding (no NAT) automatically. Keep NET_ADMIN; if the shared netns
+      # exposes the forwarding sysctls read-only, set them on the app service:
+      #   sysctls: ["net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1"]
+      # Legacy source-NAT mode (hides the phone's source IP) is still available:
+      #   --gateway-nat-cidrs ${WGMESH_GATEWAY_NAT_CIDRS}
       # To surface Traefik access logs as Proxy Events, add the flag below
       # and mount Traefik's JSON access log into this sidecar (see volumes):
       #   --traefik-access-log /logs/access.log
