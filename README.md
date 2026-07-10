@@ -733,6 +733,12 @@ WINDOWS_CC=/path/to/llvm-mingw/bin/x86_64-w64-mingw32-gcc ./deploy/build.sh
 CI also builds both Windows binaries: the `windows-binaries` job in
 `.gitea/workflows/docker-images.yml` uploads `agent.exe` +
 `agent-gui.exe` as the `windows-agent` artifact on every push to main.
+Pushing a `v*` tag additionally creates a **Gitea release** with all
+binaries (linux + windows, plus `sha256sums.txt`) attached — the
+stable download page. The release job authenticates with the
+workflow's own token; if release creation is rejected on your Gitea,
+add a personal access token (repo scope) as the `RELEASE_TOKEN`
+secret.
 
 Both executables carry an embedded icon and version block from
 `cmd/agent/resource_windows_amd64.syso` (checked in; regenerate with
