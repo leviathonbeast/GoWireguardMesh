@@ -54,6 +54,22 @@ build linux amd64 agent  "agent"
 build windows amd64 agent  "agent.exe"
 build windows amd64 server "server.exe"
 
+# Windows amd64 — desktop GUI agent (Fyne + system tray). Fyne needs
+# cgo, so this builds only when a mingw-w64 cross compiler is around;
+# set WINDOWS_CC to point at one explicitly (gcc or clang targeting
+# x86_64-w64-mingw32, e.g. from llvm-mingw or mingw64-cross-gcc).
+# On a Windows box with gcc installed, plain
+#   go build -tags gui -ldflags "-H windowsgui -s -w" ./cmd/agent
+# does the same thing.
+WINDOWS_CC="${WINDOWS_CC:-$(command -v x86_64-w64-mingw32-gcc || true)}"
+if [[ -n "$WINDOWS_CC" ]]; then
+	printf '>> %-8s %-6s cmd/%-7s -> %s/%s (gui, cgo)\n' windows amd64 agent "$OUT" agent-gui.exe
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC="$WINDOWS_CC" \
+		go build -trimpath -tags gui -ldflags "-s -w -H windowsgui" -o "$OUT/agent-gui.exe" ./cmd/agent
+else
+	echo "!! no x86_64-w64-mingw32 compiler found; skipping agent-gui.exe (set WINDOWS_CC to enable)"
+fi
+
 # Add more targets as needed, e.g. a Raspberry Pi:
 #   build linux arm64 agent "agent-arm64"
 

@@ -73,7 +73,15 @@ func setupLogging(level string) error {
 		return fmt.Errorf(`log-level must be "debug", "info", "warn", or "error", got %q`, level)
 	}
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
+	// The mirror comes first: MultiWriter stops at the first error, and
+	// in a windowsgui build stderr is an invalid handle whose writes
+	// fail — the GUI log must still get the line.
+	out := io.Writer(os.Stderr)
+	if logMirror != nil {
+		out = io.MultiWriter(logMirror, os.Stderr)
+	}
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: lvl})))
 
 	return nil
 }
@@ -88,13 +96,13 @@ func waitForShutdown(stop <-chan struct{}) {
 	)
 	defer signal.Stop(sigCh)
 
-	fmt.Println("\nWaiting for shutdown signal (Ctrl+C)...")
+	agentPrintf("\nWaiting for shutdown signal (Ctrl+C)...\n")
 
 	select {
 	case sig := <-sigCh:
-		fmt.Printf("\nReceived signal: %s\n", sig)
+		agentPrintf("\nReceived signal: %s\n", sig)
 	case <-stop:
-		fmt.Println("\nReceived service stop request")
+		agentPrintf("\nReceived stop request\n")
 	}
 }
 
@@ -443,6 +451,14 @@ func runWithStop(stop <-chan struct{}) error {
 func main() {
 	if handled, err := handlePlatformCommand(os.Args); handled {
 		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if wantGUI(os.Args) {
+		if err := launchGUI(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

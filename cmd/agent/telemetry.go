@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
 	"sync"
 	"time"
 
@@ -213,6 +214,14 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 	ticker := time.NewTicker(t.interval)
 	defer ticker.Stop()
 
+	// The GUI refreshes peer state faster than the report interval; a
+	// publish is one device read and no-ops entirely in console and
+	// service runs (hub disabled).
+	statusTicker := time.NewTicker(5 * time.Second)
+	defer statusTicker.Stop()
+
+	t.publishPeers()
+
 	signalDone := make(chan struct{})
 	go func() {
 		defer close(signalDone)
@@ -245,8 +254,68 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 			return
 		case <-ticker.C:
 			t.syncOnce(true)
+			t.publishPeers()
+		case <-statusTicker.C:
+			t.publishPeers()
 		}
 	}
+}
+
+// publishPeers pushes the current peer set (path state + counters) to
+// the GUI status hub. It takes syncMu because pathState reads the
+// relay/probe maps that syncOnce mutates.
+func (t *telemetryReporter) publishPeers() {
+	if !statusPub.enabled() {
+		return
+	}
+
+	device, err := t.wg.Device()
+	if err != nil {
+		return
+	}
+
+	t.syncMu.Lock()
+
+	peers := make([]peerStatus, 0, len(device.Peers))
+	for _, peer := range device.Peers {
+		endpoint := ""
+		if peer.Endpoint != nil {
+			endpoint = peer.Endpoint.String()
+		}
+
+		allowed := make([]string, 0, len(peer.AllowedIPs))
+		for _, ipnet := range peer.AllowedIPs {
+			if ones, bits := ipnet.Mask.Size(); ones == bits {
+				allowed = append(allowed, ipnet.IP.String())
+				continue
+			}
+			allowed = append(allowed, ipnet.String())
+		}
+
+		peers = append(peers, peerStatus{
+			PublicKey:     peer.PublicKey.String(),
+			AllowedIPs:    allowed,
+			Endpoint:      endpoint,
+			PathState:     t.pathState(peer.PublicKey),
+			LastHandshake: peer.LastHandshakeTime,
+			RxBytes:       peer.ReceiveBytes,
+			TxBytes:       peer.TransmitBytes,
+		})
+	}
+
+	selfAddr, selfAddr6 := t.selfAddr, t.selfAddr6
+
+	t.syncMu.Unlock()
+
+	sort.Slice(peers, func(i, j int) bool { return peers[i].PublicKey < peers[j].PublicKey })
+
+	statusPub.update(func(s *agentStatus) {
+		s.Peers = peers
+		// Live self-IP adoption can change the overlay address after
+		// startup; the reporter holds the current one.
+		s.OverlayAddr = selfAddr
+		s.OverlayAddr6 = selfAddr6
+	})
 }
 
 func (t *telemetryReporter) syncOnce(checkPaths bool) {

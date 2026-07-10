@@ -52,8 +52,14 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 		return err
 	}
 
-	fmt.Printf("[agent] public key: %s\n", privateKey.PublicKey())
-	fmt.Printf("[agent] using listen port: %d\n", listenPort)
+	agentPrintf("[agent] public key: %s\n", privateKey.PublicKey())
+	agentPrintf("[agent] using listen port: %d\n", listenPort)
+
+	statusPub.update(func(s *agentStatus) {
+		s.PublicKey = privateKey.PublicKey().String()
+		s.ListenPort = listenPort
+		s.Server = r.cfg.Server
+	})
 
 	cleanupFirewall := r.openFirewall(listenPort)
 	defer cleanupFirewall()
@@ -114,15 +120,23 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 		slog.Warn("initial gateway route forwarding failed", "error", err)
 	}
 
-	fmt.Println("[agent] wireguard interface setup complete")
-	fmt.Println("[agent] direct peer connectivity requires each peer to reach the configured endpoint over UDP")
+	agentPrintf("[agent] wireguard interface setup complete\n")
+	agentPrintf("[agent] direct peer connectivity requires each peer to reach the configured endpoint over UDP\n")
 
 	reporterStop, err := r.startReporter(backend, state)
 	if err != nil {
 		return err
 	}
 
+	statusPub.update(func(s *agentStatus) {
+		s.State = stateRunning
+		s.OverlayAddr = state.overlayAddr
+		s.OverlayAddr6 = state.overlayAddr6
+	})
+
 	waitForShutdown(stop)
+
+	statusPub.update(func(s *agentStatus) { s.State = stateStopping })
 
 	if reporterStop != nil {
 		close(reporterStop)
@@ -145,7 +159,7 @@ func (r *agentRunner) openFirewall(listenPort int) func() {
 	if err := fw.AllowUDP(listenPort); err != nil {
 		slog.Warn("firewall rule failed", "backend", fw.Backend(), "error", err)
 	} else {
-		fmt.Printf("[agent] firewall (%s): opened udp %d\n", fw.Backend(), listenPort)
+		agentPrintf("[agent] firewall (%s): opened udp %d\n", fw.Backend(), listenPort)
 	}
 
 	return func() {
@@ -229,7 +243,7 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 		assigned += ", " + state.overlayAddr6
 	}
 
-	fmt.Printf("[agent] enrolled as peer %d, assigned %s, %d peer(s) in mesh\n", resp.PeerID, assigned, len(resp.Peers))
+	agentPrintf("[agent] enrolled as peer %d, assigned %s, %d peer(s) in mesh\n", resp.PeerID, assigned, len(resp.Peers))
 
 	return state, nil
 }
@@ -245,7 +259,7 @@ func (r *agentRunner) discoverPublicEndpoint(listenPort int) (string, error) {
 		return "", nil
 	}
 
-	fmt.Printf("[agent] stun public endpoint: %s\n", publicEndpoint)
+	agentPrintf("[agent] stun public endpoint: %s\n", publicEndpoint)
 
 	return publicEndpoint, nil
 }
@@ -338,12 +352,12 @@ func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) 
 
 	if r.cfg.TraefikAccessLog != "" {
 		reporter.proxyTail = newProxyTailer(r.cfg.TraefikAccessLog)
-		fmt.Printf("[agent] ingesting Traefik access log %s\n", r.cfg.TraefikAccessLog)
+		agentPrintf("[agent] ingesting Traefik access log %s\n", r.cfg.TraefikAccessLog)
 	}
 
 	stop := make(chan struct{})
 	go reporter.run(stop)
-	fmt.Printf("[agent] telemetry reporting enabled every %s\n", r.cfg.ReportInterval)
+	agentPrintf("[agent] telemetry reporting enabled every %s\n", r.cfg.ReportInterval)
 
 	return stop, nil
 }

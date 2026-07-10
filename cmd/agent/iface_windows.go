@@ -5,7 +5,8 @@ package main
 import (
 	"fmt"
 	"net"
-	"os/exec"
+
+	"gowireguard/internal/hidecmd"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -71,7 +72,7 @@ func createInterface(name string) error {
 
 	wgDevice = dev
 
-	fmt.Printf(
+	agentPrintf(
 		"Created interface %s (userspace wireguard-go, wintun)\n",
 		name,
 	)
@@ -87,7 +88,7 @@ func assignIPAddress(ifaceName, cidr string) error {
 
 	if ip.To4() == nil {
 		ones, _ := ipnet.Mask.Size()
-		out, err := exec.Command(
+		out, err := hidecmd.Command(
 			"netsh",
 			"interface",
 			"ipv6",
@@ -106,14 +107,14 @@ func assignIPAddress(ifaceName, cidr string) error {
 			)
 		}
 
-		fmt.Printf("Assigned %s to %s\n", cidr, ifaceName)
+		agentPrintf("Assigned %s to %s\n", cidr, ifaceName)
 
 		return nil
 	}
 
 	mask := net.IP(ipnet.Mask).String()
 
-	out, err := exec.Command(
+	out, err := hidecmd.Command(
 		"netsh",
 		"interface",
 		"ipv4",
@@ -134,7 +135,7 @@ func assignIPAddress(ifaceName, cidr string) error {
 		)
 	}
 
-	fmt.Printf("Assigned %s to %s\n", cidr, ifaceName)
+	agentPrintf("Assigned %s to %s\n", cidr, ifaceName)
 
 	return nil
 }
@@ -164,7 +165,7 @@ func replaceIPAddress(ifaceName, oldCIDR, newCIDR string) error {
 		family = "ipv6"
 	}
 
-	out, err := exec.Command(
+	out, err := hidecmd.Command(
 		"netsh",
 		"interface",
 		family,
@@ -177,7 +178,7 @@ func replaceIPAddress(ifaceName, oldCIDR, newCIDR string) error {
 		return fmt.Errorf("remove old address %q via netsh: %w: %s", oldCIDR, err, out)
 	}
 
-	fmt.Printf("Removed %s from %s\n", oldCIDR, ifaceName)
+	agentPrintf("Removed %s from %s\n", oldCIDR, ifaceName)
 
 	return nil
 }
@@ -192,7 +193,7 @@ func deleteInterface(ifaceName string) error {
 		wgDevice.Close()
 		wgDevice = nil
 
-		fmt.Printf("Deleted interface %s\n", ifaceName)
+		agentPrintf("Deleted interface %s\n", ifaceName)
 	}
 
 	return nil

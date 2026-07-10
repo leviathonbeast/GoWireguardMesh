@@ -16,8 +16,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
+
+	"gowireguard/internal/hidecmd"
 )
 
 // ErrNoBackend means no supported, active firewall was detected.
@@ -35,7 +36,9 @@ type Rule struct {
 type runner func(name string, args ...string) (string, error)
 
 func execRunner(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	// hidecmd: on Windows the agent may run from a GUI-subsystem
+	// process, where a plain console child (netsh) flashes a window.
+	out, err := hidecmd.Command(name, args...).CombinedOutput()
 	return string(out), err
 }
 

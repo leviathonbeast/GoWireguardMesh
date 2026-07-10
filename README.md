@@ -675,6 +675,70 @@ long as the service was installed once from the stable
 Treat it as a starting point: it compiles and follows documented Wintun
 behavior, but has not been validated on a real Windows host.
 
+### Desktop GUI with system tray (`agent-gui.exe`)
+
+There is also a desktop build of the agent with a [Fyne](https://fyne.io)
+GUI and a system-tray icon, for Windows machines that are used
+interactively rather than as headless service nodes:
+
+- **Tray icon** shows connection state (gray disconnected, amber
+  connecting, green connected, red error) with a menu: open window,
+  Connect/Disconnect, Quit. Closing the window hides it to the tray;
+  the agent keeps running until you quit from the tray.
+- **Peers tab** — live per-peer path state (DIRECT / RELAY / PROBING),
+  overlay IPs, endpoint, last handshake, transfer counters (refreshed
+  every 5 s).
+- **Settings tab** — server URL, setup key, hostname, listen port
+  (default 51820), key file (default
+  `C:\ProgramData\wgmesh-agent\wgkey.key`), pinned server CA, relay
+  transport, log level, STUN server, firewall/direct-probe toggles.
+  Persisted per user; applied on the next connect. The GUI always runs
+  in enrollment mode (it needs `--server` + a setup key).
+- **Logs tab** — the same output the console agent prints.
+
+Behavior notes:
+
+- The agent loop runs **in-process**, so the GUI needs elevation just
+  like the console agent; started unprivileged it offers a UAC
+  relaunch on Connect. `wintun.dll` must sit next to `agent-gui.exe`.
+- It refuses to connect while the `wgmesh-agent` Windows service is
+  running — both would fight over the same `wg-int` adapter. Use one
+  or the other.
+- A second GUI instance exits immediately (single-instance mutex).
+- `agent-gui.exe` opens the GUI when double-clicked; all console
+  subcommands (`service ...`, flags) still work from a terminal, and
+  the GUI can be launched explicitly with `agent-gui.exe gui`.
+- The setup key is stored in the per-user Fyne preferences file in
+  plaintext — the same trust level as the service's SCM-stored
+  arguments.
+
+Build: Fyne needs cgo, so the GUI is behind a build tag and a separate
+binary — the plain `agent.exe` stays pure Go. On Windows with a gcc in
+PATH ([MSYS2](https://www.msys2.org) or TDM-GCC):
+
+```powershell
+go build -tags gui -ldflags "-H windowsgui -s -w" -o agent-gui.exe .\cmd\agent
+```
+
+Cross-compiling from Linux needs a mingw-w64 toolchain (e.g.
+[llvm-mingw](https://github.com/mstorsjo/llvm-mingw) — no root needed,
+just unpack a release tarball — or the distro's `mingw64-cross-gcc`):
+
+```sh
+WINDOWS_CC=/path/to/llvm-mingw/bin/x86_64-w64-mingw32-gcc ./deploy/build.sh
+# -> bin/agent-gui.exe (deploy/build.sh skips it with a note when no
+#    cross compiler is found)
+```
+
+CI also builds both Windows binaries: the `windows-binaries` job in
+`.gitea/workflows/docker-images.yml` uploads `agent.exe` +
+`agent-gui.exe` as the `windows-agent` artifact on every push to main.
+
+Both executables carry an embedded icon and version block from
+`cmd/agent/resource_windows_amd64.syso` (checked in; regenerate with
+`deploy/gen-winres.sh` only when `cmd/agent/winres/agent.rc` or the
+icon changes).
+
 ## Joining a node to the mesh
 
 On each machine (root required — the agent creates network interfaces):

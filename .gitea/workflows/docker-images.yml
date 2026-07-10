@@ -80,3 +80,42 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-relay:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-relay:${{ github.sha }}
+
+  windows-binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The Fyne GUI needs cgo, hence a mingw-w64 cross compiler; the
+      # plain agent.exe stays CGO_ENABLED=0.
+      - name: Install mingw-w64 cross compiler
+        run: |
+          if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+
+      - name: Build Windows agent binaries
+        run: |
+          mkdir -p bin
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-s -w" -o bin/agent.exe ./cmd/agent
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
+            go build -trimpath -tags gui -ldflags "-s -w -H windowsgui" -o bin/agent-gui.exe ./cmd/agent
+
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v3
+        with:
+          name: windows-agent
+          path: |
+            bin/agent.exe
+            bin/agent-gui.exe
