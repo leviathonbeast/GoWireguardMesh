@@ -47,9 +47,11 @@ see [SECURITY.md](SECURITY.md).
 - **DNS push** — NetBird/Tailscale-style DNS settings distribution: point
   peers at your CoreDNS resolver, push `.vpn` search domains, and let agents
   adopt changes on their next sync.
-- **Web UI** — React + TypeScript, embedded in the server binary: peers,
-  a NetBird-style traffic/activity feed with search, ACL and setup-key
-  management, and the audit log. Bearer-token protected.
+- **Web UI** — React 19 + TypeScript + Tailwind CSS, embedded in the server
+  binary and mobile-friendly: peers, a NetBird-style traffic/activity feed
+  with search, ACL and setup-key management, and the audit log. Protected by
+  username/password login with HttpOnly session cookies; the admin bearer
+  token covers the API.
 - **Platforms** — Linux (kernel WireGuard). The agent also cross-compiles
   for Windows (embedded userspace wireguard-go + Wintun), experimental.
 
@@ -211,32 +213,51 @@ password. From **Account** you can also add or remove additional admin users.
 Passwords are stored as argon2id hashes; changing a password or deleting a user
 immediately invalidates that user's outstanding session cookies. Session cookies
 are signed with a separate `session.key` (kept apart from the admin token, so
-rotating one never silently affects the other). Use the sidebar:
+rotating one never silently affects the other). The browser session is
+cookie-only: the SPA never handles or stores a token, so there is no credential
+in `sessionStorage`/`localStorage` to steal.
+
+The interface is responsive (the sidebar becomes a drawer on phones) and is
+organized into three groups:
+
+**Network**
 
 - **Overview** — active machines, direct/relayed path counts, setup-key count,
   and ACL posture at a glance.
-- **Machines** — registered peers with online/stale/offline status, overlay IP,
-  endpoint, last seen, and inline revoke. **add device** generates a static
-  WireGuard config for a phone or appliance and shows it as a scannable QR code;
-  a static peer's details page can show that config and QR again at any time
-  (see [iPhone and Android](#iphone-and-android)).
-- **Traffic** — liveness, per-link totals, and a NetBird-style traffic-event
-  feed (both peer names resolved, protocol/port, ingress/egress ports, and
-  `↓ rx / ↑ tx`) with a **search box** (ip / port / hostname / protocol).
+- **Peers** — registered peers with online/stale/offline status, overlay IP,
+  endpoint, last seen, and inline revoke; click a peer for its details page.
+  **add device** generates a static WireGuard config for a phone or appliance
+  and shows it as a scannable QR code; a static peer's details page can show
+  that config and QR again at any time (see
+  [iPhone and Android](#iphone-and-android)).
+- **Policies** — ACL rules with a human name plus protocol and optional port
+  range, and JSON export/import.
+- **Setup Keys** — named setup keys, expiry, max uses, copy, and revoke.
+
+**Monitor**
+
+- **Traffic Events** — P2P connection events, per-link totals, and a
+  NetBird-style traffic-event feed (both peer names resolved, protocol/port,
+  and `↓ rx / ↑ tx`) with a **search box** (ip / port / hostname / protocol).
   Link rows show the current path: `direct`, `ws-relay`, `udp-relay`, or
   `probing-direct`.
-- **Policies** — ACL rules with a human name plus protocol and optional port
-  range.
-- **Setup keys** — named setup keys, expiry, max uses, copy, and revoke.
-- **Logs** — security audit events plus recent request tracing when
+- **Proxy Events** — Traefik access-log ingest (`--traefik-access-log`).
+- **Audit Events** — security audit events plus recent request tracing when
   `--access-log=memory`.
-- **Settings** — overlay-network migration preview/apply. The header has the
-  admin token control, manual refresh, and the default 5s auto-refresh toggle.
+
+**Admin**
+
+- **Settings** — overlay-network migration preview/apply and DNS push.
 - **Account** — who you are signed in as, sign out, change your own password,
   and add/remove admin users.
 
-The UI lives in `web/` (React + TypeScript); `npm run dev` starts a Vite dev
-server that proxies API calls to a control plane on `127.0.0.1:8080`.
+The top bar has manual refresh and the default 5s auto-refresh toggle.
+
+The UI lives in `web/` (React 19 + TypeScript, Tailwind CSS 4, built with
+Vite); `npm run dev` starts a Vite dev server that proxies API calls (and
+`/ui-login`) to a control plane on `127.0.0.1:8080` — the SPA shows its own
+sign-in form when it has no session cookie, so the dev flow works without
+visiting the Go server directly.
 
 The admin API behind it requires either `Authorization: Bearer <admin-token>` or
 the signed UI session cookie:
@@ -304,11 +325,15 @@ Connectivity is attempted in this order, all automatic:
    fresh handshake) for 90s, the agent moves it onto a relay. This avoids
    abandoning healthy links just because WireGuard's normal rekey interval is
    longer than the old fallback timer. The relay is a deliberately dumb
-   forwarder: it never parses what it carries — all traffic is WireGuard
+   forwarder: it never decrypts what it carries — all traffic is WireGuard
    ciphertext, so it can drop packets but not read or forge them. This
    replaces TURN, which kernel WireGuard cannot speak (the kernel owns
-   the UDP socket). Two transports, chosen by `--relay-transport` on the
-   agent:
+   the UDP socket). The forwarding path is lock-free (atomics, no
+   per-packet allocation) and drops anything that is not shaped like a
+   WireGuard message; a learned peer address only moves on a
+   handshake-shaped packet, so scanners and spoofed data packets can
+   neither hijack a leg nor keep an idle pair alive (see SECURITY.md).
+   Two transports, chosen by `--relay-transport` on the agent:
 
    - **websocket** (default): the agent opens a WebSocket to the control
      plane's own port and pumps datagrams through a loopback UDP proxy

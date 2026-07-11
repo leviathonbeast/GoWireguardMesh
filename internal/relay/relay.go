@@ -8,12 +8,22 @@
 // guarantee those arrive) and then cross-forwards: traffic in on port
 // A goes out port B to B's last known address, and vice versa.
 //
-// The relay never parses what it forwards — everything is WireGuard
+// The relay never decrypts what it forwards — everything is WireGuard
 // ciphertext, so a compromised relay can delay or drop traffic but
 // not read or forge it. This design exists because kernel WireGuard
 // owns its UDP socket and cannot speak TURN's allocation framing; a
 // plain forwarder achieves the same fallback with zero cooperation
 // from the kernel.
+//
+// The forwarding ports are necessarily open to the world (the peers'
+// addresses are not known until they check in), so each leg's learned
+// address is defended two ways: datagrams that are not shaped like
+// WireGuard messages are dropped without forwarding, learning, or
+// keeping the pair alive; and once a leg has an address, only a
+// handshake-shaped message may move it. A roaming peer's WireGuard
+// re-handshakes within seconds when replies stop arriving, so genuine
+// address changes still converge, while a spoofed data packet cannot
+// steal the return stream.
 //
 // It runs embedded inside the control plane (one binary, direct
 // allocation calls) or standalone via cmd/relay (public-IP host,
@@ -25,7 +35,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -153,7 +165,8 @@ func (s *Server) Allocate(id string) (portA, portB int, err error) {
 		return 0, 0, fmt.Errorf("bind port B: %w", err)
 	}
 
-	p := &pair{id: id, connA: connA, connB: connB, lastActive: time.Now()}
+	p := &pair{id: id, connA: connA, connB: connB}
+	p.touch()
 	s.pairs[id] = p
 
 	go p.forward(connA, connB, true)
@@ -178,9 +191,7 @@ func (s *Server) cleanupLoop() {
 		s.mu.Lock()
 
 		for id, p := range s.pairs {
-			p.mu.Lock()
-			idle := time.Since(p.lastActive)
-			p.mu.Unlock()
+			idle := time.Since(time.Unix(0, p.lastActive.Load()))
 
 			if idle > idleTimeout {
 				p.connA.Close()
@@ -196,59 +207,106 @@ func (s *Server) cleanupLoop() {
 }
 
 // pair is one bidirectional forwarding session between two peers.
+// The hot path is lock-free: each leg's learned address is an atomic
+// pointer and liveness is an atomic timestamp, so the two forward
+// goroutines never contend per packet.
 type pair struct {
 	id string
 
 	connA, connB *net.UDPConn
 
-	mu         sync.Mutex
-	srcA, srcB *net.UDPAddr
-	lastActive time.Time
+	srcA, srcB atomic.Pointer[netip.AddrPort]
+	lastActive atomic.Int64 // unix nanos
 }
 
 func (p *pair) portA() int { return p.connA.LocalAddr().(*net.UDPAddr).Port }
 func (p *pair) portB() int { return p.connB.LocalAddr().(*net.UDPAddr).Port }
 
 func (p *pair) touch() {
-	p.mu.Lock()
-	p.lastActive = time.Now()
-	p.mu.Unlock()
+	p.lastActive.Store(time.Now().UnixNano())
+}
+
+// WireGuard wire-format message types with their datagram sizes. The
+// relay checks shape only — type byte, zeroed reserved bytes, length —
+// which costs nothing per packet and never touches the ciphertext.
+const (
+	msgInitiation = 1 // handshake initiation, exactly 148 bytes
+	msgResponse   = 2 // handshake response, exactly 92 bytes
+	msgCookie     = 3 // cookie reply, exactly 64 bytes
+	msgTransport  = 4 // transport data, 32 bytes minimum (header + empty-payload tag)
+)
+
+// wgShaped reports whether b looks like a WireGuard datagram. Anything
+// else — scanner probes, reflection junk, random UDP — is not learned
+// from, not forwarded into a peer's WireGuard socket, and does not
+// keep the pair alive.
+func wgShaped(b []byte) bool {
+	if len(b) < 4 || b[1] != 0 || b[2] != 0 || b[3] != 0 {
+		return false
+	}
+
+	switch b[0] {
+	case msgInitiation:
+		return len(b) == 148
+	case msgResponse:
+		return len(b) == 92
+	case msgCookie:
+		return len(b) == 64
+	case msgTransport:
+		return len(b) >= 32
+	}
+
+	return false
 }
 
 // forward reads packets arriving on in and cross-sends them out via
 // out to the opposite side's last known address. fromA marks which
 // leg this goroutine serves, so it knows which source to record and
 // which destination to use.
+//
+// A leg adopts the first WireGuard-shaped sender outright, but once
+// set, only a handshake-shaped message may move the address. A data
+// packet from an unknown source is dropped: an off-path attacker who
+// finds the port cannot redirect the ciphertext stream to themselves
+// by spoofing, while a genuinely roaming peer re-handshakes from its
+// new address within seconds (WireGuard initiates when replies stop)
+// and converges.
 func (p *pair) forward(in, out *net.UDPConn, fromA bool) {
 	buf := make([]byte, 65535)
 
+	self, other := &p.srcA, &p.srcB
+	if !fromA {
+		self, other = &p.srcB, &p.srcA
+	}
+
 	for {
-		n, src, err := in.ReadFromUDP(buf)
+		n, src, err := in.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			return // socket closed by cleanup or shutdown
 		}
 
-		p.mu.Lock()
-
-		if fromA {
-			p.srcA = src
-		} else {
-			p.srcB = src
+		pkt := buf[:n]
+		if !wgShaped(pkt) {
+			continue
 		}
 
-		dst := p.srcB
-		if !fromA {
-			dst = p.srcA
+		if cur := self.Load(); cur == nil || *cur != src {
+			if cur != nil && pkt[0] == msgTransport {
+				continue
+			}
+
+			addr := src
+			self.Store(&addr)
 		}
 
-		p.lastActive = time.Now()
-		p.mu.Unlock()
+		p.lastActive.Store(time.Now().UnixNano())
 
+		dst := other.Load()
 		if dst == nil {
 			continue // other side hasn't checked in yet
 		}
 
-		if _, err := out.WriteToUDP(buf[:n], dst); err != nil {
+		if _, err := out.WriteToUDPAddrPort(pkt, *dst); err != nil {
 			slog.Debug("relay forward error", "pair", p.id, "error", err)
 		}
 	}

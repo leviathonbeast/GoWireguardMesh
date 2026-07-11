@@ -1,8 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   // Relative asset paths so the UI works if Traefik mounts it under a
   // path prefix rather than at the domain root.
   base: "./",
@@ -12,6 +13,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:8080",
       "/enroll": "http://127.0.0.1:8080",
+      "/ui-login": "http://127.0.0.1:8080",
     },
   },
 });

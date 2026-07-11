@@ -40,6 +40,8 @@ const (
 // port keeps the host-firewall rule stable across restarts.
 const defaultGUIListenPort = 51820
 
+const defaultSTUNServer = "stun.l.google.com:19302"
+
 func defaultKeyFile() string {
 	base := os.Getenv("ProgramData")
 	if base == "" {
@@ -76,7 +78,7 @@ func loadSettings(p fyne.Preferences) guiSettings {
 		ServerCA:       strings.TrimSpace(p.String(prefServerCA)),
 		RelayTransport: p.StringWithFallback(prefRelayTransport, "websocket"),
 		LogLevel:       p.StringWithFallback(prefLogLevel, "info"),
-		STUNServer:     strings.TrimSpace(p.StringWithFallback(prefSTUNServer, "stun.l.google.com:19302")),
+		STUNServer:     strings.TrimSpace(p.StringWithFallback(prefSTUNServer, defaultSTUNServer)),
 		ManageFirewall: p.BoolWithFallback(prefManageFirewall, true),
 		DirectProbe:    p.BoolWithFallback(prefDirectProbe, true),
 	}
@@ -94,6 +96,21 @@ func (s guiSettings) save(p fyne.Preferences) {
 	p.SetString(prefSTUNServer, s.STUNServer)
 	p.SetBool(prefManageFirewall, s.ManageFirewall)
 	p.SetBool(prefDirectProbe, s.DirectProbe)
+}
+
+// advancedCustomized reports whether any advanced field differs from
+// its default. The settings tab keeps the advanced section collapsed
+// for the common case, but never hides a value the operator changed.
+func (s guiSettings) advancedCustomized() bool {
+	return s.Hostname != "" ||
+		s.ListenPort != defaultGUIListenPort ||
+		s.KeyFile != defaultKeyFile() ||
+		s.ServerCA != "" ||
+		s.RelayTransport != "websocket" ||
+		s.LogLevel != "info" ||
+		s.STUNServer != defaultSTUNServer ||
+		!s.ManageFirewall ||
+		!s.DirectProbe
 }
 
 func (s guiSettings) validate() error {
@@ -235,9 +252,18 @@ func (g *agentGUI) buildSettingsTab() fyne.CanvasObject {
 	})
 	save.Importance = widget.HighImportance
 
-	form := widget.NewForm(
-		widget.NewFormItem("Server URL", server),
-		widget.NewFormItem("Setup key", setupKey),
+	// The two fields everyone must fill stay in plain sight; everything
+	// with a sensible default lives behind the Advanced disclosure.
+	connection := widget.NewCard(
+		"Connection",
+		"Registers with the control plane using a setup key from the web UI, then stays connected until you disconnect or quit.",
+		widget.NewForm(
+			widget.NewFormItem("Server URL", server),
+			widget.NewFormItem("Setup key", setupKey),
+		),
+	)
+
+	advancedForm := widget.NewForm(
 		widget.NewFormItem("Hostname", hostname),
 		widget.NewFormItem("Listen port (UDP)", listenPort),
 		widget.NewFormItem("Key file", keyFile),
@@ -249,8 +275,33 @@ func (g *agentGUI) buildSettingsTab() fyne.CanvasObject {
 		widget.NewFormItem("", directProbe),
 	)
 
-	hint := widget.NewLabel("The GUI runs the agent in enrollment mode: it registers with the control plane using the setup key, then stays connected until you disconnect or quit.")
-	hint.Wrapping = fyne.TextWrapWord
+	resetAdvanced := widget.NewButtonWithIcon("Reset to defaults", theme.ViewRefreshIcon(), func() {
+		hostname.SetText("")
+		listenPort.SetText(strconv.Itoa(defaultGUIListenPort))
+		keyFile.SetText(defaultKeyFile())
+		serverCA.SetText("")
+		relay.SetSelected("websocket")
+		logLevel.SetSelected("info")
+		stun.SetText(defaultSTUNServer)
+		manageFW.SetChecked(true)
+		directProbe.SetChecked(true)
+	})
 
-	return container.NewVScroll(container.NewVBox(hint, form, container.NewHBox(save)))
+	advanced := widget.NewAccordion(widget.NewAccordionItem(
+		"Advanced options",
+		container.NewVBox(advancedForm, container.NewHBox(resetAdvanced)),
+	))
+	// Collapsed by default, but a customized field must never be hidden.
+	if s.advancedCustomized() {
+		advanced.Open(0)
+	}
+
+	body := container.NewVScroll(container.NewPadded(container.NewVBox(
+		connection,
+		advanced,
+	)))
+
+	saveBar := container.NewPadded(container.NewBorder(nil, nil, nil, save))
+
+	return container.NewBorder(nil, saveBar, nil, nil, body)
 }

@@ -158,6 +158,7 @@ func (s *server) uiSessionMAC(payload string) []byte {
 
 func writeUILogin(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
 	errHTML := ""

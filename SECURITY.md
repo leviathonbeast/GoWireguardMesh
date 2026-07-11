@@ -15,6 +15,23 @@ or forge. Setup keys and the admin token are bearer secrets: whoever
 holds one can act with it, so they must never cross an untrusted network
 in cleartext.
 
+The relay's forwarding ports are necessarily open to the world (peer
+addresses are learned from their first packets), so those legs are
+defended in the packet path: datagrams that are not WireGuard-shaped
+(wrong type byte, reserved bytes, or size) are dropped without being
+forwarded, without updating the learned peer address, and without
+keeping the pair alive; and once a leg has an address, only a
+handshake-shaped message can move it. An off-path attacker who finds a
+relay port can therefore neither inject junk into a peer's WireGuard
+socket nor redirect the ciphertext stream to themselves with spoofed
+data packets. (A spoofed *handshake-shaped* packet can still move a
+leg's address — the relay cannot verify WireGuard crypto — but the
+stream it steals is ciphertext, and the real peer re-handshakes and
+reclaims the leg within seconds.) The agent-side WebSocket relay proxy
+pins its loopback counterpart to kernel WireGuard's own listen port, so
+no other local process — including a service container sharing the
+agent's network namespace — can hijack or feed the relay stream.
+
 ## Tier 1 — do these before the control plane faces the internet
 
 ### 1. TLS is mandatory on a public VPS
@@ -34,13 +51,20 @@ Never expose `--no-tls` to the internet. Two options:
 The server warns loudly if it is serving plain HTTP on a non-loopback
 address without `--trust-proxy`.
 
-The web UI is protected by a single admin bearer token. Anonymous visitors only
-receive a tiny token form; the actual dashboard bundle/assets are served only
-after the token validates and the server sets a signed HttpOnly UI session
-cookie. Over HTTPS that is reasonable for a homelab control plane, but treat the
-token like root for the mesh: keep TLS strict, do not log or share the token,
-prefer putting the UI behind your existing identity-aware proxy/VPN allowlist
-when possible, and rotate `admin-token` if it leaks.
+The web UI is protected by username/password accounts (argon2id at rest;
+first boot seeds `admin` with the admin token as its password — change it).
+Anonymous visitors only receive a tiny server-rendered login form; the
+dashboard bundle/assets are served only after login sets a signed HttpOnly
+`SameSite=Strict` session cookie (HMAC key in `session.key`, separate from
+the admin token, so a leaked bearer token cannot forge cookies). The SPA
+itself holds **no credential at all** — nothing in sessionStorage or
+localStorage for an XSS payload to steal; every browser request rides the
+cookie, and `SameSite=Strict` plus the same-origin CSP covers CSRF. All
+API JSON is served `Cache-Control: no-store`, so setup keys and device
+configs never land in a browser or proxy cache. The admin **bearer token
+remains valid for the API** (curl, automation): treat it like root for the
+mesh — keep TLS strict, never log or share it, and rotate `admin-token` if
+it leaks.
 
 ### 2. Rate limiting (on by default)
 

@@ -31,6 +31,10 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, v any) b
 
 func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// API responses can carry secrets — setup keys, and a static peer's
+	// WireGuard config embeds its private key — so nothing may land in a
+	// browser or intermediary cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(v); err != nil {

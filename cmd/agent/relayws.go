@@ -47,8 +47,7 @@ type wsRelayProxy struct {
 	ws    *websocket.Conn
 	ctx   context.Context
 	stop  context.CancelFunc
-	wgDst *net.UDPAddr // kernel's source addr, learned from first packet
-	mu    sync.Mutex
+	wgDst *net.UDPAddr // kernel WireGuard's loopback socket, pinned at start
 	once  sync.Once
 }
 
@@ -78,6 +77,26 @@ func (t *telemetryReporter) startWSRelay(peer wgtypes.Key) (*wsRelayProxy, error
 
 	conn.SetReadLimit(1 << 16)
 
+	// The kernel's WireGuard socket is the proxy's only legitimate
+	// counterpart, and its address is fully known up front: loopback,
+	// the device's listen port. Pinning it (rather than learning it
+	// from the first packet) means no other local process — including
+	// a service container sharing this network namespace — can redirect
+	// the relay stream to itself or inject packets into it.
+	dev, err := t.wg.Device()
+	if err != nil {
+		conn.Close()
+		cancel()
+
+		return nil, fmt.Errorf("read wireguard listen port: %w", err)
+	}
+	if dev.ListenPort == 0 {
+		conn.Close()
+		cancel()
+
+		return nil, errors.New("wireguard device has no listen port yet")
+	}
+
 	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		conn.Close()
@@ -106,7 +125,14 @@ func (t *telemetryReporter) startWSRelay(peer wgtypes.Key) (*wsRelayProxy, error
 		return nil, fmt.Errorf("point peer at relay proxy: %w", err)
 	}
 
-	p := &wsRelayProxy{peer: peer, udp: udp, ws: conn, ctx: ctx, stop: cancel}
+	p := &wsRelayProxy{
+		peer:  peer,
+		udp:   udp,
+		ws:    conn,
+		ctx:   ctx,
+		stop:  cancel,
+		wgDst: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: dev.ListenPort},
+	}
 
 	go p.udpToWS()
 	go p.wsToUDP()
@@ -145,11 +171,12 @@ func (p *wsRelayProxy) udpToWS() {
 			return
 		}
 
-		// The kernel's socket address is the destination for return
-		// traffic; it is stable for the life of the tunnel.
-		p.mu.Lock()
-		p.wgDst = src
-		p.mu.Unlock()
+		// Only kernel WireGuard's own socket may feed the relay.
+		// Anything else on loopback is another process probing the
+		// proxy port and is dropped, not shipped to the remote peer.
+		if src.Port != p.wgDst.Port || !src.IP.IsLoopback() {
+			continue
+		}
 
 		if err := p.ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
 			p.close()
@@ -169,15 +196,7 @@ func (p *wsRelayProxy) wsToUDP() {
 			continue
 		}
 
-		p.mu.Lock()
-		dst := p.wgDst
-		p.mu.Unlock()
-
-		if dst == nil {
-			continue // kernel hasn't sent its first packet yet
-		}
-
-		if _, err := p.udp.WriteToUDP(data, dst); err != nil {
+		if _, err := p.udp.WriteToUDP(data, p.wgDst); err != nil {
 			p.stop()
 			return
 		}

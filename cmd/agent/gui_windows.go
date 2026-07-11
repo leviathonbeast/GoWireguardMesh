@@ -25,6 +25,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"fyne.io/systray"
@@ -254,9 +255,10 @@ type agentGUI struct {
 	infoOverlay *widget.Label
 	infoPort    *widget.Label
 
-	peers     []peerStatus
-	peerList  *widget.List
-	peerEmpty *widget.Label
+	peers       []peerStatus
+	peerList    *widget.List
+	peerEmpty   *widget.Label
+	peerSummary *widget.Label
 
 	logText   *widget.Label
 	logScroll *container.Scroll
@@ -286,7 +288,7 @@ func launchGUI() error {
 
 	g := &agentGUI{app: a}
 	g.win = a.NewWindow("wgmesh Agent")
-	g.win.Resize(fyne.NewSize(780, 580))
+	g.win.Resize(fyne.NewSize(820, 620))
 
 	g.win.SetContent(container.NewBorder(
 		g.buildHeader(), nil, nil, nil,
@@ -345,7 +347,11 @@ func (g *agentGUI) buildHeader() fyne.CanvasObject {
 	top := container.NewBorder(nil, nil,
 		container.NewHBox(g.stateIcon, g.stateLabel), g.toggleBtn)
 
-	return container.NewVBox(top, g.errLabel, info, widget.NewSeparator())
+	return container.NewPadded(container.NewVBox(
+		top,
+		g.errLabel,
+		widget.NewCard("", "", info),
+	))
 }
 
 // layoutTwoCol is a simple label/value grid: two columns, natural row
@@ -401,6 +407,9 @@ func (l *twoColLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 func (g *agentGUI) buildPeersTab() fyne.CanvasObject {
 	g.peerEmpty = widget.NewLabel("No peers yet — connect to see the mesh.")
 
+	g.peerSummary = widget.NewLabel("")
+	g.peerSummary.Hide()
+
 	g.peerList = widget.NewList(
 		func() int { return len(g.peers) },
 		func() fyne.CanvasObject {
@@ -419,7 +428,25 @@ func (g *agentGUI) buildPeersTab() fyne.CanvasObject {
 		},
 	)
 
-	return container.NewStack(g.peerList, container.NewCenter(g.peerEmpty))
+	return container.NewBorder(
+		g.peerSummary, nil, nil, nil,
+		container.NewStack(g.peerList, container.NewCenter(g.peerEmpty)),
+	)
+}
+
+// peerSummaryText is the one-line mesh digest above the peer list.
+func peerSummaryText(peers []peerStatus) string {
+	direct, relayed := 0, 0
+	for _, p := range peers {
+		switch p.PathState {
+		case "direct":
+			direct++
+		case "ws-relay", "udp-relay":
+			relayed++
+		}
+	}
+
+	return fmt.Sprintf("%d peers · %d direct · %d relayed", len(peers), direct, relayed)
 }
 
 func peerTitle(p peerStatus) string {
@@ -526,7 +553,9 @@ func (g *agentGUI) buildLogsTab() fyne.CanvasObject {
 		guiLog.clear()
 	})
 
-	return container.NewBorder(nil, container.NewHBox(copyBtn, saveBtn, clearBtn), nil, nil, g.logScroll)
+	actions := container.NewHBox(layout.NewSpacer(), copyBtn, saveBtn, clearBtn)
+
+	return container.NewBorder(nil, container.NewPadded(actions), nil, nil, g.logScroll)
 }
 
 func (g *agentGUI) setupTray() {
@@ -731,8 +760,11 @@ func (g *agentGUI) applyPeers(peers []peerStatus) {
 
 	if len(peers) == 0 {
 		g.peerEmpty.Show()
+		g.peerSummary.Hide()
 	} else {
 		g.peerEmpty.Hide()
+		g.peerSummary.SetText(peerSummaryText(peers))
+		g.peerSummary.Show()
 	}
 
 	g.peerList.Refresh()

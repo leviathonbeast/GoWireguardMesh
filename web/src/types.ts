@@ -157,6 +157,34 @@ export interface DNSConfig {
   search_domains?: string[];
 }
 
+export interface ProxyEvent {
+  id: number;
+  at: string;
+  peer_id?: number;
+  peer_hostname?: string;
+  method?: string;
+  host?: string;
+  path?: string;
+  status?: number;
+  duration_ms?: number;
+  req_bytes?: number;
+  resp_bytes?: number;
+  client_ip?: string;
+  service?: string;
+}
+
+export interface ConnectionEvent {
+  id: number;
+  at: string;
+  kind: string; // "direct" | "relay"
+  from_state?: string;
+  to_state: string;
+  reporter_peer_id: number;
+  reporter_hostname?: string;
+  remote_peer_id: number;
+  remote_hostname?: string;
+}
+
 export interface NetworkPeerChange {
   id: number;
   hostname?: string;
