@@ -192,7 +192,7 @@ func (g *agentGUI) buildSettingsTab() fyne.CanvasObject {
 	serverCA.SetPlaceHolder("optional: PEM file to pin a self-signed server cert")
 	serverCA.SetText(s.ServerCA)
 
-	relay := widget.NewSelect([]string{"auto", "websocket", "udp"}, nil)
+	relay := widget.NewSelect([]string{"auto", "quic", "websocket", "udp"}, nil)
 	relay.SetSelected(s.RelayTransport)
 
 	logLevel := widget.NewSelect([]string{"debug", "info", "warn", "error"}, nil)

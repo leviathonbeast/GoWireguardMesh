@@ -466,7 +466,8 @@ privileges is a warning, never fatal.
   `/opt/wgmesh/server.env`, edit it, and run it with Docker Compose.
 - **Gitea Actions**: `.gitea/workflows/docker-images.yml` builds and pushes
   the `server`, `agent`, and `relay` Docker targets to the Gitea container
-  registry on pushes to `main` and `v*` tags.
+  registry on `v*` tag pushes. Push `main` and its annotated release tag
+  together; only the tag queues a release workflow.
 - **Back up** `mesh.db`, `mesh-psk.key` (the PSK master — losing it strands
   every peer), `admin-token`, and (built-in TLS) `key.pem`. Details and a
   cron sketch in [SECURITY.md](SECURITY.md).
@@ -798,13 +799,21 @@ WINDOWS_CC=/path/to/llvm-mingw/bin/x86_64-w64-mingw32-gcc ./deploy/build.sh
 
 CI also builds both Windows binaries: the `windows-binaries` job in
 `.gitea/workflows/docker-images.yml` uploads `agent.exe` +
-`agent-gui.exe` as the `windows-agent` artifact on every push to main.
-Pushing a `v*` tag additionally creates a **Gitea release** with all
+`agent-gui.exe` as the `windows-agent` artifact for every release tag.
+Pushing a `v*` tag creates a **Gitea release** with all
 binaries (linux + windows, plus `sha256sums.txt`) attached — the
 stable download page. The release job authenticates with the
 workflow's own token; if release creation is rejected on your Gitea,
 add a personal access token (repo scope) as the `RELEASE_TOKEN`
 secret.
+
+Create the commit and annotated tag locally, then push both refs in one
+command. Although Git sends both refs, only the tag matches the workflow:
+
+```sh
+git tag -a v1.2.3 -m "wgmesh v1.2.3"
+git push origin main v1.2.3
+```
 
 Both executables carry an embedded icon and version block from
 `cmd/agent/resource_windows_amd64.syso` (checked in; regenerate with
