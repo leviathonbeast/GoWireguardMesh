@@ -317,7 +317,7 @@ ALTER TABLE acl_rules ADD COLUMN port_max INTEGER;
 `
 
 // migrationV8 records the agent's selected path for each peer pair
-// (direct, ws-relay, udp-relay, probing-direct) so the UI can show
+// (direct, quic-relay, ws-relay, udp-relay, probing-direct) so the UI can show
 // path state independently of byte-counter changes.
 const migrationV8 = `
 CREATE TABLE peer_paths (

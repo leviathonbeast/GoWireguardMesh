@@ -17,12 +17,14 @@ func TestConnectionEventKind(t *testing.T) {
 	}{
 		{"", "direct", "direct", true},
 		{"", "ws-relay", "relay", true},
+		{"", "quic-relay", "relay", true},
 		{"", "udp-relay", "relay", true},
 		{"", "probing-direct", "", false},
 		{"ws-relay", "direct", "direct", true},
 		{"direct", "ws-relay", "relay", true},
 		{"ws-relay", "udp-relay", "", false}, // relay transport churn, not a new event
-		{"direct", "direct", "", false},      // unchanged
+		{"quic-relay", "ws-relay", "", false},
+		{"direct", "direct", "", false}, // unchanged
 		{"direct", "probing-direct", "", false},
 	}
 

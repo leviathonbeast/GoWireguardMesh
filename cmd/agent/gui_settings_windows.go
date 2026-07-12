@@ -76,7 +76,7 @@ func loadSettings(p fyne.Preferences) guiSettings {
 		ListenPort:     p.IntWithFallback(prefListenPort, defaultGUIListenPort),
 		KeyFile:        strings.TrimSpace(p.StringWithFallback(prefKeyFile, defaultKeyFile())),
 		ServerCA:       strings.TrimSpace(p.String(prefServerCA)),
-		RelayTransport: p.StringWithFallback(prefRelayTransport, "websocket"),
+		RelayTransport: p.StringWithFallback(prefRelayTransport, "auto"),
 		LogLevel:       p.StringWithFallback(prefLogLevel, "info"),
 		STUNServer:     strings.TrimSpace(p.StringWithFallback(prefSTUNServer, defaultSTUNServer)),
 		ManageFirewall: p.BoolWithFallback(prefManageFirewall, true),
@@ -106,7 +106,7 @@ func (s guiSettings) advancedCustomized() bool {
 		s.ListenPort != defaultGUIListenPort ||
 		s.KeyFile != defaultKeyFile() ||
 		s.ServerCA != "" ||
-		s.RelayTransport != "websocket" ||
+		s.RelayTransport != "auto" ||
 		s.LogLevel != "info" ||
 		s.STUNServer != defaultSTUNServer ||
 		!s.ManageFirewall ||
@@ -192,7 +192,7 @@ func (g *agentGUI) buildSettingsTab() fyne.CanvasObject {
 	serverCA.SetPlaceHolder("optional: PEM file to pin a self-signed server cert")
 	serverCA.SetText(s.ServerCA)
 
-	relay := widget.NewSelect([]string{"websocket", "udp"}, nil)
+	relay := widget.NewSelect([]string{"auto", "websocket", "udp"}, nil)
 	relay.SetSelected(s.RelayTransport)
 
 	logLevel := widget.NewSelect([]string{"debug", "info", "warn", "error"}, nil)

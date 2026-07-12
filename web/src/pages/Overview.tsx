@@ -7,7 +7,9 @@ export default function Overview({ ctx }: { ctx: AppCtx }) {
   const activePeers = peers.filter((p) => !p.revoked_at);
   const onlinePeers = activePeers.filter((p) => p.health_status === "online");
   const directLinks = links.filter((l) => l.path_state === "direct");
-  const relayedLinks = links.filter((l) => l.path_state === "ws-relay" || l.path_state === "udp-relay");
+  const relayedLinks = links.filter((l) =>
+    l.path_state === "quic-relay" || l.path_state === "ws-relay" || l.path_state === "udp-relay"
+  );
   const activeKeys = keys.filter((k) => !k.revoked_at && !(k.max_uses > 0 && k.uses_consumed >= k.max_uses));
 
   return (

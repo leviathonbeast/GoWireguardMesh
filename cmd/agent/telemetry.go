@@ -80,6 +80,7 @@ type telemetryReporter struct {
 	client           *http.Client
 	wsDialer         *websocket.Dialer
 	serverURL        string
+	serverCA         string
 	authToken        string
 	iface            string
 	selfAddr         string
@@ -116,29 +117,33 @@ type telemetryReporter struct {
 	pendingFlows    map[flowKey]*proto.FlowRecord
 
 	// Relay fallback state.
-	relayTransport relayTransport
-	firstSeen      map[wgtypes.Key]time.Time
-	lastInbound    map[wgtypes.Key]time.Time // last tick a peer's rx grew (keepalives count)
-	relayed        map[wgtypes.Key]bool
-	relayedAt      map[wgtypes.Key]time.Time
-	relayEndpoints map[wgtypes.Key]*net.UDPAddr
-	directProbes   map[wgtypes.Key]directProbe
-	lastPunchEpoch map[wgtypes.Key]int
-	directFailures map[wgtypes.Key]int    // consecutive failed direct-retry probes; backs off the uncoordinated retry
-	lastCandidates map[wgtypes.Key]string // digest of last candidate set; a change re-arms a prompt retry
-	wsProxies      map[wgtypes.Key]*wsRelayProxy
-	relayBroken    bool // control plane said no relay; stop asking
-	directProbeOff bool // keep relay stable after fallback; useful for service sidecars
+	relayTransport  relayTransport
+	firstSeen       map[wgtypes.Key]time.Time
+	lastInbound     map[wgtypes.Key]time.Time // last tick a peer's rx grew (keepalives count)
+	relayed         map[wgtypes.Key]bool
+	relayedAt       map[wgtypes.Key]time.Time
+	relayEndpoints  map[wgtypes.Key]*net.UDPAddr
+	directProbes    map[wgtypes.Key]directProbe
+	lastPunchEpoch  map[wgtypes.Key]int
+	directFailures  map[wgtypes.Key]int    // consecutive failed direct-retry probes; backs off the uncoordinated retry
+	lastCandidates  map[wgtypes.Key]string // digest of last candidate set; a change re-arms a prompt retry
+	wsProxies       map[wgtypes.Key]*wsRelayProxy
+	quicProxies     map[wgtypes.Key]*quicRelayProxy
+	pathKinds       map[wgtypes.Key]string
+	quicUnavailable map[wgtypes.Key]bool
+	relayBroken     bool // control plane said no relay; stop asking
+	directProbeOff  bool // keep relay stable after fallback; useful for service sidecars
 }
 
 // relayTransport selects how the agent tunnels to a relayed peer.
 type relayTransport int
 
 const (
+	relayAuto relayTransport = iota
 	// relayWebSocket rides the control plane's own port (443), so it
 	// needs no extra firewall holes and traverses UDP-blocking
 	// networks — the NetBird-parity default.
-	relayWebSocket relayTransport = iota
+	relayWebSocket
 	// relayUDP is the raw UDP forwarder: faster, but needs the relay's
 	// port range reachable.
 	relayUDP
@@ -170,6 +175,7 @@ func newTelemetryReporter(
 		wsDialer:        wsDialer,
 		serverURL:       serverURL,
 		authToken:       authToken,
+		serverCA:        serverCA,
 		iface:           iface,
 		selfAddr:        selfAddr,
 		selfAddr6:       selfAddr6,
@@ -193,6 +199,9 @@ func newTelemetryReporter(
 		directFailures:  make(map[wgtypes.Key]int),
 		lastCandidates:  make(map[wgtypes.Key]string),
 		wsProxies:       make(map[wgtypes.Key]*wsRelayProxy),
+		quicProxies:     make(map[wgtypes.Key]*quicRelayProxy),
+		pathKinds:       make(map[wgtypes.Key]string),
+		quicUnavailable: make(map[wgtypes.Key]bool),
 	}
 
 	dumper, err := newFlowDumper(iface, parseSelfAddr(selfAddr), parseSelfAddr(selfAddr6))
@@ -249,6 +258,9 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 			t.syncOnce(false)
 
 			for _, p := range t.wsProxies {
+				p.close()
+			}
+			for _, p := range t.quicProxies {
 				p.close()
 			}
 
@@ -702,6 +714,9 @@ func (t *telemetryReporter) pathState(peer wgtypes.Key) string {
 		return "probing-direct"
 	}
 	if t.relayed[peer] {
+		if kind := t.pathKinds[peer]; kind != "" {
+			return kind
+		}
 		if t.relayTransport == relayUDP {
 			return "udp-relay"
 		}

@@ -55,7 +55,7 @@ var (
 	reportIntervalFlag   = flag.Duration("report-interval", 30*time.Second, "telemetry reporting interval")
 	stunServerFlag       = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables); once enrolled, the mesh's own STUN endpoints take over the periodic re-checks")
 	portMappingFlag      = flag.Bool("port-mapping", true, "ask the local router (UPnP/NAT-PMP) to forward the WireGuard listen port to this host; lease-limited, removed on shutdown")
-	relayTransportFlag   = flag.String("relay-transport", "websocket", "relay fallback transport: \"websocket\" (rides the control-plane port, needs no extra firewall holes) or \"udp\" (faster, needs the relay port range reachable)")
+	relayTransportFlag   = flag.String("relay-transport", "auto", "relay fallback: \"auto\" tries QUIC then HTTPS WebSocket; \"websocket\" or \"udp\" force a legacy transport")
 	directProbeFlag      = flag.Bool("direct-probe", true, "probe direct endpoints while on relay (disable for reverse-proxy/service sidecars that prefer relay stability)")
 	gatewayNATCIDRsFlag  = flag.String("gateway-nat-cidrs", "", "comma-separated IPv4 CIDRs or addresses to masquerade through this peer (for static/mobile WireGuard clients)")
 	manageFirewallFlag   = flag.Bool("manage-firewall", true, "open the WireGuard listen port on the host firewall (removed again on shutdown)")

@@ -358,9 +358,17 @@ Connectivity is attempted in this order, all automatic:
    WireGuard message; a learned peer address only moves on a
    handshake-shaped packet, so scanners and spoofed data packets can
    neither hijack a leg nor keep an idle pair alive (see SECURITY.md).
-   Two transports, chosen by `--relay-transport` on the agent:
+   With the default `--relay-transport auto`, fallback tries QUIC first and
+   HTTPS WebSocket second:
 
-   - **websocket** (default): the agent opens a WebSocket to the control
+   - **quic**: an authenticated control stream establishes each peer-pair
+     session, then unreliable QUIC DATAGRAM frames carry only opaque
+     WireGuard ciphertext. Oversized WireGuard datagrams are fragmented by
+     the source agent and reassembled by the destination agent; the relay
+     never reconstructs or decrypts them. QUIC listens on
+     `--relay-quic-port` (default 51890/udp).
+
+   - **websocket**: if QUIC cannot connect, the agent opens a WebSocket to the control
      plane's own port and pumps datagrams through a loopback UDP proxy
      that the peer's endpoint points at — kernel WireGuard never knows
      the transport isn't UDP. Because it rides the existing API port,
@@ -400,8 +408,8 @@ Relay setup, two shapes:
 - **Embedded (default choice, NetBird-style single binary):** run the
   control plane with `--relay-embedded --relay-host <address agents
   dial>`. The relay lives in the server process — no second binary, no
-  shared secret, no control hop. Serves both transports: WebSocket over
-  the API port (nothing extra to open), and UDP over
+  shared secret, no control hop. Serves QUIC on `--relay-quic-port`
+  (default 51890/udp), WebSocket over the API port, and raw UDP over
   `--relay-port-min/--relay-port-max` (default 51900-51999) for agents
   that opt into `--relay-transport udp`. Also serves mesh STUN on
   `--stun-port` and the next port up (default 3478/3479, `0` disables),
@@ -420,9 +428,9 @@ consumes two ports.
 
 ### Firewall posture
 
-With the embedded relay and the default WebSocket transport, a full
-mesh needs, on the control-plane host: **443** (or 8443) for the API,
-web UI, enrollment, telemetry, *and* relayed traffic — one port. Agents
+With the embedded relay and automatic transport, a full mesh prefers
+**51890/udp** for QUIC and falls back to **443/tcp** (or 8443) for HTTPS
+WebSocket. Agents
 need nothing inbound; WireGuard's own port is opened locally by
 `--manage-firewall` for direct connectivity but is not required for the
 relay path. That matches NetBird's "443 plus WireGuard" posture. Opt
@@ -818,7 +826,7 @@ sudo ./bin/agent --server https://192.168.1.10:8443 --setup-key <token> \
 
 Useful agent flags: `--listen-port 51820` (pin the WireGuard port — strongly
 recommended so the firewall rule is stable across restarts), `--server-ca`
-(pin a self-signed server cert), `--relay-transport websocket|udp`,
+(pin a self-signed server cert), `--relay-transport auto|websocket|udp`,
 `--direct-probe=false` (keep relayed service sidecars stable), `--stun-server`,
 `--port-mapping=false` (don't ask the router to forward the WireGuard port),
 `--gateway-nat-cidrs 100.78.0.9/32` (gateway NAT for static/mobile peers),

@@ -7,10 +7,9 @@
 #     real client IPs instead of the proxy's.
 #   - Set RELAY_PUBLIC_IP to the address agents dial for relayed
 #     traffic (this host's LAN or public IP).
-#   - With the default --relay-transport websocket on agents, relayed
-#     traffic rides the API port (8080/443) and the UDP range below is
-#     not needed — drop that ports line. Keep it only if some agents
-#     use --relay-transport udp.
+#   - The default --relay-transport auto prefers QUIC on 51890/udp and
+#     falls back to WebSocket on the API port (8080/443). The wider UDP
+#     range is only needed by agents forced to --relay-transport udp.
 #   - Container firewalls aren't a thing, so --manage-firewall=false;
 #     open the mapped ports on the HOST firewall instead.
 #   - The agent is included commented out: it needs host networking
@@ -40,8 +39,8 @@ services:
       - server-data:/data
     ports:
       - "8080:8080"
-      # Only needed for agents using --relay-transport udp; the default
-      # websocket transport relays over 8080 above.
+      - "51890:51890/udp"
+      # Only needed for agents forced to --relay-transport udp.
       - "51900-51999:51900-51999/udp"
     restart: unless-stopped
     # Behind Traefik instead of the 8080 mapping above (keep the UDP range):

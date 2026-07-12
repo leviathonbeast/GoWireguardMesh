@@ -20,12 +20,14 @@ var errNoWSRelay = errors.New("control plane has no websocket relay")
 // parseRelayTransport maps the --relay-transport flag to its enum.
 func parseRelayTransport(s string) (relayTransport, error) {
 	switch s {
+	case "auto", "quic":
+		return relayAuto, nil
 	case "websocket", "ws":
 		return relayWebSocket, nil
 	case "udp":
 		return relayUDP, nil
 	default:
-		return 0, fmt.Errorf("relay-transport must be \"websocket\" or \"udp\", got %q", s)
+		return 0, fmt.Errorf("relay-transport must be \"auto\", \"quic\", \"websocket\", or \"udp\", got %q", s)
 	}
 }
 

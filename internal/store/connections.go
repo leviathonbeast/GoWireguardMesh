@@ -18,8 +18,8 @@ func connectionEventKind(prev, next string) (kind string, ok bool) {
 	switch next {
 	case "direct":
 		return "direct", true
-	case "ws-relay", "udp-relay":
-		if prev == "ws-relay" || prev == "udp-relay" {
+	case "quic-relay", "ws-relay", "udp-relay":
+		if prev == "quic-relay" || prev == "ws-relay" || prev == "udp-relay" {
 			return "", false // relay transport changed, not a new relay event
 		}
 		return "relay", true

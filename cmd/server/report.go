@@ -186,7 +186,7 @@ type punchDecision struct {
 
 func shouldBumpPunchEpoch(d punchDecision) bool {
 	switch d.state {
-	case "ws-relay", "udp-relay":
+	case "quic-relay", "ws-relay", "udp-relay":
 	default:
 		return false
 	}

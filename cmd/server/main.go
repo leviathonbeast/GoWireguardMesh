@@ -65,6 +65,8 @@ type server struct {
 	relay        relayAllocator // nil when no relay is configured
 	relayHost    string         // public data-plane address agents dial
 	wsHub        *relay.WSHub   // nil unless the embedded WS relay is enabled
+	quicHub      *relay.WSHub   // nil unless the embedded QUIC relay is enabled
+	quicEndpoint string         // public host:port agents dial for QUIC relay
 	stunServers  []string       // mesh STUN endpoints advertised to agents; empty when disabled
 	signalHub    *signalHub
 	accessLog    *accessLogSink
@@ -175,6 +177,7 @@ func runServe(args []string) error {
 	relayEmbedded := fs.Bool("relay-embedded", false, "run the relay inside this process (NetBird-style single binary; no relay-control/secret needed)")
 	relayPortMin := fs.Int("relay-port-min", 51900, "embedded relay: lowest forwarding UDP port")
 	relayPortMax := fs.Int("relay-port-max", 51999, "embedded relay: highest forwarding UDP port")
+	relayQUICPort := fs.Int("relay-quic-port", 51890, "embedded relay: QUIC datagram forwarding port (0 disables)")
 	stunPort := fs.Int("stun-port", 3478, "embedded relay: serve mesh STUN on this UDP port and the next (0 disables); agents use the pair to refresh endpoints and classify their NAT")
 	relayControl := fs.String("relay-control", "http://127.0.0.1:8081", "standalone relay: control API URL")
 	relaySecretFile := fs.String("relay-secret-file", "relay-secret", "standalone relay: path to the control shared secret")
@@ -348,6 +351,10 @@ func runServe(args []string) error {
 		// holes. Only the embedded relay offers it (it needs the
 		// store for auth); a standalone relay stays UDP-only.
 		srv.wsHub = relay.NewWSHub()
+		if *relayQUICPort > 0 {
+			srv.quicHub = relay.NewWSHub()
+			srv.quicEndpoint = net.JoinHostPort(relayEndpointHost(*relayHost), strconv.Itoa(*relayQUICPort))
+		}
 
 		// Mesh STUN: two ports on the relay host so agents can refresh
 		// their public endpoint and classify their NAT without any
@@ -374,6 +381,11 @@ func runServe(args []string) error {
 				slog.Warn("firewall rule failed", "backend", fw.Backend(), "error", err)
 			} else {
 				slog.Info("firewall opened relay range", "backend", fw.Backend(), "udp_min", *relayPortMin, "udp_max", *relayPortMax)
+				if *relayQUICPort > 0 {
+					if err := fw.AllowUDPRange(*relayQUICPort, *relayQUICPort); err != nil {
+						slog.Warn("firewall quic rule failed", "backend", fw.Backend(), "error", err)
+					}
+				}
 				if len(srv.stunServers) > 0 {
 					if err := fw.AllowUDPRange(*stunPort, *stunPort+1); err != nil {
 						slog.Warn("firewall stun rule failed", "backend", fw.Backend(), "error", err)
@@ -433,6 +445,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /signal", publicLimit(srv.handleSignalWS))
 	mux.HandleFunc("POST /relay-pair", publicLimit(srv.handleRelayPair))
 	mux.HandleFunc("GET /relay-ws", publicLimit(srv.handleRelayWS))
+	mux.HandleFunc("POST /relay-quic", publicLimit(srv.handleRelayQUICInfo))
 	mux.HandleFunc("POST /ui-login", publicLimit(srv.handleUILogin))
 	mux.Handle("GET /", srv.uiHandler(ui))
 	mux.HandleFunc("GET /api/peers", srv.requireAdmin(srv.handleListPeers))
@@ -493,6 +506,25 @@ func runServe(args []string) error {
 	}
 
 	httpSrv := newHTTPServer(*listen, handler)
+	hosts := strings.Split(*tlsHosts, ",")
+	for i := range hosts {
+		hosts[i] = strings.TrimSpace(hosts[i])
+	}
+	if srv.quicHub != nil {
+		hosts = append(hosts, relayEndpointHost(*relayHost))
+	}
+	if !*noTLS || srv.quicHub != nil {
+		if err := tlsutil.LoadOrGenerateCert(*tlsCert, *tlsKey, hosts); err != nil {
+			return err
+		}
+	}
+	if srv.quicHub != nil {
+		closeQUIC, err := srv.startQUICRelay(*relayQUICPort, *tlsCert, *tlsKey)
+		if err != nil {
+			return err
+		}
+		defer closeQUIC()
+	}
 
 	if *noTLS {
 		if !isLoopback(*listen) && !*trustProxy {
@@ -504,15 +536,6 @@ func runServe(args []string) error {
 		slog.Info("web ui ready", "url", "http://"+*listen+"/", "token_file", *adminTokenFile)
 
 		return runHTTPServer(httpSrv, false, "", "")
-	}
-
-	hosts := strings.Split(*tlsHosts, ",")
-	for i := range hosts {
-		hosts[i] = strings.TrimSpace(hosts[i])
-	}
-
-	if err := tlsutil.LoadOrGenerateCert(*tlsCert, *tlsKey, hosts); err != nil {
-		return err
 	}
 
 	slog.Info("control plane up",

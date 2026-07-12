@@ -29,7 +29,8 @@ type ReportRequest struct {
 	Flows []FlowRecord `json:"flows,omitempty"`
 
 	// PathStates carries the agent's current path choice for each
-	// configured remote peer: direct, ws-relay, udp-relay, or probing-direct.
+	// configured remote peer: direct, quic-relay, ws-relay, udp-relay,
+	// or probing-direct.
 	PathStates []PeerPathState `json:"path_states,omitempty"`
 
 	// ProxyEvents carries reverse-proxy access-log entries the agent

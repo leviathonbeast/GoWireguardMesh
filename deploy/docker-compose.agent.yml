@@ -41,7 +41,7 @@ services:
       --hostname ${WGMESH_HOSTNAME:-myservice}
       --listen-port ${WGMESH_LISTEN_PORT:-51820}
       --key-file /data/wgkey.key
-      --relay-transport ${WGMESH_RELAY_TRANSPORT:-websocket}
+      --relay-transport ${WGMESH_RELAY_TRANSPORT:-auto}
       --direct-probe=${WGMESH_DIRECT_PROBE:-false}
       --manage-firewall=false
       # To act as the routing gateway for static/mobile WireGuard clients

@@ -283,6 +283,14 @@ func TestShouldBumpPunchEpoch(t *testing.T) {
 		want bool
 	}{
 		{
+			name: "quic relay",
+			in: punchDecision{
+				state: "quic-relay", remoteOnline: true,
+				selfCandidates: 1, remoteCandidates: 1,
+			},
+			want: true,
+		},
+		{
 			name: "relayed online with candidates",
 			in: punchDecision{
 				state:            "ws-relay",

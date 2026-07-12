@@ -55,6 +55,8 @@ export function PathBadge({ state }: { state?: LinkStat["path_state"] }) {
       return <Badge tone="ok">direct</Badge>;
     case "probing-direct":
       return <Badge tone="warn">probing-direct</Badge>;
+    case "quic-relay":
+      return <Badge tone="warn">quic-relay</Badge>;
     case "ws-relay":
       return <Badge tone="warn">ws-relay</Badge>;
     case "udp-relay":

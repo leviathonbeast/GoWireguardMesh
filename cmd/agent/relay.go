@@ -102,6 +102,19 @@ func (t *telemetryReporter) checkHandshakes() {
 			delete(t.relayedAt, key)
 			delete(t.relayEndpoints, key)
 			delete(t.directProbes, key)
+			delete(t.pathKinds, key)
+		}
+	}
+	for key, p := range t.quicProxies {
+		if !p.alive() {
+			p.close()
+			delete(t.quicProxies, key)
+			delete(t.relayed, key)
+			delete(t.relayedAt, key)
+			delete(t.relayEndpoints, key)
+			delete(t.directProbes, key)
+			delete(t.pathKinds, key)
+			t.quicUnavailable[key] = true
 		}
 	}
 
@@ -230,6 +243,10 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 			p.close()
 			delete(t.wsProxies, peer.PublicKey)
 		}
+		if p := t.quicProxies[peer.PublicKey]; p != nil {
+			p.close()
+			delete(t.quicProxies, peer.PublicKey)
+		}
 
 		delete(t.directProbes, peer.PublicKey)
 		delete(t.relayed, peer.PublicKey)
@@ -237,6 +254,8 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 		delete(t.relayEndpoints, peer.PublicKey)
 		delete(t.directFailures, peer.PublicKey)
 		delete(t.lastCandidates, peer.PublicKey)
+		delete(t.pathKinds, peer.PublicKey)
+		delete(t.quicUnavailable, peer.PublicKey)
 		t.firstSeen[peer.PublicKey] = now
 
 		fmt.Printf("[agent] relay: direct endpoint for %s succeeded; leaving relay\n", peer.PublicKey)
@@ -314,6 +333,33 @@ func (t *telemetryReporter) applyDirectProbeEndpoint(peer wgtypes.Key, endpoint 
 // Returns true when the peer is now relayed (so it is not retried).
 func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Duration) bool {
 	switch t.relayTransport {
+	case relayAuto:
+		if !t.quicUnavailable[peer] {
+			proxy, err := t.startQUICRelay(peer)
+			if err == nil {
+				t.quicProxies[peer] = proxy
+				t.relayEndpoints[peer] = proxy.endpoint()
+				t.pathKinds[peer] = "quic-relay"
+				fmt.Printf("[agent] relay: no handshake with %s for %s, tunnelling WireGuard ciphertext over QUIC\n",
+					peer, silentFor.Round(time.Second))
+				return true
+			}
+			t.quicUnavailable[peer] = true
+			slog.Warn("QUIC relay unavailable; falling back to HTTPS WebSocket", "peer", peer, "error", err)
+		}
+		proxy, err := t.startWSRelay(peer)
+		if err != nil {
+			if err == errNoWSRelay {
+				t.relayBroken = true
+			}
+			slog.Warn("websocket relay failed", "peer", peer, "error", err)
+			return false
+		}
+		t.wsProxies[peer] = proxy
+		t.relayEndpoints[peer] = proxy.endpoint()
+		t.pathKinds[peer] = "ws-relay"
+		fmt.Printf("[agent] relay: QUIC unavailable; tunnelling WireGuard ciphertext over HTTPS WebSocket for %s\n", peer)
+		return true
 	case relayWebSocket:
 		proxy, err := t.startWSRelay(peer)
 		if err != nil {
@@ -331,6 +377,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 
 		t.wsProxies[peer] = proxy
 		t.relayEndpoints[peer] = proxy.endpoint()
+		t.pathKinds[peer] = "ws-relay"
 
 		fmt.Printf("[agent] relay: no handshake with %s for %s, tunnelling over websocket\n",
 			peer, silentFor.Round(time.Second))
@@ -368,6 +415,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 			return false
 		}
 		t.relayEndpoints[peer] = udpAddr
+		t.pathKinds[peer] = "udp-relay"
 
 		fmt.Printf("[agent] relay: no handshake with %s for %s, switched to udp relay %s\n",
 			peer, silentFor.Round(time.Second), endpoint)

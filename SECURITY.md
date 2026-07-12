@@ -223,9 +223,9 @@ security-relevant; the access-log stream is independent of this level.
 ### Control plane on a public VPS
 
 - Bind loopback + Traefik on 443 + `--trust-proxy`, or built-in TLS.
-- Open only what you need: 443/tcp (API + web UI + WebSocket relay).
-  With the default WebSocket relay transport, that single port also
-  carries relayed traffic — no UDP range required. Add the UDP relay
+- Open 443/tcp (API + web UI + WebSocket fallback) and 51890/udp for the
+  default QUIC relay. If UDP is blocked, agents fall back to WebSocket.
+  Add the raw UDP relay
   range only if you set `--relay-transport udp` for throughput.
 - Dual-stack overlay: keep `--network` as the IPv4 overlay and override
   the default ULA with `--network6 <cidr>` if you need a different IPv6
