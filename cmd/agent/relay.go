@@ -33,6 +33,16 @@ const coordinatedProbeInterval = 8 * time.Second
 
 const coordinatedProbeWindow = 45 * time.Second
 
+// A single WireGuard handshake can be the last packet of an asymmetric
+// probe: one peer may already have restored its relay endpoint. Keep the
+// relay session available and require a later inbound keepalive/packet before
+// committing to direct. Persistent keepalives are 25s, so 20s distinguishes
+// a later observation while 60s gives it ample time to arrive.
+const (
+	directProbationMin     = 20 * time.Second
+	directProbationTimeout = 60 * time.Second
+)
+
 // directRetryAfter is the base cadence at which a relayed peer gets a
 // fresh chance to use the control plane's direct endpoint hint. If the
 // probe does not handshake, directProbeInterval moves it back to the
@@ -237,29 +247,29 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 		return
 	}
 
-	if !peer.LastHandshakeTime.IsZero() && peer.LastHandshakeTime.After(probe.started) &&
-		peer.Endpoint != nil && peer.Endpoint.String() != probe.relayEndpoint.String() {
-		if p := t.wsProxies[peer.PublicKey]; p != nil {
-			p.close()
-			delete(t.wsProxies, peer.PublicKey)
+	directEndpoint := peer.Endpoint != nil && peer.Endpoint.String() != probe.relayEndpoint.String()
+	if probe.confirmedAt.IsZero() && !peer.LastHandshakeTime.IsZero() &&
+		peer.LastHandshakeTime.After(probe.started) && directEndpoint {
+		probe.confirmedAt = now
+		t.directProbes[peer.PublicKey] = probe
+		fmt.Printf("[agent] relay: direct handshake with %s; verifying bidirectional stability\n", peer.PublicKey)
+		return
+	}
+
+	if !probe.confirmedAt.IsZero() {
+		// A later increase in received WireGuard bytes proves the remote still
+		// targets this direct endpoint after the initial handshake exchange.
+		if inbound := t.lastInbound[peer.PublicKey]; directEndpoint &&
+			inbound.After(probe.confirmedAt.Add(directProbationMin)) {
+			t.promoteDirect(peer.PublicKey, now)
+			return
 		}
-		if p := t.quicProxies[peer.PublicKey]; p != nil {
-			p.close()
-			delete(t.quicProxies, peer.PublicKey)
+
+		if now.Sub(probe.confirmedAt) < directProbationTimeout {
+			return
 		}
 
-		delete(t.directProbes, peer.PublicKey)
-		delete(t.relayed, peer.PublicKey)
-		delete(t.relayedAt, peer.PublicKey)
-		delete(t.relayEndpoints, peer.PublicKey)
-		delete(t.directFailures, peer.PublicKey)
-		delete(t.lastCandidates, peer.PublicKey)
-		delete(t.pathKinds, peer.PublicKey)
-		delete(t.quicUnavailable, peer.PublicKey)
-		t.firstSeen[peer.PublicKey] = now
-
-		fmt.Printf("[agent] relay: direct endpoint for %s succeeded; leaving relay\n", peer.PublicKey)
-
+		t.restoreRelayAfterProbe(peer.PublicKey, probe, now, "direct path did not remain bidirectional")
 		return
 	}
 
@@ -292,26 +302,53 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 		return
 	}
 
+	t.restoreRelayAfterProbe(peer.PublicKey, probe, now, "direct probe failed")
+}
+
+func (t *telemetryReporter) promoteDirect(key wgtypes.Key, now time.Time) {
+	if p := t.wsProxies[key]; p != nil {
+		p.close()
+		delete(t.wsProxies, key)
+	}
+	if p := t.quicProxies[key]; p != nil {
+		p.close()
+		delete(t.quicProxies, key)
+	}
+
+	delete(t.directProbes, key)
+	delete(t.relayed, key)
+	delete(t.relayedAt, key)
+	delete(t.relayEndpoints, key)
+	delete(t.directFailures, key)
+	delete(t.lastCandidates, key)
+	delete(t.pathKinds, key)
+	delete(t.quicUnavailable, key)
+	t.firstSeen[key] = now
+
+	fmt.Printf("[agent] relay: bidirectional direct path for %s stable; leaving relay\n", key)
+}
+
+func (t *telemetryReporter) restoreRelayAfterProbe(key wgtypes.Key, probe directProbe, now time.Time, reason string) {
 	if err := t.wg.ConfigureDevice(wgtypes.Config{
 		Peers: []wgtypes.PeerConfig{{
-			PublicKey:  peer.PublicKey,
+			PublicKey:  key,
 			UpdateOnly: true,
 			Endpoint:   probe.relayEndpoint,
 		}},
 	}); err != nil {
-		slog.Warn("restore relay endpoint failed", "peer", peer.PublicKey, "error", err)
+		slog.Warn("restore relay endpoint failed", "peer", key, "error", err)
 		return
 	}
 
-	delete(t.directProbes, peer.PublicKey)
-	t.relayedAt[peer.PublicKey] = now
+	delete(t.directProbes, key)
+	t.relayedAt[key] = now
 	if t.directFailures == nil {
 		t.directFailures = make(map[wgtypes.Key]int)
 	}
-	t.directFailures[peer.PublicKey]++
+	t.directFailures[key]++
 
-	fmt.Printf("[agent] relay: direct probe for %s failed; staying on relay (attempt %d)\n",
-		peer.PublicKey, t.directFailures[peer.PublicKey])
+	fmt.Printf("[agent] relay: %s for %s; staying on relay (attempt %d)\n",
+		reason, key, t.directFailures[key])
 }
 
 func (t *telemetryReporter) applyDirectProbeEndpoint(peer wgtypes.Key, endpoint *net.UDPAddr) bool {

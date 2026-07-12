@@ -160,6 +160,76 @@ func TestDirectSilentForEstablishingPeer(t *testing.T) {
 	}
 }
 
+func TestDirectProbeRequiresLaterInboundBeforePromotion(t *testing.T) {
+	key := wgtypes.Key{1}
+	started := time.Now().Add(-5 * time.Second)
+	direct := &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 51820}
+	relay := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40000}
+	tel := &telemetryReporter{
+		wg:              &fakeWGBackend{},
+		directProbes:    map[wgtypes.Key]directProbe{key: {started: started, relayEndpoint: relay, interval: time.Minute}},
+		relayed:         map[wgtypes.Key]bool{key: true},
+		relayedAt:       map[wgtypes.Key]time.Time{key: started},
+		relayEndpoints:  map[wgtypes.Key]*net.UDPAddr{key: relay},
+		lastInbound:     map[wgtypes.Key]time.Time{key: started},
+		firstSeen:       map[wgtypes.Key]time.Time{},
+		directFailures:  map[wgtypes.Key]int{},
+		lastCandidates:  map[wgtypes.Key]string{},
+		pathKinds:       map[wgtypes.Key]string{key: "quic-relay"},
+		quicUnavailable: map[wgtypes.Key]bool{},
+		wsProxies:       map[wgtypes.Key]*wsRelayProxy{},
+		quicProxies:     map[wgtypes.Key]*quicRelayProxy{},
+	}
+	peer := wgtypes.Peer{PublicKey: key, Endpoint: direct, LastHandshakeTime: started.Add(time.Second)}
+
+	confirmed := time.Now()
+	tel.checkDirectProbe(peer, confirmed)
+	probe := tel.directProbes[key]
+	if probe.confirmedAt.IsZero() {
+		t.Fatal("direct handshake did not start probation")
+	}
+	if !tel.relayed[key] {
+		t.Fatal("single handshake prematurely left relay")
+	}
+
+	stableAt := confirmed.Add(directProbationMin + time.Second)
+	tel.lastInbound[key] = stableAt
+	tel.checkDirectProbe(peer, stableAt)
+	if tel.relayed[key] {
+		t.Fatal("later inbound traffic did not promote stable direct path")
+	}
+	if _, probing := tel.directProbes[key]; probing {
+		t.Fatal("stable direct path remained in probation")
+	}
+}
+
+func TestDirectProbationTimeoutRestoresRelay(t *testing.T) {
+	key := wgtypes.Key{1}
+	relay := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40000}
+	confirmed := time.Now().Add(-directProbationTimeout - time.Second)
+	backend := &fakeWGBackend{}
+	tel := &telemetryReporter{
+		wg:             backend,
+		directProbes:   map[wgtypes.Key]directProbe{key: {started: confirmed, confirmedAt: confirmed, relayEndpoint: relay}},
+		relayed:        map[wgtypes.Key]bool{key: true},
+		relayedAt:      map[wgtypes.Key]time.Time{},
+		lastInbound:    map[wgtypes.Key]time.Time{key: confirmed},
+		directFailures: map[wgtypes.Key]int{},
+	}
+
+	tel.checkDirectProbe(wgtypes.Peer{
+		PublicKey: key,
+		Endpoint:  &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 51820},
+	}, time.Now())
+
+	if len(backend.configured) != 1 || backend.configured[0].Peers[0].Endpoint.String() != relay.String() {
+		t.Fatalf("probation timeout did not restore relay endpoint: %+v", backend.configured)
+	}
+	if _, probing := tel.directProbes[key]; probing {
+		t.Fatal("timed-out probation remained active")
+	}
+}
+
 func TestPunchEpochStartsFastProbe(t *testing.T) {
 	key := wgtypes.Key{1}
 	relay := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40000}

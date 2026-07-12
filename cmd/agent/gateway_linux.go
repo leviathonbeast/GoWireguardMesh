@@ -22,7 +22,20 @@ var (
 		return nil
 	}
 	writeIPv4Forward = os.WriteFile
+	readForwarding   = os.ReadFile
 )
+
+// ensureForwarding enables one forwarding sysctl, but avoids a redundant
+// write when the namespace owner (for example Docker Compose) already set it.
+// Container runtimes commonly expose /proc/sys read-only to sidecars even
+// though the configured value is visible in their shared network namespace.
+func ensureForwarding(path string) error {
+	if current, err := readForwarding(path); err == nil && strings.TrimSpace(string(current)) == "1" {
+		return nil
+	}
+
+	return writeIPv4Forward(path, []byte("1\n"), 0644)
+}
 
 func enableGatewayNAT(iface, rawCIDRs string) (func(), error) {
 	cidrs, err := parseGatewayNATCIDRs(rawCIDRs)
@@ -33,7 +46,7 @@ func enableGatewayNAT(iface, rawCIDRs string) (func(), error) {
 		return func() {}, nil
 	}
 
-	if err := writeIPv4Forward("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644); err != nil {
+	if err := ensureForwarding("/proc/sys/net/ipv4/ip_forward"); err != nil {
 		slog.Warn("enable ipv4 forwarding failed; set net.ipv4.ip_forward=1 on the shared network namespace/container", "error", err)
 	}
 
@@ -82,11 +95,11 @@ func applyGatewayRoutes(iface string, routes []string, enabled *bool) error {
 		return nil
 	}
 
-	if err := writeIPv4Forward("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644); err != nil {
+	if err := ensureForwarding("/proc/sys/net/ipv4/ip_forward"); err != nil {
 		slog.Warn("enable ipv4 forwarding failed; set net.ipv4.ip_forward=1 on the shared network namespace/container", "error", err)
 	}
 	if gatewayNeedsIPv6(routes) {
-		if err := writeIPv4Forward("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1\n"), 0644); err != nil {
+		if err := ensureForwarding("/proc/sys/net/ipv6/conf/all/forwarding"); err != nil {
 			slog.Warn("enable ipv6 forwarding failed; set net.ipv6.conf.all.forwarding=1 on the shared network namespace/container", "error", err)
 		}
 	}

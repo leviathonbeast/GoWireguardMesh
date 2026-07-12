@@ -35,10 +35,13 @@ func TestApplyGatewayRoutesForwardsWithoutNAT(t *testing.T) {
 	var cmds []string
 	oldRun := gatewayRun
 	oldWrite := writeIPv4Forward
+	oldRead := readForwarding
 	t.Cleanup(func() {
 		gatewayRun = oldRun
 		writeIPv4Forward = oldWrite
+		readForwarding = oldRead
 	})
+	readForwarding = func(string) ([]byte, error) { return []byte("0\n"), nil }
 
 	writeIPv4Forward = func(name string, data []byte, perm os.FileMode) error {
 		cmds = append(cmds, "write "+name+" "+strings.TrimSpace(string(data)))
@@ -100,10 +103,13 @@ func TestEnableGatewayNATInstallsAndCleansRules(t *testing.T) {
 	var cmds []string
 	oldRun := gatewayRun
 	oldWrite := writeIPv4Forward
+	oldRead := readForwarding
 	t.Cleanup(func() {
 		gatewayRun = oldRun
 		writeIPv4Forward = oldWrite
+		readForwarding = oldRead
 	})
+	readForwarding = func(string) ([]byte, error) { return []byte("0\n"), nil }
 
 	writeIPv4Forward = func(name string, data []byte, perm os.FileMode) error {
 		cmds = append(cmds, "write "+name+" "+strings.TrimSpace(string(data)))
@@ -143,5 +149,24 @@ func TestEnableGatewayNATInstallsAndCleansRules(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestEnsureForwardingSkipsReadOnlyWriteWhenAlreadyEnabled(t *testing.T) {
+	oldRead := readForwarding
+	oldWrite := writeIPv4Forward
+	t.Cleanup(func() {
+		readForwarding = oldRead
+		writeIPv4Forward = oldWrite
+	})
+
+	readForwarding = func(string) ([]byte, error) { return []byte("1\n"), nil }
+	writeIPv4Forward = func(string, []byte, os.FileMode) error {
+		t.Fatal("ensureForwarding attempted a redundant write")
+		return os.ErrPermission
+	}
+
+	if err := ensureForwarding("/proc/sys/net/ipv4/ip_forward"); err != nil {
+		t.Fatalf("ensureForwarding() error = %v, want nil", err)
 	}
 }

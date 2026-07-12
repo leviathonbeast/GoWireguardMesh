@@ -63,6 +63,7 @@ type flowCounters struct {
 
 type directProbe struct {
 	started       time.Time
+	confirmedAt   time.Time // first direct handshake; waits for later inbound proof
 	candidates    []*net.UDPAddr
 	index         int
 	relayEndpoint *net.UDPAddr
