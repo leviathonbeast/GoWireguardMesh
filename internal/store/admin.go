@@ -38,6 +38,7 @@ type PeerInfo struct {
 	ListenPort      int    // 0 if unset
 	ObservedIP      string // "" if unknown
 	PublicEndpoint  string // "" if unknown
+	NATType         string // "easy", "hard", or "" if unknown
 	CreatedAt       string
 	LastSeenAt      string // "" if never
 	RevokedAt       string // "" if active
@@ -59,7 +60,7 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), COALESCE(peer_type, 'agent'),
 		        COALESCE(gateway_peer_id, 0), COALESCE(gateway_endpoint, ''),
 		        private_key_enc IS NOT NULL, hostname, listen_port,
-		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''),
+		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''), COALESCE(nat_type, ''),
 		        created_at, last_seen_at, revoked_at
 		 FROM peers ORDER BY id`,
 	)
@@ -81,7 +82,7 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 
 		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &p.PeerType,
 			&p.GatewayPeerID, &p.GatewayEndpoint, &p.HasStoredConfig, &hostname, &port,
-			&p.ObservedIP, &p.PublicEndpoint,
+			&p.ObservedIP, &p.PublicEndpoint, &p.NATType,
 			&p.CreatedAt, &lastSeen, &revoked); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
@@ -299,13 +300,13 @@ func getPeerInfo(ctx context.Context, q interface {
 		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), COALESCE(peer_type, 'agent'),
 		        COALESCE(gateway_peer_id, 0), COALESCE(gateway_endpoint, ''),
 		        private_key_enc IS NOT NULL, hostname, listen_port,
-		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''),
+		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''), COALESCE(nat_type, ''),
 		        created_at, last_seen_at, revoked_at
 		 FROM peers WHERE id = ?`,
 		id,
 	).Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &p.PeerType, &p.GatewayPeerID,
 		&p.GatewayEndpoint, &p.HasStoredConfig, &hostname, &port,
-		&p.ObservedIP, &p.PublicEndpoint,
+		&p.ObservedIP, &p.PublicEndpoint, &p.NATType,
 		&p.CreatedAt, &lastSeen, &revoked)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

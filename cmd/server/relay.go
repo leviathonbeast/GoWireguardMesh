@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +24,12 @@ import (
 // relay host.
 type relayAllocator interface {
 	allocate(pairID string) (portA, portB int, err error)
+
+	// observed returns the source addresses the relay latched for the
+	// pair's two legs (A = the lexicographically smaller public key,
+	// matching the allocate convention). ok is false when the pair does
+	// not exist or the relay cannot report it.
+	observed(pairID string) (srcA, srcB netip.AddrPort, ok bool)
 }
 
 // embeddedRelay adapts internal/relay for in-process use: no control
@@ -33,6 +40,10 @@ type embeddedRelay struct {
 
 func (e embeddedRelay) allocate(pairID string) (int, int, error) {
 	return e.rs.Allocate(pairID)
+}
+
+func (e embeddedRelay) observed(pairID string) (netip.AddrPort, netip.AddrPort, bool) {
+	return e.rs.Observed(pairID)
 }
 
 // relayClient talks to a standalone relay's control API.
@@ -100,6 +111,13 @@ func (rc *relayClient) allocate(pairID string) (portA, portB int, err error) {
 	}
 
 	return out.PortA, out.PortB, nil
+}
+
+// observed is unavailable over the standalone relay's control API;
+// candidate lists just lose the relay-observed entry (agents keep the
+// STUN/host/observed candidates).
+func (rc *relayClient) observed(string) (netip.AddrPort, netip.AddrPort, bool) {
+	return netip.AddrPort{}, netip.AddrPort{}, false
 }
 
 // handleRelayPair provisions a relay path between the authenticated

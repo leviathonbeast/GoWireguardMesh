@@ -32,6 +32,36 @@ pins its loopback counterpart to kernel WireGuard's own listen port, so
 no other local process — including a service container sharing the
 agent's network namespace — can hijack or feed the relay stream.
 
+The mesh STUN responder (`--stun-port`, two UDP ports next to the relay)
+is also internet-facing by design. It is stateless and minimal: it
+parses only STUN binding requests, answers with the sender's own mapped
+address, and drops everything else silently — no amplification (the
+response is barely larger than the request), no reflection to third
+parties (replies go only to the requesting source), no state kept.
+
+Agent-side **router port mapping** (`--port-mapping`, UPnP/NAT-PMP, on
+by default) automates exposing exactly one thing: the agent's own
+WireGuard listen port, UDP only, mapped to the agent's specific local
+address, lease-limited to 30 minutes with renewal, labeled
+`wgmesh-agent` in the router, and deleted on shutdown — a crashed agent
+leaves a hole that closes itself within the lease. What that exposes is
+kernel WireGuard, which is silent to unauthenticated probes and
+authenticates every packet by cryptokey routing — the same posture as
+the pinned listen port the host firewall already opens. NAT-PMP speaks
+only to the default gateway (never a configurable address), and a
+mapping whose "external" IP turns out to be private (double NAT) is
+released instead of advertised. Disable with `--port-mapping=false` on
+networks where the router must not be touched.
+
+Agents also self-report **endpoint candidates** (their interface
+addresses and router mappings). These are validated server-side — must
+parse as `host:port`, known types only, capped in count — and they are
+distributed only to peers the ACL already lets see that peer; a
+malicious agent can point its own candidates at a victim address, but
+that yields nothing beyond what its `public_endpoint` (STUN) field
+always allowed: WireGuard handshake initiations toward it from its
+authorized peers, a few bytes every few seconds, no amplification.
+
 ## Tier 1 — do these before the control plane faces the internet
 
 ### 1. TLS is mandatory on a public VPS

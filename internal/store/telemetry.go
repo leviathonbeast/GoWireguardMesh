@@ -3,12 +3,25 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"gowireguard/internal/proto"
 )
+
+// natType validates an agent-reported NAT classification; anything but
+// the two known values is treated as "not reported" so a hostile or
+// future agent cannot store junk the UI would render.
+func natType(v string) string {
+	switch v {
+	case "easy", "hard":
+		return v
+	default:
+		return ""
+	}
+}
 
 // AuthenticatePeer resolves a peer auth token to the peer's id and
 // overlay IP. Returns ErrUnauthorized for unknown tokens, revoked
@@ -53,12 +66,28 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 	}
 	defer tx.Rollback()
 
+	// Candidates REPLACE the stored list when reported (interfaces and
+	// port mappings come and go; merging would accrete stale entries),
+	// while an empty list means "no update" — same non-clobber contract
+	// as the COALESCE columns.
+	var candidatesJSON string
+	if len(report.Candidates) > 0 {
+		raw, err := json.Marshal(report.Candidates)
+		if err != nil {
+			return fmt.Errorf("encode reported candidates: %w", err)
+		}
+		candidatesJSON = string(raw)
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE peers SET last_seen_at = ?,
 		        observed_ip = COALESCE(?, observed_ip),
-		        public_endpoint = COALESCE(?, public_endpoint)
+		        public_endpoint = COALESCE(?, public_endpoint),
+		        candidates = COALESCE(?, candidates),
+		        nat_type = COALESCE(?, nat_type)
 		 WHERE id = ?`,
-		now, nullable(observedIP), nullable(report.PublicEndpoint), peerID,
+		now, nullable(observedIP), nullable(report.PublicEndpoint),
+		nullable(candidatesJSON), nullable(natType(report.NATType)), peerID,
 	); err != nil {
 		return fmt.Errorf("update last_seen_at: %w", err)
 	}

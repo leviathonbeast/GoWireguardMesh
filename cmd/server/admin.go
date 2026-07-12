@@ -109,6 +109,7 @@ type peerJSON struct {
 	ListenPort      int    `json:"listen_port,omitempty"`
 	ObservedIP      string `json:"observed_ip,omitempty"`
 	PublicEndpoint  string `json:"public_endpoint,omitempty"`
+	NATType         string `json:"nat_type,omitempty"` // easy | hard; absent when unknown
 	CreatedAt       string `json:"created_at"`
 	LastSeenAt      string `json:"last_seen_at,omitempty"`
 	RevokedAt       string `json:"revoked_at,omitempty"`
@@ -186,6 +187,7 @@ func peerInfoJSON(p store.PeerInfo) peerJSON {
 		ListenPort:      p.ListenPort,
 		ObservedIP:      p.ObservedIP,
 		PublicEndpoint:  p.PublicEndpoint,
+		NATType:         p.NATType,
 		CreatedAt:       p.CreatedAt,
 		LastSeenAt:      p.LastSeenAt,
 		RevokedAt:       p.RevokedAt,

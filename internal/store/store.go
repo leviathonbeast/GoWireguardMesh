@@ -96,6 +96,14 @@ type PeerRow struct {
 	PublicEndpoint string // STUN-discovered ip:port, "" if unknown
 	ObservedIP     string // enroll/report source IP, "" if unknown
 	ListenPort     int    // 0 if unknown
+
+	// CandidatesJSON is the agent's self-reported candidate list (a
+	// JSON array of proto.AgentCandidate), "" if never reported.
+	CandidatesJSON string
+
+	// NATType is the agent's NAT classification: "easy", "hard", or
+	// "" (unknown / never reported).
+	NATType string
 }
 
 type EnrollResult struct {
@@ -166,7 +174,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 15
+const schemaVersion = 16
 
 var migrations = map[int]string{
 	2:  migrationV2,
@@ -183,7 +191,21 @@ var migrations = map[int]string{
 	13: migrationV13,
 	14: migrationV14,
 	15: migrationV15,
+	16: migrationV16,
 }
+
+// migrationV16 adds agent-gathered NAT-traversal material. candidates is
+// a JSON array of {endpoint, type} the agent reported for itself (host
+// interface addresses, UPnP/NAT-PMP mappings) — endpoint hints only the
+// agent can know, merged into pairwise candidate lists next to the
+// STUN/observed data the server already tracks. nat_type is the agent's
+// classification of its NAT's mapping behavior ("easy"/"hard"/NULL);
+// the control plane skips coordinating hole punches for hard<->hard
+// pairs, which cannot punch, so their relays stay undisturbed.
+const migrationV16 = `
+ALTER TABLE peers ADD COLUMN candidates TEXT;
+ALTER TABLE peers ADD COLUMN nat_type TEXT;
+`
 
 // migrationV15 lets the admin UI show a static peer's WireGuard config
 // again after it was created, instead of only once at creation time.
@@ -813,7 +835,8 @@ func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool
 	rows, err := q.QueryContext(ctx,
 		`SELECT p.id, p.public_key, p.assigned_ip, COALESCE(p.assigned_ip6, ''),
 		        COALESCE(p.peer_type, 'agent'), COALESCE(p.gateway_peer_id, 0),
-		        COALESCE(p.public_endpoint, ''), COALESCE(p.observed_ip, ''), COALESCE(p.listen_port, 0)
+		        COALESCE(p.public_endpoint, ''), COALESCE(p.observed_ip, ''), COALESCE(p.listen_port, 0),
+		        COALESCE(p.candidates, ''), COALESCE(p.nat_type, '')
 		 FROM peers p
 		 WHERE p.revoked_at IS NULL AND p.id != ?
 		   AND (? OR p.gateway_peer_id = ? OR EXISTS (
@@ -835,7 +858,8 @@ func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool
 		var p PeerRow
 		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6,
 			&p.PeerType, &p.GatewayPeerID,
-			&p.PublicEndpoint, &p.ObservedIP, &p.ListenPort); err != nil {
+			&p.PublicEndpoint, &p.ObservedIP, &p.ListenPort,
+			&p.CandidatesJSON, &p.NATType); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
 
@@ -857,11 +881,13 @@ func (s *Store) PeersForID(ctx context.Context, id int64) (PeerRow, []PeerRow, e
 	err := s.db.QueryRowContext(ctx,
 		`SELECT public_key, assigned_ip, COALESCE(assigned_ip6, ''),
 		        COALESCE(peer_type, 'agent'), COALESCE(gateway_peer_id, 0),
-		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0)
+		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0),
+		        COALESCE(candidates, ''), COALESCE(nat_type, '')
 		 FROM peers WHERE id = ?`, id,
 	).Scan(&self.PublicKey, &self.AssignedIP, &self.AssignedIP6,
 		&self.PeerType, &self.GatewayPeerID,
-		&self.PublicEndpoint, &self.ObservedIP, &self.ListenPort)
+		&self.PublicEndpoint, &self.ObservedIP, &self.ListenPort,
+		&self.CandidatesJSON, &self.NATType)
 	if err != nil {
 		return PeerRow{}, nil, fmt.Errorf("look up peer %d: %w", id, err)
 	}
@@ -872,6 +898,24 @@ func (s *Store) PeersForID(ctx context.Context, id int64) (PeerRow, []PeerRow, e
 	}
 
 	return self, others, nil
+}
+
+// UpdatePeerCandidates replaces peerID's self-reported candidate list.
+// Separate from Enroll so enrollment's signature (and its idempotent
+// re-enroll semantics) stay untouched; losing this write is harmless
+// because every report re-sends the current list.
+func (s *Store) UpdatePeerCandidates(ctx context.Context, peerID int64, candidatesJSON string) error {
+	if candidatesJSON == "" {
+		return nil
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE peers SET candidates = ? WHERE id = ?`, candidatesJSON, peerID,
+	); err != nil {
+		return fmt.Errorf("update peer candidates: %w", err)
+	}
+
+	return nil
 }
 
 // diagnoseKey explains (for logs only) why the consumption UPDATE

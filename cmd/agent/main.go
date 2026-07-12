@@ -53,7 +53,8 @@ var (
 	hostnameFlag         = flag.String("hostname", os.Getenv("WGMESH_HOSTNAME"), "name to show in the control plane (defaults to OS hostname; can also be set with WGMESH_HOSTNAME)")
 	serverCAFlag         = flag.String("server-ca", "", "PEM certificate to trust for the control plane (pin its self-signed cert.pem)")
 	reportIntervalFlag   = flag.Duration("report-interval", 30*time.Second, "telemetry reporting interval")
-	stunServerFlag       = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables)")
+	stunServerFlag       = flag.String("stun-server", "stun.l.google.com:19302", "STUN server for public endpoint discovery (empty disables); once enrolled, the mesh's own STUN endpoints take over the periodic re-checks")
+	portMappingFlag      = flag.Bool("port-mapping", true, "ask the local router (UPnP/NAT-PMP) to forward the WireGuard listen port to this host; lease-limited, removed on shutdown")
 	relayTransportFlag   = flag.String("relay-transport", "websocket", "relay fallback transport: \"websocket\" (rides the control-plane port, needs no extra firewall holes) or \"udp\" (faster, needs the relay port range reachable)")
 	directProbeFlag      = flag.Bool("direct-probe", true, "probe direct endpoints while on relay (disable for reverse-proxy/service sidecars that prefer relay stability)")
 	gatewayNATCIDRsFlag  = flag.String("gateway-nat-cidrs", "", "comma-separated IPv4 CIDRs or addresses to masquerade through this peer (for static/mobile WireGuard clients)")
@@ -300,13 +301,14 @@ func newPinnedTLSConfig(caFile string) (*tls.Config, error) {
 
 // enroll registers this node with the control plane and returns the
 // mesh configuration. Never sends the private key.
-func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostname string, listenPort int, publicEndpoint string) (*proto.EnrollResponse, error) {
+func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostname string, listenPort int, publicEndpoint string, candidates []proto.AgentCandidate) (*proto.EnrollResponse, error) {
 	reqBody, err := json.Marshal(proto.EnrollRequest{
 		SetupKey:       setupKey,
 		PublicKey:      publicKey.String(),
 		Hostname:       hostname,
 		ListenPort:     listenPort,
 		PublicEndpoint: publicEndpoint,
+		Candidates:     candidates,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode enroll request: %w", err)

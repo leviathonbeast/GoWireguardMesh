@@ -9,6 +9,7 @@ import {
   gatewayName,
   humanBytes,
   lastSeenLabel,
+  natLabel,
   peerLabel,
   shortKey,
 } from "../lib/format";
@@ -228,6 +229,7 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
                           ) : (
                             endpointOf(p) || <span className="text-muted">unknown</span>
                           )}
+                          {p.nat_type && <div className="text-xs text-muted">{natLabel(p.nat_type)}</div>}
                         </td>
                         <td className="hidden text-muted xl:table-cell">{formatTime(p.created_at)}</td>
                         <td>
@@ -425,6 +427,12 @@ function PeerDetail({
               <span>Observed address</span>
               <strong>{peer.observed_ip || "unknown"}</strong>
             </div>
+            {peer.peer_type !== "static" && (
+              <div>
+                <span>NAT</span>
+                <strong>{peer.nat_type ? natLabel(peer.nat_type) : "unknown"}</strong>
+              </div>
+            )}
           </div>
           {editing && (
             <div className="mt-3 flex flex-wrap items-end gap-2 rounded-md border border-line bg-panel-soft p-3">

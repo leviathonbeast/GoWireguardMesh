@@ -177,6 +177,31 @@ func (s *Server) Allocate(id string) (portA, portB int, err error) {
 	return p.portA(), p.portB(), nil
 }
 
+// Observed returns the source addresses the relay has latched for the
+// pair id — the two peers' live public WireGuard mappings, refreshed by
+// every keepalive that flows through. These are STUN-quality endpoint
+// candidates for exactly the peers that need hole punching (they are on
+// relay), with none of STUN's staleness. A zero AddrPort means that leg
+// has not checked in yet; ok is false when the pair does not exist.
+func (s *Server) Observed(id string) (srcA, srcB netip.AddrPort, ok bool) {
+	s.mu.Lock()
+	p := s.pairs[id]
+	s.mu.Unlock()
+
+	if p == nil {
+		return netip.AddrPort{}, netip.AddrPort{}, false
+	}
+
+	if a := p.srcA.Load(); a != nil {
+		srcA = *a
+	}
+	if b := p.srcB.Load(); b != nil {
+		srcB = *b
+	}
+
+	return srcA, srcB, true
+}
+
 func (s *Server) cleanupLoop() {
 	ticker := time.NewTicker(cleanupPeriod)
 	defer ticker.Stop()

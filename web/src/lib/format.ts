@@ -78,6 +78,13 @@ export function endpointOf(p: Peer): string {
   return "";
 }
 
+// natLabel renders the agent's NAT classification: "easy" NATs keep the
+// same public mapping toward every destination (hole-punchable), "hard"
+// (symmetric) NATs mint one per destination and generally need the relay.
+export function natLabel(t: "easy" | "hard"): string {
+  return t === "easy" ? "easy NAT" : "hard NAT (symmetric)";
+}
+
 export function lastSeenLabel(p: Peer): string {
   if (p.revoked_at) return "revoked";
   if (p.peer_type === "static" || p.health_status === "static") return "WireGuard-only";

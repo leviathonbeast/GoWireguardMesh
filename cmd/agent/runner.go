@@ -26,6 +26,9 @@ type agentStartupState struct {
 	initialDNS     proto.DNSConfig
 	networkPrefix  netip.Prefix
 	networkPrefix6 netip.Prefix
+	publicEndpoint string   // startup STUN result, "" if unavailable
+	stunServers    []string // mesh STUN endpoints from enrollment
+	listenPort     int
 }
 
 func (r *agentRunner) run(stop <-chan struct{}) error {
@@ -189,14 +192,20 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 		return state, err
 	}
 
+	effectivePort := effectiveListenPort(r.cfg.ListenPort, listenPort)
+
+	// Host candidates gathered before the interface exists — nothing to
+	// exclude yet beyond the built-in filters; overlay prefixes are only
+	// assigned after enrollment.
 	resp, err := enroll(
 		r.cfg.Server,
 		r.cfg.SetupKey,
 		r.cfg.ServerCA,
 		privateKey.PublicKey(),
 		hostname,
-		effectiveListenPort(r.cfg.ListenPort, listenPort),
+		effectivePort,
 		publicEndpoint,
+		gatherLocalCandidates(effectivePort),
 	)
 	if err != nil {
 		return state, err
@@ -206,6 +215,9 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 	state.initialACL = resp.ACL
 	state.initialDNS = resp.DNS
 	state.gatewayRoutes = resp.GatewayRoutes
+	state.publicEndpoint = publicEndpoint
+	state.stunServers = resp.STUNServers
+	state.listenPort = effectivePort
 
 	state.networkPrefix, err = netip.ParsePrefix(resp.NetworkCIDR)
 	if err != nil {
@@ -348,6 +360,19 @@ func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) 
 	if err != nil {
 		slog.Error("telemetry init failed", "error", err)
 		return nil, nil
+	}
+
+	// NAT-traversal state for the reporter: the startup STUN result and
+	// listen port seed the endpoint refresh loop; mesh STUN endpoints
+	// (when the control plane runs the embedded relay) take over from
+	// the public fallback for periodic re-checks and NAT classification.
+	reporter.listenPort = state.listenPort
+	reporter.publicEndpoint = state.publicEndpoint
+	reporter.stunFallback = r.cfg.STUNServer
+	reporter.stunServers = state.stunServers
+
+	if r.cfg.PortMapping {
+		reporter.portMapper = newPortMapper(state.listenPort)
 	}
 
 	if r.cfg.TraefikAccessLog != "" {

@@ -15,6 +15,7 @@ export interface Peer {
   listen_port?: number;
   observed_ip?: string;
   public_endpoint?: string;
+  nat_type?: "easy" | "hard"; // agent's NAT classification; absent when unknown
   created_at: string;
   last_seen_at?: string;
   revoked_at?: string;

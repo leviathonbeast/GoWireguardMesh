@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -46,6 +47,159 @@ func TestEndpointCandidatesPreferLANForSamePublicEndpoint(t *testing.T) {
 	}
 	if got[1].Type != "stun" {
 		t.Fatalf("second candidate = %#v, want STUN candidate", got[1])
+	}
+}
+
+func TestEndpointCandidatesSameNATPrefersHostAddresses(t *testing.T) {
+	self := store.PeerRow{PublicEndpoint: "203.0.113.1:51820"}
+	peer := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51821",
+		ObservedIP:     "203.0.113.1", // VPS control plane: observed = shared WAN
+		ListenPort:     51820,
+		CandidatesJSON: `[{"endpoint":"192.168.1.20:51820","type":"host"},` +
+			`{"endpoint":"[2001:db8::20]:51820","type":"host6"},` +
+			`{"endpoint":"203.0.113.1:60000","type":"upnp"}]`,
+	}
+
+	got := endpointCandidates(self, peer)
+
+	wantOrder := []string{"host", "lan", "host6", "stun", "upnp"}
+	if len(got) != len(wantOrder) {
+		t.Fatalf("candidates = %+v, want %d entries", got, len(wantOrder))
+	}
+	for i, typ := range wantOrder {
+		if got[i].Type != typ {
+			t.Fatalf("candidate[%d].Type = %q, want %q (%+v)", i, got[i].Type, typ, got)
+		}
+	}
+	if got[0].Endpoint != "192.168.1.20:51820" {
+		t.Fatalf("first candidate = %q, want the host address", got[0].Endpoint)
+	}
+}
+
+func TestEndpointCandidatesCrossNAT(t *testing.T) {
+	self := store.PeerRow{
+		PublicEndpoint: "198.51.100.7:51820",
+		CandidatesJSON: `[{"endpoint":"10.9.8.7:51820","type":"host"}]`,
+	}
+	peer := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51821",
+		ObservedIP:     "203.0.113.1",
+		ListenPort:     51820,
+		CandidatesJSON: `[{"endpoint":"192.168.1.20:51820","type":"host"},` +
+			`{"endpoint":"[2001:db8::20]:51820","type":"host6"},` +
+			`{"endpoint":"203.0.113.1:60000","type":"upnp"}]`,
+	}
+
+	got := endpointCandidates(self, peer)
+
+	// Private host addresses on a DIFFERENT subnet than self never make
+	// the list across NATs; the rest ranks upnp > stun > host6 > lan.
+	wantOrder := []string{"upnp", "stun", "host6", "lan"}
+	if len(got) != len(wantOrder) {
+		t.Fatalf("candidates = %+v, want %d entries", got, len(wantOrder))
+	}
+	for i, typ := range wantOrder {
+		if got[i].Type != typ {
+			t.Fatalf("candidate[%d].Type = %q, want %q (%+v)", i, got[i].Type, typ, got)
+		}
+	}
+}
+
+func TestEndpointCandidatesCrossNATSameSubnetKeepsHost(t *testing.T) {
+	self := store.PeerRow{
+		PublicEndpoint: "198.51.100.7:51820",
+		CandidatesJSON: `[{"endpoint":"192.168.1.9:51820","type":"host"}]`,
+	}
+	peer := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51821",
+		CandidatesJSON: `[{"endpoint":"192.168.1.20:51820","type":"host"}]`,
+	}
+
+	got := endpointCandidates(self, peer)
+	if len(got) != 2 {
+		t.Fatalf("candidates = %+v, want host + stun", got)
+	}
+	// Shared /24 despite different WAN IPs: the host address wins.
+	if got[0].Type != "host" || got[0].Endpoint != "192.168.1.20:51820" {
+		t.Fatalf("first candidate = %+v, want same-subnet host", got[0])
+	}
+}
+
+func TestEncodeAgentCandidatesValidates(t *testing.T) {
+	in := []proto.AgentCandidate{
+		{Endpoint: "192.168.1.20:51820", Type: "host"},
+		{Endpoint: "not an endpoint", Type: "host"},   // unparseable: dropped
+		{Endpoint: "192.168.1.21:51820", Type: "lan"}, // server-owned type: dropped
+		{Endpoint: "[2001:db8::1]:51820", Type: "host6"},
+	}
+
+	out := encodeAgentCandidates(in)
+	got := agentCandidates(store.PeerRow{CandidatesJSON: out})
+	if len(got) != 2 {
+		t.Fatalf("kept %d candidates (%s), want 2", len(got), out)
+	}
+	if got[0].Endpoint != "192.168.1.20:51820" || got[1].Type != "host6" {
+		t.Fatalf("kept = %+v", got)
+	}
+
+	if encodeAgentCandidates(nil) != "" {
+		t.Fatal("empty input should encode to empty string")
+	}
+
+	var many []proto.AgentCandidate
+	for i := 0; i < 20; i++ {
+		many = append(many, proto.AgentCandidate{Endpoint: "10.0.0.1:1", Type: "host"})
+	}
+	if got := agentCandidates(store.PeerRow{CandidatesJSON: encodeAgentCandidates(many)}); len(got) > maxAgentCandidates {
+		t.Fatalf("kept %d candidates, want <= %d", len(got), maxAgentCandidates)
+	}
+}
+
+// fakeRelay implements relayAllocator with canned observed mappings.
+type fakeRelay struct {
+	srcA, srcB netip.AddrPort
+	ok         bool
+}
+
+func (f fakeRelay) allocate(string) (int, int, error) { return 1, 2, nil }
+func (f fakeRelay) observed(string) (netip.AddrPort, netip.AddrPort, bool) {
+	return f.srcA, f.srcB, f.ok
+}
+
+func TestPairCandidatesIncludesRelayObserved(t *testing.T) {
+	srv := &server{relay: fakeRelay{
+		srcA: netip.MustParseAddrPort("198.51.100.7:41000"),
+		srcB: netip.MustParseAddrPort("203.0.113.1:42000"),
+		ok:   true,
+	}}
+
+	// Keys: self="a" < p="b", so p's packets latch on leg B.
+	self := store.PeerRow{PublicKey: "a", PublicEndpoint: "198.51.100.7:51820"}
+	p := store.PeerRow{PublicKey: "b", PublicEndpoint: "203.0.113.1:51821"}
+
+	got := srv.pairCandidates(self, p)
+	if len(got) != 2 {
+		t.Fatalf("candidates = %+v, want stun + relay", got)
+	}
+	if got[0].Type != "relay" || got[0].Endpoint != "203.0.113.1:42000" {
+		t.Fatalf("first candidate = %+v, want relay-observed leg B first (fresher than stun)", got[0])
+	}
+	if got[1].Type != "stun" {
+		t.Fatalf("second candidate = %+v, want stun", got[1])
+	}
+
+	// Dedupe: when the relay sees exactly the STUN endpoint, no extra
+	// candidate appears.
+	p2 := store.PeerRow{PublicKey: "b", PublicEndpoint: "203.0.113.1:42000"}
+	if got := srv.pairCandidates(self, p2); len(got) != 1 {
+		t.Fatalf("candidates = %+v, want deduped single entry", got)
+	}
+
+	// No relay configured: plain endpointCandidates result.
+	bare := &server{}
+	if got := bare.pairCandidates(self, p); len(got) != 1 || got[0].Type != "stun" {
+		t.Fatalf("bare candidates = %+v, want stun only", got)
 	}
 }
 
@@ -164,6 +318,40 @@ func TestShouldBumpPunchEpoch(t *testing.T) {
 				selfCandidates:   1,
 				remoteCandidates: 0,
 			},
+		},
+		{
+			name: "hard-hard cannot punch",
+			in: punchDecision{
+				state:            "ws-relay",
+				remoteOnline:     true,
+				selfCandidates:   1,
+				remoteCandidates: 1,
+				selfNAT:          "hard",
+				remoteNAT:        "hard",
+			},
+		},
+		{
+			name: "hard-easy still tries",
+			in: punchDecision{
+				state:            "ws-relay",
+				remoteOnline:     true,
+				selfCandidates:   1,
+				remoteCandidates: 1,
+				selfNAT:          "hard",
+				remoteNAT:        "easy",
+			},
+			want: true,
+		},
+		{
+			name: "hard-unknown gets benefit of the doubt",
+			in: punchDecision{
+				state:            "ws-relay",
+				remoteOnline:     true,
+				selfCandidates:   1,
+				remoteCandidates: 1,
+				selfNAT:          "hard",
+			},
+			want: true,
 		},
 	}
 

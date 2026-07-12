@@ -16,6 +16,7 @@ type agentConfig struct {
 	ServerCA         string
 	ReportInterval   time.Duration
 	STUNServer       string
+	PortMapping      bool
 	RelayTransport   string
 	DirectProbe      bool
 	GatewayNATCIDRs  string
@@ -41,6 +42,7 @@ func agentConfigFromFlags() agentConfig {
 		ServerCA:         *serverCAFlag,
 		ReportInterval:   *reportIntervalFlag,
 		STUNServer:       *stunServerFlag,
+		PortMapping:      *portMappingFlag,
 		RelayTransport:   *relayTransportFlag,
 		DirectProbe:      *directProbeFlag,
 		GatewayNATCIDRs:  *gatewayNATCIDRsFlag,

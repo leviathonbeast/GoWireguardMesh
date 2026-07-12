@@ -39,6 +39,7 @@ func run() error {
 	secretFile := flag.String("secret-file", "relay-secret", "path to control API shared secret (generated if missing)")
 	portMin := flag.Int("port-min", 0, "lowest forwarding UDP port (0 = ephemeral; set a range so the firewall can allow it)")
 	portMax := flag.Int("port-max", 0, "highest forwarding UDP port")
+	stunPort := flag.Int("stun-port", 3478, "serve mesh STUN on this UDP port and the next (0 disables); match the control plane's --stun-port")
 	manageFirewall := flag.Bool("manage-firewall", true, "open the forwarding port range on the host firewall (requires --port-min/--port-max)")
 	flag.Parse()
 
@@ -58,6 +59,16 @@ func run() error {
 	}
 	defer rs.Close()
 
+	if *stunPort > 0 {
+		stun, err := relay.NewSTUNResponder(ip, *stunPort)
+		if err != nil {
+			log.Printf("mesh stun disabled: %v", err)
+		} else {
+			defer stun.Close()
+			log.Printf("mesh stun on udp %d and %d", *stunPort, *stunPort+1)
+		}
+	}
+
 	if *manageFirewall && *portMin > 0 {
 		fw, ferr := firewall.OpenWithReconcile("wgmesh-relay", *secretFile+".fw")
 		if ferr != nil {
@@ -66,6 +77,11 @@ func run() error {
 			log.Printf("firewall (%s): %v", fw.Backend(), err)
 		} else {
 			log.Printf("firewall (%s): opened udp %d-%d", fw.Backend(), *portMin, *portMax)
+			if *stunPort > 0 {
+				if err := fw.AllowUDPRange(*stunPort, *stunPort+1); err != nil {
+					log.Printf("firewall stun (%s): %v", fw.Backend(), err)
+				}
+			}
 			defer func() {
 				if err := fw.Close(); err != nil {
 					log.Printf("firewall cleanup: %v", err)

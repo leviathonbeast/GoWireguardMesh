@@ -126,6 +126,25 @@ func (s *server) signalSync(reason string) {
 	}
 }
 
+// signalPeerSync asks ONE peer to sync immediately. Used for punch
+// coordination, where only the pair partner needs to move and a
+// broadcast would make every agent hit /report at once.
+func (s *server) signalPeerSync(publicKey, reason string) {
+	if s == nil || s.signalHub == nil {
+		return
+	}
+
+	payload, _ := json.Marshal(map[string]string{"reason": reason})
+	if s.signalHub.send(publicKey, signalMessage{
+		Type:    "sync-now",
+		To:      publicKey,
+		At:      time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: payload,
+	}) {
+		slog.Debug("signal sync sent", "reason", reason, "peer", publicKey)
+	}
+}
+
 func (s *server) handleSignalWS(w http.ResponseWriter, r *http.Request) {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {

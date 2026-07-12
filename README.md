@@ -309,19 +309,44 @@ revoked peers).
 
 Connectivity is attempted in this order, all automatic:
 
-1. **STUN.** Before creating the interface, the agent binds the WireGuard
+1. **Router port mapping (UPnP/NAT-PMP).** The agent asks the local
+   router to forward its WireGuard port (`--port-mapping`, on by
+   default) — a genuinely open port beats any hole punching. Mappings
+   are deliberately narrow: only the agent's own listen port, UDP only,
+   pinned to the specific internal address, lease-limited (30 min) with
+   renewal, labeled `wgmesh-agent` in the router UI, and deleted on
+   shutdown. A private "external" IP (double NAT) is detected and the
+   mapping released rather than advertised.
+2. **STUN.** Before creating the interface, the agent binds the WireGuard
    port, asks a STUN server (`--stun-server`, default Google's) how that
    port appears from the internet, and sends the result with its
    enrollment. Probing from the *same port* WireGuard will use is what
    makes the discovered mapping valid for tunnel traffic — on
    endpoint-independent NATs, at least. Symmetric NATs defeat this and
-   fall through to the relay.
-2. **Endpoint candidates.** The server distributes each peer's ordered
-   endpoint candidates: STUN-discovered public endpoint, observed LAN/source
-   IP plus listen port, and same-NAT LAN preference when both peers report the
-   same public endpoint. Candidates are priority ordered, but still just hints:
-   WireGuard roaming overrides them as soon as real traffic arrives.
-3. **Relay fallback.** If a direct peer goes silent (no inbound bytes and no
+   fall through to the relay. When the control plane runs a relay, the
+   mesh serves **its own STUN** on two UDP ports (`--stun-port`, default
+   3478/3479, embedded and standalone relays alike) and advertises them
+   to agents: periodic re-checks (every ~2 min, from a throwaway socket)
+   catch public-IP changes without a restart, and querying both ports
+   from one socket classifies the NAT as **easy** (endpoint-independent
+   mapping, hole-punchable) or **hard** (symmetric) — shown per machine
+   in the web UI and used to skip punching hard↔hard pairs, which cannot
+   work.
+3. **Endpoint candidates.** The server distributes each peer's ordered
+   endpoint candidates, merged from everything it knows: the agent's
+   self-gathered **host addresses** (interface IPv4s and global IPv6s
+   plus listen port — what makes two peers behind the same NAT, or on
+   the same Docker host, connect directly instead of hairpinning),
+   **router mappings**, the **STUN** endpoint, the **relay-observed**
+   live mapping (a UDP-relayed peer's real public source, refreshed by
+   every keepalive — fresher than any STUN), and the server-observed
+   source address. Ordering flips on topology: same public IP on both
+   sides ranks LAN paths first and hairpin paths last; across different
+   NATs, router mappings and STUN lead, and private v4 addresses are
+   included only when a shared /24 suggests the same wire. Candidates
+   are priority ordered, but still just hints: WireGuard roaming
+   overrides them as soon as real traffic arrives.
+4. **Relay fallback.** If a direct peer goes silent (no inbound bytes and no
    fresh handshake) for 90s, the agent moves it onto a relay. This avoids
    abandoning healthy links just because WireGuard's normal rekey interval is
    longer than the old fallback timer. The relay is a deliberately dumb
@@ -351,8 +376,11 @@ Connectivity is attempted in this order, all automatic:
 
 Relayed peers periodically retry direct candidates from config sync. When the
 control plane sees a relayed pair where both peers are online and both have
-direct candidates, it bumps a per-pair punch epoch so both agents enter a
-short coordinated probe window at roughly the same time. If WireGuard
+direct candidates (and they are not both hard NATs), it bumps a per-pair punch
+epoch **and pushes a targeted `sync-now` to the other peer over the signal
+WebSocket**, so both agents enter the coordinated probe window within about a
+second of each other instead of up to a report interval apart — simultaneity
+is what makes hole punching land. If WireGuard
 handshakes from a non-relay endpoint, the agent closes the relay and marks the
 path `direct`; if the probe stays silent, it restores the relay endpoint.
 Reverse-proxy and service sidecars that need the most stable path can run with
@@ -375,13 +403,17 @@ Relay setup, two shapes:
   shared secret, no control hop. Serves both transports: WebSocket over
   the API port (nothing extra to open), and UDP over
   `--relay-port-min/--relay-port-max` (default 51900-51999) for agents
-  that opt into `--relay-transport udp`.
+  that opt into `--relay-transport udp`. Also serves mesh STUN on
+  `--stun-port` and the next port up (default 3478/3479, `0` disables),
+  advertised to agents automatically.
 - **Standalone (`cmd/relay`):** UDP only, for when the relay needs its
   own public-IP host. Run `relay` with `--port-min/--port-max`, keep the
   control port (8081) reachable from the control plane only, copy its
   generated `relay-secret` to the server host, and start the server
   with `--relay-host <public-ip> --relay-control <url>`. Agents must use
-  `--relay-transport udp`.
+  `--relay-transport udp`. The standalone relay serves mesh STUN too
+  (its own `--stun-port`, default 3478); keep the server's `--stun-port`
+  in agreement, since the server is what advertises the endpoints.
 
 For UDP, exhaustion of the port range returns 503 and each peer pair
 consumes two ports.
@@ -401,9 +433,10 @@ and can open its port range.
 
 All three binaries open their own ports on the host firewall at startup
 and remove the rules on shutdown (`--manage-firewall`, on by default):
-the agent its WireGuard listen port (udp), the server its API port (tcp),
-the relay its forwarding range (udp, only when `--port-min/--port-max`
-is set — ephemeral ports cannot be pre-opened). The backend is detected
+the agent its WireGuard listen port (udp), the server its API port (tcp)
+plus, with the embedded relay, the forwarding range and STUN port pair
+(udp), the relay its forwarding range and STUN pair (udp, only when
+`--port-min/--port-max` is set — ephemeral ports cannot be pre-opened). The backend is detected
 in order: firewalld, ufw, nftables (component-owned table), iptables;
 on Windows, Windows Defender Firewall via netsh. firewalld rules are
 runtime-only on purpose — a component that is not running should not
@@ -787,6 +820,7 @@ Useful agent flags: `--listen-port 51820` (pin the WireGuard port — strongly
 recommended so the firewall rule is stable across restarts), `--server-ca`
 (pin a self-signed server cert), `--relay-transport websocket|udp`,
 `--direct-probe=false` (keep relayed service sidecars stable), `--stun-server`,
+`--port-mapping=false` (don't ask the router to forward the WireGuard port),
 `--gateway-nat-cidrs 100.78.0.9/32` (gateway NAT for static/mobile peers),
 `--key-file`, `--manage-firewall`.
 
@@ -795,14 +829,18 @@ The agent will:
 1. Load or generate its private key (`--key-file`, default `wgkey.key`,
    0600). The keypair is the node's permanent identity — created once,
    reused forever. Never delete it casually.
-2. Discover its public endpoint via STUN, then POST its **public** key to
-   `/enroll` (the private key never leaves the machine).
-3. Receive its assigned overlay IPs, an auth token, and the peers it may
-   reach — each with its per-pair PSK, endpoint hint, and keepalive.
+2. Discover its public endpoint via STUN and gather its host-address
+   candidates, then POST its **public** key to `/enroll` (the private
+   key never leaves the machine).
+3. Receive its assigned overlay IPs, an auth token, the mesh STUN
+   endpoints, and the peers it may reach — each with its per-pair PSK,
+   ordered endpoint candidates, and keepalive.
 4. Create the `wg-int` interface, assign the address(es), configure peers, and
-   report telemetry every 30s. Each report response re-syncs the peer list and
-   the agent's own assigned address, so membership/endpoint/ACL/PSK and
-   overlay-network changes land within one interval. Blocks until
+   report telemetry every 30s. Each report carries refreshed endpoint
+   material (host candidates, router mapping, NAT classification, and the
+   periodically re-checked public endpoint); each response re-syncs the peer
+   list and the agent's own assigned address, so membership/endpoint/ACL/PSK
+   and overlay-network changes land within one interval. Blocks until
    SIGINT/SIGTERM, then tears the interface down.
 
 Re-running the agent is safe: enrollment is idempotent, so a node that

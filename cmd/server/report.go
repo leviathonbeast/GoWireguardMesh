@@ -96,6 +96,7 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 		Peers:         entries,
 		ACL:           acl,
 		GatewayRoutes: gatewayRoutesFor(self, others),
+		STUNServers:   s.stunServers,
 	})
 }
 
@@ -131,10 +132,21 @@ func (s *server) coordinatePunches(ctx context.Context, self store.PeerRow, othe
 		if shouldBumpPunchEpoch(punchDecision{
 			state:            p.State,
 			remoteOnline:     online[p.PeerPublicKey],
-			selfCandidates:   len(endpointCandidates(remote, self)),
-			remoteCandidates: len(endpointCandidates(self, remote)),
+			selfCandidates:   len(s.pairCandidates(remote, self)),
+			remoteCandidates: len(s.pairCandidates(self, remote)),
+			selfNAT:          self.NATType,
+			remoteNAT:        remote.NATType,
 		}) {
-			s.bumpPunchEpoch(self.PublicKey, remote.PublicKey, now)
+			if s.bumpPunchEpoch(self.PublicKey, remote.PublicKey, now) {
+				// Hole punching needs both sides sending at the same
+				// time. The reporter gets the new epoch in this very
+				// response; the remote would otherwise sit on it for up
+				// to a full report interval, probing candidates out of
+				// step. A targeted sync-now collapses that skew to
+				// about a second. Best effort: a peer without a signal
+				// connection still picks the epoch up on its next tick.
+				s.signalPeerSync(remote.PublicKey, "punch")
+			}
 		}
 	}
 
@@ -168,6 +180,8 @@ type punchDecision struct {
 	remoteOnline     bool
 	selfCandidates   int
 	remoteCandidates int
+	selfNAT          string // "easy", "hard", "" unknown
+	remoteNAT        string
 }
 
 func shouldBumpPunchEpoch(d punchDecision) bool {
@@ -177,10 +191,23 @@ func shouldBumpPunchEpoch(d punchDecision) bool {
 		return false
 	}
 
+	// Two endpoint-dependent ("hard"/symmetric) NATs cannot hole-punch:
+	// each side's mapping toward the other is one neither side can
+	// discover. Skipping the coordination leaves their relay undisturbed
+	// and saves the attempt budget for topology changes. One hard side is
+	// still worth trying — the easy side's mapping is punchable. Unknown
+	// ("") NATs always get the benefit of the doubt.
+	if d.selfNAT == "hard" && d.remoteNAT == "hard" {
+		return false
+	}
+
 	return d.remoteOnline && d.selfCandidates > 0 && d.remoteCandidates > 0
 }
 
-func (s *server) bumpPunchEpoch(keyA, keyB string, now time.Time) {
+// bumpPunchEpoch advances the pair's punch epoch and reports whether it
+// actually did (false while resting on the attempt cap or cooldown), so
+// the caller only signals the remote peer for real punch windows.
+func (s *server) bumpPunchEpoch(keyA, keyB string, now time.Time) bool {
 	pairID := relayPairID(keyA, keyB)
 
 	s.punchMu.Lock()
@@ -196,20 +223,22 @@ func (s *server) bumpPunchEpoch(keyA, keyB string, now time.Time) {
 	// then settles on relay until it goes direct (resetPunchAttempts) or an
 	// agent restarts. Prevents forever-thrashing a relay that cannot punch.
 	if cur.attempts >= maxPunchAttempts {
-		return
+		return false
 	}
 
 	// Back the cadence off per attempt (2m, 4m, 8m) so repeated failures do
 	// not keep telling both agents to tear the working relay down.
 	cooldown := punchCooldown << min(cur.attempts, 2)
 	if !cur.bumpedAt.IsZero() && now.Sub(cur.bumpedAt) < cooldown {
-		return
+		return false
 	}
 
 	cur.epoch++
 	cur.attempts++
 	cur.bumpedAt = now
 	s.punchEpochs[pairID] = cur
+
+	return true
 }
 
 // resetPunchAttempts re-arms coordinated punching for a pair once it has

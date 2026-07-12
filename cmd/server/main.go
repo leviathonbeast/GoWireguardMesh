@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +65,7 @@ type server struct {
 	relay        relayAllocator // nil when no relay is configured
 	relayHost    string         // public data-plane address agents dial
 	wsHub        *relay.WSHub   // nil unless the embedded WS relay is enabled
+	stunServers  []string       // mesh STUN endpoints advertised to agents; empty when disabled
 	signalHub    *signalHub
 	accessLog    *accessLogSink
 	punchMu      sync.Mutex
@@ -172,6 +175,7 @@ func runServe(args []string) error {
 	relayEmbedded := fs.Bool("relay-embedded", false, "run the relay inside this process (NetBird-style single binary; no relay-control/secret needed)")
 	relayPortMin := fs.Int("relay-port-min", 51900, "embedded relay: lowest forwarding UDP port")
 	relayPortMax := fs.Int("relay-port-max", 51999, "embedded relay: highest forwarding UDP port")
+	stunPort := fs.Int("stun-port", 3478, "embedded relay: serve mesh STUN on this UDP port and the next (0 disables); agents use the pair to refresh endpoints and classify their NAT")
 	relayControl := fs.String("relay-control", "http://127.0.0.1:8081", "standalone relay: control API URL")
 	relaySecretFile := fs.String("relay-secret-file", "relay-secret", "standalone relay: path to the control shared secret")
 	defaultPolicy := fs.String("default-policy", "allow", "ACL default: \"allow\" (open mesh) or \"deny\" (only rule-connected pairs see each other)")
@@ -345,6 +349,23 @@ func runServe(args []string) error {
 		// store for auth); a standalone relay stays UDP-only.
 		srv.wsHub = relay.NewWSHub()
 
+		// Mesh STUN: two ports on the relay host so agents can refresh
+		// their public endpoint and classify their NAT without any
+		// third-party STUN dependency.
+		if *stunPort > 0 {
+			stun, err := relay.NewSTUNResponder(nil, *stunPort)
+			if err != nil {
+				slog.Warn("mesh stun disabled", "error", err)
+			} else {
+				defer stun.Close()
+				srv.stunServers = []string{
+					net.JoinHostPort(*relayHost, strconv.Itoa(*stunPort)),
+					net.JoinHostPort(*relayHost, strconv.Itoa(*stunPort+1)),
+				}
+				slog.Info("mesh stun enabled", "ports", []int{*stunPort, *stunPort + 1}, "host", *relayHost)
+			}
+		}
+
 		if *manageFirewall {
 			fw, ferr := firewall.OpenWithReconcile("wgmesh-server-relay", *dbPath+".relay.fw")
 			if ferr != nil {
@@ -353,6 +374,11 @@ func runServe(args []string) error {
 				slog.Warn("firewall rule failed", "backend", fw.Backend(), "error", err)
 			} else {
 				slog.Info("firewall opened relay range", "backend", fw.Backend(), "udp_min", *relayPortMin, "udp_max", *relayPortMax)
+				if len(srv.stunServers) > 0 {
+					if err := fw.AllowUDPRange(*stunPort, *stunPort+1); err != nil {
+						slog.Warn("firewall stun rule failed", "backend", fw.Backend(), "error", err)
+					}
+				}
 				defer func() {
 					if err := fw.Close(); err != nil {
 						slog.Warn("firewall cleanup failed", "error", err)
@@ -371,6 +397,16 @@ func runServe(args []string) error {
 
 		srv.relay = rc
 		srv.relayHost = *relayHost
+
+		// The standalone relay serves STUN itself (its --stun-port,
+		// default 3478); the control plane just advertises where. Agents
+		// degrade gracefully if the relay build predates STUN.
+		if *stunPort > 0 {
+			srv.stunServers = []string{
+				net.JoinHostPort(*relayHost, strconv.Itoa(*stunPort)),
+				net.JoinHostPort(*relayHost, strconv.Itoa(*stunPort+1)),
+			}
+		}
 
 		slog.Info("standalone relay fallback enabled", "relay_host", *relayHost, "control", *relayControl)
 	}
@@ -600,6 +636,17 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 
 	enrichRequest(r, res.Peer.ID, res.Peer.AssignedIP)
 
+	// Persist the enrollee's self-gathered candidates outside the enroll
+	// transaction: losing this write is harmless (every report re-sends
+	// the list), and it keeps Enroll's idempotent-retry path untouched.
+	if cands := encodeAgentCandidates(req.Candidates); cands != "" {
+		if err := s.store.UpdatePeerCandidates(r.Context(), res.Peer.ID, cands); err != nil {
+			slog.Warn("store enroll candidates failed", "peer_id", res.Peer.ID, "error", err)
+		} else {
+			res.Peer.CandidatesJSON = cands
+		}
+	}
+
 	if res.Created {
 		slog.Info("enrolled peer", "peer_id", res.Peer.ID, "public_key", req.PublicKey, "assigned_ip", res.Peer.AssignedIP, "listen_port", req.ListenPort, "endpoint", req.PublicEndpoint)
 		s.audit(r, "enroll", http.StatusOK, fmt.Sprintf("new peer %s (%s)", res.Peer.AssignedIP, req.Hostname))
@@ -639,14 +686,75 @@ func sameHost(a, b string) bool {
 	return errA == nil && errB == nil && ha == hb
 }
 
+// maxEndpointCandidates bounds how many candidates a peer entry carries.
+// The agents' coordinated probe window (45s at 8s per candidate) can
+// realistically try about this many before restoring relay, so anything
+// past six would never be probed anyway.
+const maxEndpointCandidates = 6
+
+// maxAgentCandidates bounds how many self-reported candidates one peer
+// may store; a hostile agent must not be able to grow every OTHER
+// peer's sync payload without limit.
+const maxAgentCandidates = 8
+
+// encodeAgentCandidates canonicalizes an agent-supplied candidate list
+// for storage: parseable udp host:port endpoints only (these get handed
+// to every other agent's WireGuard config), known types only, capped.
+// Returns "" when nothing valid remains.
+func encodeAgentCandidates(cands []proto.AgentCandidate) string {
+	kept := make([]proto.AgentCandidate, 0, len(cands))
+
+	for _, c := range cands {
+		if len(kept) == maxAgentCandidates {
+			break
+		}
+
+		switch c.Type {
+		case "host", "host6", "upnp":
+		default:
+			continue
+		}
+
+		if _, err := net.ResolveUDPAddr("udp", c.Endpoint); err != nil {
+			continue
+		}
+
+		kept = append(kept, c)
+	}
+
+	if len(kept) == 0 {
+		return ""
+	}
+
+	raw, err := json.Marshal(kept)
+	if err != nil {
+		return ""
+	}
+
+	return string(raw)
+}
+
+// agentCandidates decodes a peer's stored self-reported candidates;
+// missing or malformed JSON is simply "no candidates".
+func agentCandidates(p store.PeerRow) []proto.AgentCandidate {
+	if p.CandidatesJSON == "" {
+		return nil
+	}
+
+	var out []proto.AgentCandidate
+	if err := json.Unmarshal([]byte(p.CandidatesJSON), &out); err != nil {
+		return nil
+	}
+
+	if len(out) > maxAgentCandidates {
+		out = out[:maxAgentCandidates]
+	}
+
+	return out
+}
+
 // endpointHint picks the best-known underlay endpoint for the peer p,
 // as seen from the peer self requesting the list.
-//
-// Normally p's own STUN discovery wins. But when BOTH sides
-// discovered the same public IP, they sit behind the same NAT — the
-// STUN address would have to hairpin through their shared router,
-// which most consumer NATs refuse. The address the control plane
-// observed p at is the path that actually routes in that topology.
 //
 // Hints are exactly that — WireGuard roaming overrides them the
 // moment authenticated traffic arrives from somewhere else.
@@ -659,6 +767,22 @@ func endpointHint(self, p store.PeerRow) *string {
 	return &candidates[0].Endpoint
 }
 
+// endpointCandidates builds the ordered list of ways self might reach
+// p, highest priority first. Sources: p's self-gathered candidates
+// (interface addresses, router mappings), its STUN discovery, and the
+// address the control plane observed it at.
+//
+// The big fork is whether the two sides discovered the same public IP.
+// If they did, they sit behind the same NAT: p's own interface
+// addresses are the path that routes (the server-observed address may
+// itself be the shared WAN IP when the control plane is off-site), and
+// anything via the public IP would have to hairpin through their
+// router, which most consumer NATs refuse — so those sort last, kept
+// only as a long shot. Across different NATs it inverts: a router
+// mapping is a genuinely open port, STUN is the punchable mapping,
+// global IPv6 needs no NAT at all, and private v4 addresses are
+// unreachable (included only when a shared /24 with self suggests the
+// sides are on the same wire despite different WAN IPs).
 func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 	var out []proto.EndpointCandidate
 	seen := map[string]bool{}
@@ -675,21 +799,151 @@ func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 		})
 	}
 
+	reported := agentCandidates(p)
 	lan := lanEndpoint(p)
-	if p.PublicEndpoint != "" && self.PublicEndpoint != "" && sameHost(self.PublicEndpoint, p.PublicEndpoint) && lan != nil {
-		add(*lan, "lan", 100)
-		add(p.PublicEndpoint, "stun", 80)
-		return out
+	sameNAT := p.PublicEndpoint != "" && self.PublicEndpoint != "" && sameHost(self.PublicEndpoint, p.PublicEndpoint)
+
+	if sameNAT {
+		for _, c := range reported {
+			switch c.Type {
+			case "host":
+				add(c.Endpoint, "host", 110)
+			case "host6":
+				add(c.Endpoint, "host6", 100)
+			}
+		}
+		if lan != nil {
+			add(*lan, "lan", 105)
+		}
+		add(p.PublicEndpoint, "stun", 85)
+		for _, c := range reported {
+			if c.Type == "upnp" {
+				add(c.Endpoint, "upnp", 84)
+			}
+		}
+	} else {
+		selfReported := agentCandidates(self)
+
+		for _, c := range reported {
+			if c.Type == "upnp" {
+				add(c.Endpoint, "upnp", 120)
+			}
+		}
+		if p.PublicEndpoint != "" {
+			add(p.PublicEndpoint, "stun", 90)
+		}
+		for _, c := range reported {
+			switch c.Type {
+			case "host6":
+				add(c.Endpoint, "host6", 85)
+			case "host":
+				if sameV4Subnet(selfReported, c.Endpoint) {
+					add(c.Endpoint, "host", 110)
+				}
+			}
+		}
+		if lan != nil {
+			add(*lan, "lan", 80)
+		}
 	}
 
-	if p.PublicEndpoint != "" {
-		add(p.PublicEndpoint, "stun", 100)
-	}
-	if lan != nil {
-		add(*lan, "lan", 80)
+	return sortCandidates(out)
+}
+
+// sortCandidates orders by priority (stable, insertion order breaking
+// ties) and caps the list at what a probe window can actually try.
+func sortCandidates(out []proto.EndpointCandidate) []proto.EndpointCandidate {
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority > out[j].Priority })
+
+	if len(out) > maxEndpointCandidates {
+		out = out[:maxEndpointCandidates]
 	}
 
 	return out
+}
+
+// sameV4Subnet reports whether endpoint's host shares a /24 with any of
+// self's reported v4 interface addresses. Agents do not report their
+// interface masks, so /24 approximates typical home and lab subnetting;
+// it is a cheap "possibly the same wire" test that keeps unreachable
+// private addresses out of cross-NAT candidate lists.
+func sameV4Subnet(selfCands []proto.AgentCandidate, endpoint string) bool {
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return false
+	}
+
+	ip := net.ParseIP(host).To4()
+	if ip == nil {
+		return false
+	}
+
+	for _, c := range selfCands {
+		if c.Type != "host" {
+			continue
+		}
+
+		selfHost, _, err := net.SplitHostPort(c.Endpoint)
+		if err != nil {
+			continue
+		}
+
+		selfIP := net.ParseIP(selfHost).To4()
+		if selfIP == nil {
+			continue
+		}
+
+		if ip[0] == selfIP[0] && ip[1] == selfIP[1] && ip[2] == selfIP[2] {
+			return true
+		}
+	}
+
+	return false
+}
+
+// pairCandidates is endpointCandidates plus the live mapping the
+// embedded UDP relay observed for p, when the pair is currently riding
+// it. That mapping is p's real public WireGuard source, refreshed by
+// every keepalive — fresher than any STUN discovery, and available for
+// exactly the peers that need punching. Behind a shared NAT it is the
+// hairpin WAN address, so it sorts with the other long shots there.
+func (s *server) pairCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
+	out := endpointCandidates(self, p)
+
+	if s == nil || s.relay == nil {
+		return out
+	}
+
+	srcA, srcB, ok := s.relay.observed(relayPairID(self.PublicKey, p.PublicKey))
+	if !ok {
+		return out
+	}
+
+	// Port A serves the lexicographically smaller key (the allocate
+	// convention), so packets arriving on leg A came from that peer.
+	src := srcA
+	if p.PublicKey > self.PublicKey {
+		src = srcB
+	}
+
+	if !src.IsValid() || src.Addr().IsLoopback() {
+		return out
+	}
+
+	for _, c := range out {
+		if c.Endpoint == src.String() {
+			return out
+		}
+	}
+
+	priority := 95
+	if p.PublicEndpoint != "" && self.PublicEndpoint != "" && sameHost(self.PublicEndpoint, p.PublicEndpoint) {
+		priority = 83
+	}
+
+	out = append(out, proto.EndpointCandidate{Endpoint: src.String(), Type: "relay", Priority: priority})
+
+	return sortCandidates(out)
 }
 
 // buildPeerEntries renders the WireGuard peer list for self out of the
@@ -751,8 +1005,11 @@ func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([
 			for _, m := range mobilesByGateway[o.ID] {
 				allowed = append(allowed, allowedIPsForPeer(m)...)
 			}
-			entry.Endpoint = endpointHint(self, o)
-			entry.EndpointCandidates = endpointCandidates(self, o)
+			candidates := s.pairCandidates(self, o)
+			if len(candidates) > 0 {
+				entry.Endpoint = &candidates[0].Endpoint
+			}
+			entry.EndpointCandidates = candidates
 			entry.AllowedIPs = allowed
 		}
 
@@ -878,6 +1135,7 @@ func (s *server) buildResponse(ctx context.Context, res *store.EnrollResult) (pr
 		ACL:           acl,
 		GatewayRoutes: gatewayRoutesFor(res.Peer, res.Others),
 		AuthToken:     res.AuthToken,
+		STUNServers:   s.stunServers,
 	}, nil
 }
 

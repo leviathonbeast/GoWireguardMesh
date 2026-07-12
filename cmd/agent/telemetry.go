@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/netip"
 	"sort"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -94,6 +96,18 @@ type telemetryReporter struct {
 
 	ct        flowDumper   // nil when the platform has no flow source
 	proxyTail *proxyTailer // nil unless --traefik-access-log is set
+
+	// NAT-traversal material shipped with every report. listenPort and
+	// stunFallback are set once by the runner; the rest is refreshed by
+	// maybeNATCheck (async, so guarded by syncMu like the relay state).
+	listenPort     int
+	stunFallback   string      // --stun-server value; used until mesh STUN is known
+	stunServers    []string    // mesh STUN endpoints adopted from sync responses
+	publicEndpoint string      // last known public ip:port of the WG socket
+	natType        string      // "easy", "hard", or "" unknown
+	portMapper     *portMapper // nil when --port-mapping=false or no router mapping
+	natTick        int         // report ticks since start, for the re-check cadence
+	natBusy        atomic.Bool // one NAT check in flight at a time
 
 	prevLink map[wgtypes.Key]linkCounters
 	prevFlow map[flowKey]flowCounters
@@ -238,6 +252,10 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 				p.close()
 			}
 
+			if t.portMapper != nil {
+				t.portMapper.close() // removes the router mapping
+			}
+
 			if t.ct != nil {
 				t.ct.Close()
 			}
@@ -253,6 +271,7 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 
 			return
 		case <-ticker.C:
+			t.maybeNATCheck()
 			t.syncOnce(true)
 			t.publishPeers()
 		case <-statusTicker.C:
@@ -327,6 +346,94 @@ func (t *telemetryReporter) syncOnce(checkPaths bool) {
 	if checkPaths {
 		t.checkHandshakes()
 	}
+}
+
+// natCheckEvery is how many report ticks pass between NAT re-checks
+// (2 minutes at the default 30s interval). The check is two UDP round
+// trips; the cadence is about how fast a changed public IP (ISP
+// reconnect, router reboot) propagates into this peer's candidates.
+const natCheckEvery = 4
+
+// maybeNATCheck refreshes the public endpoint and NAT classification in
+// the background. The kernel owns the WireGuard port, so this measures
+// from a throwaway socket: the mapped IP tells us when the public IP
+// changed, and querying the mesh STUN port pair classifies the NAT's
+// mapping behavior (see checkNAT).
+func (t *telemetryReporter) maybeNATCheck() {
+	t.natTick++
+	if (t.natTick-1)%natCheckEvery != 0 {
+		return
+	}
+
+	if !t.natBusy.CompareAndSwap(false, true) {
+		return
+	}
+
+	t.syncMu.Lock()
+	servers := t.stunServers
+	t.syncMu.Unlock()
+
+	if len(servers) == 0 && t.stunFallback != "" {
+		servers = []string{t.stunFallback}
+	}
+	if len(servers) == 0 || t.listenPort == 0 {
+		t.natBusy.Store(false)
+		return
+	}
+
+	go func() {
+		defer t.natBusy.Store(false)
+
+		mapped, natType, err := checkNAT(servers)
+		if err != nil {
+			slog.Debug("nat check failed", "error", err)
+			return
+		}
+
+		t.syncMu.Lock()
+		defer t.syncMu.Unlock()
+
+		if natType != "" && natType != t.natType {
+			t.natType = natType
+			slog.Info("nat classified", "type", natType)
+		}
+
+		mappedIP := mapped.Addr().String()
+		curHost := ""
+		if h, _, err := net.SplitHostPort(t.publicEndpoint); err == nil {
+			curHost = h
+		}
+
+		if curHost == mappedIP {
+			return
+		}
+
+		// The public IP moved (or startup STUN never succeeded). The
+		// mapped PORT belongs to the throwaway socket, so advertise
+		// newIP:listenPort — port-preserving NATs are the common case,
+		// and the relay-observed candidate corrects the rest.
+		t.publicEndpoint = net.JoinHostPort(mappedIP, strconv.Itoa(t.listenPort))
+		fmt.Printf("[agent] public endpoint changed, now advertising %s\n", t.publicEndpoint)
+	}()
+}
+
+// selfCandidates assembles the agent-gathered candidate list shipped
+// with each report: interface addresses plus any router port mapping.
+// Runs under syncMu (reads network prefixes and the mapper handle).
+func (t *telemetryReporter) selfCandidates() []proto.AgentCandidate {
+	if t.listenPort == 0 {
+		return nil
+	}
+
+	out := gatherLocalCandidates(t.listenPort, t.network, t.network6)
+
+	if t.portMapper != nil {
+		if ep := t.portMapper.external(); ep != "" {
+			out = append(out, proto.AgentCandidate{Endpoint: ep, Type: "upnp"})
+		}
+	}
+
+	return out
 }
 
 func (t *telemetryReporter) collect() {
@@ -532,15 +639,23 @@ func (t *telemetryReporter) send() {
 	if len(t.pendingCounters) == 0 && len(t.pendingFlows) == 0 && len(proxyEvents) == 0 {
 		// Still send: an empty report is the liveness heartbeat that
 		// keeps last_seen_at fresh on the server.
-		t.post(&proto.ReportRequest{PathStates: t.currentPathStates()})
+		t.post(&proto.ReportRequest{
+			PublicEndpoint: t.publicEndpoint,
+			Candidates:     t.selfCandidates(),
+			NATType:        t.natType,
+			PathStates:     t.currentPathStates(),
+		})
 		return
 	}
 
 	report := &proto.ReportRequest{
-		Counters:    make([]proto.PeerCounter, 0, len(t.pendingCounters)),
-		Flows:       make([]proto.FlowRecord, 0, len(t.pendingFlows)),
-		PathStates:  t.currentPathStates(),
-		ProxyEvents: proxyEvents,
+		PublicEndpoint: t.publicEndpoint,
+		Candidates:     t.selfCandidates(),
+		NATType:        t.natType,
+		Counters:       make([]proto.PeerCounter, 0, len(t.pendingCounters)),
+		Flows:          make([]proto.FlowRecord, 0, len(t.pendingFlows)),
+		PathStates:     t.currentPathStates(),
+		ProxyEvents:    proxyEvents,
 	}
 
 	for _, c := range t.pendingCounters {
@@ -664,6 +779,13 @@ func (t *telemetryReporter) post(report *proto.ReportRequest) bool {
 // mesh and have running agents adopt their new address without a
 // process restart.
 func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
+	// Mesh STUN endpoints beat the public fallback for the periodic NAT
+	// checks; sticky once learned (a response without them means the
+	// server build predates the field, not that STUN went away).
+	if len(sync.STUNServers) > 0 {
+		t.stunServers = sync.STUNServers
+	}
+
 	if err := t.applySelfAssignment(sync); err != nil {
 		slog.Warn("telemetry sync failed", "error", err)
 		return

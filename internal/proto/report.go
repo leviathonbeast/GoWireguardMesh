@@ -4,8 +4,21 @@ package proto
 // It is authenticated by the enrollment auth token, never a setup key.
 type ReportRequest struct {
 	// PublicEndpoint is the agent's STUN-discovered public ip:port,
-	// "" when discovery failed or was disabled.
+	// "" when discovery failed or was disabled. Refreshed by the
+	// agent's periodic endpoint re-check, so a NAT rebind or ISP
+	// reconnect propagates without an agent restart.
 	PublicEndpoint string `json:"public_endpoint,omitempty"`
+
+	// Candidates are the agent's current self-gathered endpoint
+	// candidates (host addresses, router port mappings). A non-empty
+	// list replaces the stored one; empty means "no update".
+	Candidates []AgentCandidate `json:"candidates,omitempty"`
+
+	// NATType is the agent's classification of its NAT's mapping
+	// behavior: "easy" (endpoint-independent — hole-punchable),
+	// "hard" (endpoint-dependent/symmetric), or "" (unknown). The
+	// control plane skips coordinating punches for hard<->hard pairs.
+	NATType string `json:"nat_type,omitempty"`
 
 	// Counters carries per-remote-peer WireGuard transfer deltas since
 	// the previous successful report.
@@ -41,6 +54,10 @@ type ReportResponse struct {
 	// gateway for (a routed mobile peer's /32 and /128). Non-empty ⇒
 	// the agent enables forwarding without NAT for its overlay iface.
 	GatewayRoutes []string `json:"gateway_routes,omitempty"`
+
+	// STUNServers mirrors EnrollResponse.STUNServers so a running
+	// agent adopts mesh STUN endpoints without re-enrolling.
+	STUNServers []string `json:"stun_servers,omitempty"`
 }
 
 // PeerCounter is the reporting agent's view of one WireGuard link.

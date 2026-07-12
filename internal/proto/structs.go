@@ -10,6 +10,22 @@ type EnrollRequest struct {
 	// PublicEndpoint is the enrollee's STUN-discovered public ip:port,
 	// "" when discovery failed or was disabled.
 	PublicEndpoint string `json:"public_endpoint,omitempty"`
+
+	// Candidates are the enrollee's self-gathered endpoint candidates
+	// (host interface addresses, router port mappings) that only the
+	// agent can know. The STUN endpoint rides PublicEndpoint, and the
+	// server-observed address is added server-side.
+	Candidates []AgentCandidate `json:"candidates,omitempty"`
+}
+
+// AgentCandidate is one agent-gathered way to reach this agent's
+// WireGuard socket.
+type AgentCandidate struct {
+	Endpoint string `json:"endpoint"`
+	// Type is "host" (an IPv4 interface address), "host6" (a global
+	// IPv6 interface address), or "upnp" (a router mapping obtained
+	// via UPnP/NAT-PMP).
+	Type string `json:"type"`
 }
 
 // EnrollResponse is returned after successful enrollment.
@@ -34,6 +50,12 @@ type EnrollResponse struct {
 	// reports). Rotated on every enrollment, including idempotent
 	// re-enrolls; only its hash is stored server-side.
 	AuthToken string `json:"auth_token"`
+
+	// STUNServers are the mesh's own STUN endpoints (the embedded
+	// relay answers binding requests). Agents prefer them over the
+	// public fallback for periodic endpoint re-checks, and use the
+	// pair of ports to classify their NAT's mapping behavior.
+	STUNServers []string `json:"stun_servers,omitempty"`
 }
 
 type DNSConfig struct {
@@ -71,7 +93,7 @@ type PeerConfigResponse struct {
 
 type EndpointCandidate struct {
 	Endpoint string `json:"endpoint"`
-	Type     string `json:"type"`     // lan, stun
+	Type     string `json:"type"`     // host, host6, upnp, lan, stun, relay
 	Priority int    `json:"priority"` // larger wins
 }
 
