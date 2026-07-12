@@ -12,14 +12,15 @@ RUN npm run build
 
 # --- Go binaries ---
 FROM golang:1.26-alpine AS build
+ARG GIT_COMMIT=unknown
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
-RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server \
- && CGO_ENABLED=0 go build -o /out/relay ./cmd/relay \
- && CGO_ENABLED=0 go build -o /out/agent ./cmd/agent
+RUN CGO_ENABLED=0 go build -ldflags "-X gowireguard/internal/buildinfo.GitCommit=${GIT_COMMIT}" -o /out/server ./cmd/server \
+ && CGO_ENABLED=0 go build -ldflags "-X gowireguard/internal/buildinfo.GitCommit=${GIT_COMMIT}" -o /out/relay ./cmd/relay \
+ && CGO_ENABLED=0 go build -ldflags "-X gowireguard/internal/buildinfo.GitCommit=${GIT_COMMIT}" -o /out/agent ./cmd/agent
 
 # --- relay ---
 FROM alpine:3.21 AS relay

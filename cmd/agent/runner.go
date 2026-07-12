@@ -8,6 +8,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"gowireguard/internal/buildinfo"
 	"gowireguard/internal/firewall"
 	"gowireguard/internal/proto"
 )
@@ -35,6 +36,7 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 	if err := setupLogging(r.cfg.LogLevel); err != nil {
 		return err
 	}
+	slog.Info("wgmesh agent starting", "git_commit", buildinfo.Commit())
 
 	if err := ensurePrivileged(); err != nil {
 		return err

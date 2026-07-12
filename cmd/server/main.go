@@ -28,6 +28,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	gowireguard "gowireguard"
+	"gowireguard/internal/buildinfo"
 	"gowireguard/internal/firewall"
 	"gowireguard/internal/httpx"
 	"gowireguard/internal/keyseal"
@@ -203,6 +204,7 @@ func runServe(args []string) error {
 	if err := setupLogging(*logLevel); err != nil {
 		return err
 	}
+	slog.Info("wgmesh server starting", "git_commit", buildinfo.Commit())
 
 	if *trustProxy && !isLoopback(*listen) {
 		// XFF from a direct client is attacker-controlled; only trust

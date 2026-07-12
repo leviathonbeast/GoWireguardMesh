@@ -56,6 +56,8 @@ jobs:
         with:
           context: .
           target: server
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-server:latest
@@ -66,6 +68,8 @@ jobs:
         with:
           context: .
           target: agent
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-agent:latest
@@ -76,6 +80,8 @@ jobs:
         with:
           context: .
           target: relay
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/wgmesh-relay:latest
