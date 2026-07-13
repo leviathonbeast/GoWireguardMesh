@@ -103,6 +103,10 @@ func acmeTLSConfig(ctx context.Context, domains []string, email, tokenFile, stor
 	cfg = certmagic.New(cache, certmagic.Config{
 		Storage: &certmagic.FileStorage{Path: storageDir},
 		Logger:  logger,
+		// SNI-less handshakes (health checks and probes dialing the
+		// listener by IP) get the primary certificate instead of a
+		// handshake failure.
+		DefaultServerName: domains[0],
 	})
 
 	ca := certmagic.LetsEncryptProductionCA
