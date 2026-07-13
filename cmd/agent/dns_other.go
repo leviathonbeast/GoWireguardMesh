@@ -7,3 +7,7 @@ import "gowireguard/internal/proto"
 func applyDNSConfig(_ string, _ proto.DNSConfig) error {
 	return nil
 }
+
+func restoreResolvConf() error {
+	return nil
+}

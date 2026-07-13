@@ -858,7 +858,7 @@ func (t *telemetryReporter) applyDNS(cfg proto.DNSConfig) error {
 			t.lastDNS = digest
 			t.dnsApplied = false
 			if !t.dnsWarned {
-				slog.Warn("dns sync unsupported; configure DNS manually or install systemd-resolved", "error", err)
+				slog.Warn("dns sync not applied; configure DNS manually", "error", err)
 				t.dnsWarned = true
 			}
 			return nil

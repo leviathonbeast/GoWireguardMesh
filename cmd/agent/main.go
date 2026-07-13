@@ -58,6 +58,7 @@ var (
 	relayTransportFlag   = flag.String("relay-transport", "auto", "relay fallback: \"auto\" tries QUIC then HTTPS WebSocket; \"websocket\" or \"udp\" force a legacy transport")
 	directProbeFlag      = flag.Bool("direct-probe", true, "probe direct endpoints while on relay (disable for reverse-proxy/service sidecars that prefer relay stability)")
 	gatewayNATCIDRsFlag  = flag.String("gateway-nat-cidrs", "", "comma-separated IPv4 CIDRs or addresses to masquerade through this peer (for static/mobile WireGuard clients)")
+	dnsModeFlag          = flag.String("dns-mode", "auto", "how pushed DNS settings are applied: auto (systemd-resolved when available, else write /etc/resolv.conf directly), resolved, resolv-conf, or off (never touch host DNS); on Windows only off has an effect")
 	manageFirewallFlag   = flag.Bool("manage-firewall", true, "open the WireGuard listen port on the host firewall (removed again on shutdown)")
 	keyFileFlag          = flag.String("key-file", "wgkey.key", "path to private key file")
 	logLevelFlag         = flag.String("log-level", "info", "minimum log level: debug, info, warn, or error")

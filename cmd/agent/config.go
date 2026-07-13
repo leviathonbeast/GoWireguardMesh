@@ -20,6 +20,7 @@ type agentConfig struct {
 	RelayTransport   string
 	DirectProbe      bool
 	GatewayNATCIDRs  string
+	DNSMode          string
 	ManageFirewall   bool
 	KeyFile          string
 	LogLevel         string
@@ -46,6 +47,7 @@ func agentConfigFromFlags() agentConfig {
 		RelayTransport:   *relayTransportFlag,
 		DirectProbe:      *directProbeFlag,
 		GatewayNATCIDRs:  *gatewayNATCIDRsFlag,
+		DNSMode:          *dnsModeFlag,
 		ManageFirewall:   *manageFirewallFlag,
 		KeyFile:          *keyFileFlag,
 		LogLevel:         *logLevelFlag,

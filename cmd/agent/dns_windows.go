@@ -13,6 +13,10 @@ import (
 )
 
 func applyDNSConfig(iface string, cfg proto.DNSConfig) error {
+	if dnsApplyMode == dnsModeOff {
+		return fmt.Errorf("%w: dns push disabled (--dns-mode=off)", errDNSUnsupported)
+	}
+
 	if err := clearWindowsSplitDNS(iface); err != nil {
 		return err
 	}
@@ -111,6 +115,12 @@ func setDNSSuffix(iface, suffix string) error {
 	if err != nil {
 		return fmt.Errorf("set dns suffix: %w: %s", err, compactOutput(out))
 	}
+	return nil
+}
+
+// restoreResolvConf is Linux-only cleanup; Windows DNS state is managed
+// per-interface (NRPT rules keyed on our comment) and cleared on apply.
+func restoreResolvConf() error {
 	return nil
 }
 

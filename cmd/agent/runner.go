@@ -38,6 +38,12 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 	}
 	slog.Info("wgmesh agent starting", "git_commit", buildinfo.Commit())
 
+	mode, err := parseDNSMode(r.cfg.DNSMode)
+	if err != nil {
+		return err
+	}
+	dnsApplyMode = mode
+
 	if err := ensurePrivileged(); err != nil {
 		return err
 	}
@@ -45,6 +51,13 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 	// Cleanup stale interface if present.
 	if err := deleteInterface(ifaceName); err != nil {
 		return err
+	}
+
+	// A previous run that took over /etc/resolv.conf and crashed left the
+	// takeover in place; put the original back before this run decides
+	// whether to apply DNS again.
+	if err := restoreResolvConf(); err != nil {
+		slog.Warn("stale resolv.conf restore failed", "error", err)
 	}
 
 	privateKey, err := loadOrGenerateKey(r.cfg.KeyFile)
@@ -77,6 +90,14 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 	defer func() {
 		if err := deleteInterface(ifaceName); err != nil {
 			slog.Error("interface cleanup failed", "error", err)
+		}
+	}()
+
+	// resolved-applied DNS dies with the link above; a resolv.conf
+	// takeover outlives the process and needs an explicit revert.
+	defer func() {
+		if err := restoreResolvConf(); err != nil {
+			slog.Warn("resolv.conf restore failed", "error", err)
 		}
 	}()
 
@@ -300,7 +321,7 @@ func (r *agentRunner) setupInterface(overlayAddr, overlayAddr6 string, initialDN
 	if initialDNS.Enabled {
 		if err := applyDNSConfig(ifaceName, initialDNS); err != nil {
 			if errors.Is(err, errDNSUnsupported) {
-				slog.Warn("initial dns sync unsupported; configure DNS manually or install systemd-resolved", "error", err)
+				slog.Warn("initial dns sync not applied; configure DNS manually", "error", err)
 				return nil
 			}
 			slog.Warn("initial dns sync failed", "error", err)
