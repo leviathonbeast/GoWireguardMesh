@@ -12,11 +12,13 @@ import (
 )
 
 // natType validates an agent-reported NAT classification; anything but
-// the two known values is treated as "not reported" so a hostile or
-// future agent cannot store junk the UI would render.
+// the known values is treated as "not reported" so a hostile or
+// future agent cannot store junk the UI would render. "static" means
+// the agent advertises an operator-pinned endpoint (--advertise-endpoint):
+// not measured, asserted reachable.
 func natType(v string) string {
 	switch v {
-	case "easy", "hard":
+	case "easy", "hard", "static":
 		return v
 	default:
 		return ""

@@ -482,7 +482,13 @@ func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) 
 	// the public fallback for periodic re-checks and NAT classification.
 	reporter.listenPort = state.listenPort
 	reporter.publicEndpoint = state.publicEndpoint
-	reporter.endpointPinned = r.cfg.AdvertiseEndpoint != ""
+	if r.cfg.AdvertiseEndpoint != "" {
+		reporter.endpointPinned = true
+		// Not measured: asserted. The operator published this port, so
+		// the mapping toward every peer is the same address — the
+		// property "easy" approximates and a pin guarantees.
+		reporter.natType = "static"
+	}
 	reporter.stunFallback = r.cfg.STUNServer
 	reporter.stunServers = state.stunServers
 

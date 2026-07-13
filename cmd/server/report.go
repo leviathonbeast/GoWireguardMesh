@@ -180,7 +180,7 @@ type punchDecision struct {
 	remoteOnline     bool
 	selfCandidates   int
 	remoteCandidates int
-	selfNAT          string // "easy", "hard", "" unknown
+	selfNAT          string // "easy", "hard", "static" (pinned, punchable), "" unknown
 	remoteNAT        string
 }
 

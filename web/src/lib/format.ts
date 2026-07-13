@@ -81,7 +81,8 @@ export function endpointOf(p: Peer): string {
 // natLabel renders the agent's NAT classification: "easy" NATs keep the
 // same public mapping toward every destination (hole-punchable), "hard"
 // (symmetric) NATs mint one per destination and generally need the relay.
-export function natLabel(t: "easy" | "hard"): string {
+export function natLabel(t: "easy" | "hard" | "static"): string {
+  if (t === "static") return "static (pinned endpoint)";
   return t === "easy" ? "easy NAT" : "hard NAT (symmetric)";
 }
 

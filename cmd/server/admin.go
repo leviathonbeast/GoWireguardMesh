@@ -109,7 +109,7 @@ type peerJSON struct {
 	ListenPort      int    `json:"listen_port,omitempty"`
 	ObservedIP      string `json:"observed_ip,omitempty"`
 	PublicEndpoint  string `json:"public_endpoint,omitempty"`
-	NATType         string `json:"nat_type,omitempty"` // easy | hard; absent when unknown
+	NATType         string `json:"nat_type,omitempty"` // easy | hard | static (pinned endpoint); absent when unknown
 	CreatedAt       string `json:"created_at"`
 	LastSeenAt      string `json:"last_seen_at,omitempty"`
 	RevokedAt       string `json:"revoked_at,omitempty"`

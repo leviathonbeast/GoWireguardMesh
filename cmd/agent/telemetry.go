@@ -374,6 +374,13 @@ const natCheckEvery = 4
 // changed, and querying the mesh STUN port pair classifies the NAT's
 // mapping behavior (see checkNAT).
 func (t *telemetryReporter) maybeNATCheck() {
+	// A pinned endpoint makes both outputs moot: the advertised address
+	// never changes, and the pin asserts reachability ("static") better
+	// than measuring the outbound path's NAT ever could.
+	if t.endpointPinned {
+		return
+	}
+
 	t.natTick++
 	if (t.natTick-1)%natCheckEvery != 0 {
 		return
@@ -410,13 +417,6 @@ func (t *telemetryReporter) maybeNATCheck() {
 		if natType != "" && natType != t.natType {
 			t.natType = natType
 			slog.Info("nat classified", "type", natType)
-		}
-
-		// A pinned endpoint is operator knowledge (published port,
-		// docker-hairpinned VPS): STUN keeps informing NAT class above,
-		// but never overrides what we advertise.
-		if t.endpointPinned {
-			return
 		}
 
 		mappedIP := mapped.Addr().String()
