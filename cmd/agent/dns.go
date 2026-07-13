@@ -23,6 +23,10 @@ const (
 
 var dnsApplyMode = dnsModeAuto
 
+// dnsKeepFallback: in resolv.conf takeover mode, append the original
+// nameservers after the pushed ones. Set from --dns-fallback at startup.
+var dnsKeepFallback = true
+
 func parseDNSMode(s string) (dnsMode, error) {
 	switch strings.TrimSpace(strings.ToLower(s)) {
 	case "", "auto":

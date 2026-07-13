@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -45,6 +47,11 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 		return err
 	}
 	dnsApplyMode = mode
+	dnsKeepFallback = r.cfg.DNSFallback
+
+	if err := validateAdvertiseEndpoint(r.cfg.AdvertiseEndpoint); err != nil {
+		return err
+	}
 
 	if err := ensurePrivileged(); err != nil {
 		return err
@@ -231,7 +238,10 @@ func (r *agentRunner) startupStateRetry(privateKey wgtypes.Key, listenPort int, 
 
 // isPermanentStartupErr reports whether retrying cannot help: the
 // server understood the request and refused it. 408/429 stay
-// retryable; so do network errors and 5xx, which carry no verdict.
+// retryable, as do network errors and 5xx, which carry no verdict.
+// So does 404: the control plane always serves /enroll, so a 404 is
+// an intermediary (reverse proxy with no route yet, mid-cutover)
+// answering in its place — an infrastructure state, not a refusal.
 func isPermanentStartupErr(err error) bool {
 	if errors.Is(err, errSetupKeyRequired) {
 		return true
@@ -241,6 +251,7 @@ func isPermanentStartupErr(err error) bool {
 	if errors.As(err, &rejected) {
 		return rejected.status >= 400 && rejected.status < 500 &&
 			rejected.status != http.StatusRequestTimeout &&
+			rejected.status != http.StatusNotFound &&
 			rejected.status != http.StatusTooManyRequests
 	}
 
@@ -338,6 +349,11 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 }
 
 func (r *agentRunner) discoverPublicEndpoint(listenPort int) (string, error) {
+	if r.cfg.AdvertiseEndpoint != "" {
+		agentPrintf("[agent] advertising pinned public endpoint: %s\n", r.cfg.AdvertiseEndpoint)
+		return r.cfg.AdvertiseEndpoint, nil
+	}
+
 	if r.cfg.STUNServer == "" {
 		return "", nil
 	}
@@ -351,6 +367,27 @@ func (r *agentRunner) discoverPublicEndpoint(listenPort int) (string, error) {
 	agentPrintf("[agent] stun public endpoint: %s\n", publicEndpoint)
 
 	return publicEndpoint, nil
+}
+
+// validateAdvertiseEndpoint rejects a malformed --advertise-endpoint at
+// startup, before the retry loop: a config typo should exit, not be
+// retried forever.
+func validateAdvertiseEndpoint(ep string) error {
+	if ep == "" {
+		return nil
+	}
+
+	host, portStr, err := net.SplitHostPort(ep)
+	if err != nil || host == "" {
+		return fmt.Errorf("--advertise-endpoint %q must be host:port", ep)
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("--advertise-endpoint %q has an invalid port", ep)
+	}
+
+	return nil
 }
 
 func (r *agentRunner) setupInterface(overlayAddr, overlayAddr6 string, initialDNS proto.DNSConfig) error {
@@ -445,6 +482,7 @@ func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) 
 	// the public fallback for periodic re-checks and NAT classification.
 	reporter.listenPort = state.listenPort
 	reporter.publicEndpoint = state.publicEndpoint
+	reporter.endpointPinned = r.cfg.AdvertiseEndpoint != ""
 	reporter.stunFallback = r.cfg.STUNServer
 	reporter.stunServers = state.stunServers
 

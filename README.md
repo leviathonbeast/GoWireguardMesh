@@ -905,7 +905,12 @@ Useful agent flags: `--listen-port 51820` (pin the WireGuard port — strongly
 recommended so the firewall rule is stable across restarts), `--server-ca`
 (pin a self-signed server cert), `--relay-transport auto|websocket|udp`,
 `--direct-probe=false` (keep relayed service sidecars stable), `--stun-server`,
-`--port-mapping=false` (don't ask the router to forward the WireGuard port),
+`--advertise-endpoint host:51820` (pin the public endpoint peers dial for
+direct connections — for hosts whose observed address lies, like a
+docker-sidecar'd agent on a VPS whose hairpin NAT makes it look symmetric;
+overrides STUN and survives re-checks), `--port-mapping=false` (don't ask the
+router to forward the WireGuard port), `--dns-fallback=false` (resolv.conf DNS
+mode: don't keep the original nameservers as fallback),
 `--gateway-nat-cidrs 100.78.0.9/32` (gateway NAT for static/mobile peers),
 `--key-file`, `--manage-firewall`.
 

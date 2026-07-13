@@ -157,10 +157,14 @@ func applyResolvConfDNS(cfg proto.DNSConfig) error {
 	// Snapshot whatever is live right now unless it is already ours, so
 	// repeated applies never overwrite the real original with our own
 	// generated file.
+	original := current
 	if !bytes.HasPrefix(current, []byte(resolvConfMarker)) {
 		if err := os.WriteFile(resolvConfBackupPath, current, 0o644); err != nil {
 			return fmt.Errorf("back up %s: %w", resolvConfPath, err)
 		}
+	} else if backup, err := os.ReadFile(resolvConfBackupPath); err == nil {
+		// Re-apply: the live file is ours; the real original is the backup.
+		original = backup
 	}
 
 	var b strings.Builder
@@ -169,11 +173,73 @@ func applyResolvConfDNS(cfg proto.DNSConfig) error {
 	for _, ns := range cfg.Nameservers {
 		fmt.Fprintf(&b, "nameserver %s\n", ns)
 	}
+
+	if fallbacks := fallbackNameservers(original, cfg.Nameservers); len(fallbacks) > 0 {
+		fmt.Fprintf(&b, "# Fallback: the host's original nameservers, so name resolution\n")
+		fmt.Fprintf(&b, "# (including the control plane's own name) survives mesh DNS loss.\n")
+		for _, ns := range fallbacks {
+			fmt.Fprintf(&b, "nameserver %s\n", ns)
+		}
+		// Default failover waits 5s per dead server; tighten it so a
+		// down mesh resolver degrades to slow lookups, not stalls.
+		fmt.Fprintf(&b, "options timeout:2 attempts:2\n")
+	}
+
 	if len(domains) > 0 {
 		fmt.Fprintf(&b, "search %s\n", strings.Join(domains, " "))
 	}
 
 	return writeResolvConf([]byte(b.String()))
+}
+
+// resolvConfMaxNS is the resolver's MAXNS: entries beyond the third
+// are silently ignored by glibc and musl, so writing them only
+// misleads readers.
+const resolvConfMaxNS = 3
+
+// fallbackNameservers extracts the original resolv.conf's nameservers
+// to append after the pushed ones (when --dns-fallback is on, the
+// default). Without them, a host whose only resolver is the mesh DNS
+// deadlocks when the mesh drops: re-reaching the control plane and
+// relay requires resolving their names, which requires the mesh.
+//
+// Ordering makes glibc and Go treat the originals as timeout-failover
+// only. Musl queries all servers in parallel and may take a public
+// resolver's NXDOMAIN for a mesh name — the known cost of preferring
+// degraded resolution over none; the mesh nameserver usually wins that
+// race, and hosts where it matters can set --dns-fallback=false.
+func fallbackNameservers(original []byte, pushed []string) []string {
+	if !dnsKeepFallback {
+		return nil
+	}
+
+	have := map[string]bool{}
+	for _, ns := range pushed {
+		have[ns] = true
+	}
+
+	var out []string
+
+	for line := range strings.Lines(string(original)) {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "nameserver" {
+			continue
+		}
+
+		addr, err := netip.ParseAddr(fields[1])
+		if err != nil || have[addr.String()] {
+			continue
+		}
+
+		have[addr.String()] = true
+		out = append(out, addr.String())
+
+		if len(pushed)+len(out) >= resolvConfMaxNS {
+			break
+		}
+	}
+
+	return out
 }
 
 func dnsPlainSearchDomains(cfg proto.DNSConfig) []string {

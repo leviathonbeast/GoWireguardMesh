@@ -106,6 +106,7 @@ type telemetryReporter struct {
 	stunFallback   string      // --stun-server value; used until mesh STUN is known
 	stunServers    []string    // mesh STUN endpoints adopted from sync responses
 	publicEndpoint string      // last known public ip:port of the WG socket
+	endpointPinned bool        // --advertise-endpoint: never overwrite publicEndpoint
 	natType        string      // "easy", "hard", or "" unknown
 	portMapper     *portMapper // nil when --port-mapping=false or no router mapping
 	natTick        int         // report ticks since start, for the re-check cadence
@@ -409,6 +410,13 @@ func (t *telemetryReporter) maybeNATCheck() {
 		if natType != "" && natType != t.natType {
 			t.natType = natType
 			slog.Info("nat classified", "type", natType)
+		}
+
+		// A pinned endpoint is operator knowledge (published port,
+		// docker-hairpinned VPS): STUN keeps informing NAT class above,
+		// but never overrides what we advertise.
+		if t.endpointPinned {
+			return
 		}
 
 		mappedIP := mapped.Addr().String()
