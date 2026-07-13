@@ -151,7 +151,15 @@ Flags for `server`:
 | `--dns-domain` | `vpn` | mesh DNS domain/search suffix |
 | `--dns-search-domains` | — | comma-separated search domains; defaults to `--dns-domain` when DNS is enabled |
 | `--dns-magic` | on | push peer-name DNS/search behavior for the mesh domain |
-| `--trust-proxy` | off | trust `X-Forwarded-For` for client IPs — uses the **rightmost** entry, i.e. the hop your (single) trusted proxy appended; only set behind a proxy |
+| `--trust-proxy` | off | trust `X-Forwarded-For` from **any** source — only when the proxy is the sole way to reach this port; prefer `--trusted-proxies` |
+| `--trusted-proxies` | — | CIDRs/IPs whose `X-Forwarded-For` is trusted (rightmost entry); safe when agents also reach the listener directly |
+| `--proxy-protocol` | off | accept PROXY protocol from `--trusted-proxies` sources (SNI-passthrough proxies); restores real client IPs |
+| **ACME (Let's Encrypt)** | | |
+| `--acme-domain` | — | obtain + auto-renew a publicly trusted certificate for these comma-separated names (Cloudflare DNS-01); agents then need no `--server-ca` |
+| `--acme-email` | — | ACME account contact email |
+| `--acme-dns-token-file` | `$CLOUDFLARE_API_TOKEN` | Cloudflare API token (scope: Zone → DNS → Edit) |
+| `--acme-storage` | `acme` | ACME account + certificate directory; must persist across restarts |
+| `--acme-staging` | off | Let's Encrypt staging CA (untrusted certs, no rate limits — for testing) |
 | `--manage-firewall` | on | open the API port on the host firewall; reconciles + removes on exit |
 | **Relay** | | |
 | `--relay-embedded` | off | run the relay in-process (single binary); needs `--relay-host` |
@@ -167,6 +175,66 @@ Flags for `server`:
 | `--log-level` | `info` | minimum console log level: `debug`, `info`, `warn`, `error` (agent has the same flag) |
 | `--flow-retention` | `168h` | flow-log retention (pruned hourly) |
 | `--audit-retention` | `2160h` (90d) | audit-log retention (pruned daily) |
+
+### Serving a publicly trusted certificate directly (no proxy)
+
+With a domain on Cloudflare DNS, the server can hold its own Let's
+Encrypt certificate — NetBird-style single binary, no reverse proxy in
+the mesh path, and agents validate with normal WebPKI (drop
+`--server-ca` from their flags):
+
+```sh
+CLOUDFLARE_API_TOKEN=... ./bin/server \
+  --listen 0.0.0.0:8443 \
+  --acme-domain mesh.example.com \
+  --relay-embedded --relay-host mesh.example.com
+```
+
+DNS-01 proves domain control with a TXT record, so no port 80/443 is
+needed for challenges — the API can live on any port and 443 can stay
+with an existing proxy for other apps. The token wants exactly one
+permission (Zone → DNS → Edit); keep `--acme-storage` on a persistent
+volume or every boot performs a fresh issuance and hits Let's Encrypt
+rate limits. In ACME mode `--relay-host` must be a DNS name covered by
+the certificate (it is added to the SAN set automatically), not an IP.
+A web UI can still sit behind the proxy on the same process — set
+`--trusted-proxies` to the proxy's source subnet so forwarded client
+IPs stay honest while direct agents can't spoof them.
+
+#### Sharing port 443: SNI passthrough (port-free URLs)
+
+When another proxy owns 443, agents can still use a bare
+`https://mesh.example.com` (no port): route the mesh hostname by TLS
+SNI at the TCP level, untouched, to the server. The proxy never
+terminates the mesh's TLS, so its middleware, certificates, and DNS
+health are all out of the mesh path. With Traefik:
+
+```yaml
+tcp:
+  routers:
+    wgmesh:
+      entryPoints: [websecure]
+      rule: "HostSNI(`mesh.example.com`)"
+      service: wgmesh
+      tls:
+        passthrough: true
+  services:
+    wgmesh:
+      loadBalancer:
+        proxyProtocol:
+          version: 2
+        servers:
+          - address: "wgmesh-server:8443"
+```
+
+and on the server add `--proxy-protocol
+--trusted-proxies <proxy subnet>`: passthrough makes every TCP
+connection originate from the proxy, and the PROXY protocol header —
+honored only from `--trusted-proxies` sources — restores the real
+client addresses for rate limiting and the access/audit logs. Direct
+connections to the port keep working alongside (their headers, if any,
+are ignored). The web UI rides the same passthrough; the server's own
+auth and rate limits protect it.
 
 ### Deploying behind Traefik (or another TLS-terminating proxy)
 

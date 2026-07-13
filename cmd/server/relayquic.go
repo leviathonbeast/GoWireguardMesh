@@ -69,17 +69,24 @@ func (s *server) handleRelayQUICInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"endpoint": s.quicEndpoint})
 }
 
-func (s *server) startQUICRelay(port int, certFile, keyFile string) (func(), error) {
+// quicFileTLSConfig serves the QUIC relay from an on-disk pair (the
+// self-signed/pinned mode); ACME mode passes certmagic's config instead.
+func quicFileTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load QUIC TLS certificate: %w", err)
 	}
 
-	ln, err := quic.ListenAddr(net.JoinHostPort("", fmt.Sprint(port)), &tls.Config{
+	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{relayQUICALPN},
 		MinVersion:   tls.VersionTLS13,
-	}, &quic.Config{EnableDatagrams: true, KeepAlivePeriod: 20 * time.Second})
+	}, nil
+}
+
+func (s *server) startQUICRelay(port int, tlsConf *tls.Config) (func(), error) {
+	ln, err := quic.ListenAddr(net.JoinHostPort("", fmt.Sprint(port)), tlsConf,
+		&quic.Config{EnableDatagrams: true, KeepAlivePeriod: 20 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("listen QUIC relay: %w", err)
 	}

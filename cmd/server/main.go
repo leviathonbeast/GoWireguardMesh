@@ -63,16 +63,19 @@ type server struct {
 	adminToken   string
 	sessionKey   []byte // HMAC key for UI session cookies; independent of adminToken
 	trustProxy   bool
-	relay        relayAllocator // nil when no relay is configured
-	relayHost    string         // public data-plane address agents dial
-	wsHub        *relay.WSHub   // nil unless the embedded WS relay is enabled
-	quicHub      *relay.WSHub   // nil unless the embedded QUIC relay is enabled
-	quicEndpoint string         // public host:port agents dial for QUIC relay
-	stunServers  []string       // mesh STUN endpoints advertised to agents; empty when disabled
-	signalHub    *signalHub
-	accessLog    *accessLogSink
-	punchMu      sync.Mutex
-	punchEpochs  map[string]punchEpoch
+	// trustedProxies scopes XFF trust to these source networks, so the
+	// same listener can face both a reverse proxy and direct agents.
+	trustedProxies []netip.Prefix
+	relay          relayAllocator // nil when no relay is configured
+	relayHost      string         // public data-plane address agents dial
+	wsHub          *relay.WSHub   // nil unless the embedded WS relay is enabled
+	quicHub        *relay.WSHub   // nil unless the embedded QUIC relay is enabled
+	quicEndpoint   string         // public host:port agents dial for QUIC relay
+	stunServers    []string       // mesh STUN endpoints advertised to agents; empty when disabled
+	signalHub      *signalHub
+	accessLog      *accessLogSink
+	punchMu        sync.Mutex
+	punchEpochs    map[string]punchEpoch
 }
 
 type punchEpoch struct {
@@ -95,19 +98,74 @@ type punchEpoch struct {
 // topology); the full header chain is still recorded in the access
 // and audit logs for forensics.
 func (s *server) clientIP(r *http.Request) string {
-	if s.trustProxy {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+
+	if s.trustsXFFFrom(host) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			return strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return ""
+	return host
+}
+
+// trustsXFFFrom reports whether X-Forwarded-For from this immediate
+// peer is believed. --trusted-proxies pins trust to the proxy's own
+// source addresses, which stays safe when agents can also reach the
+// listener directly; --trust-proxy is the legacy trust-everyone mode.
+func (s *server) trustsXFFFrom(remoteHost string) bool {
+	if s.trustProxy {
+		return true
 	}
 
-	return host
+	if len(s.trustedProxies) == 0 {
+		return false
+	}
+
+	addr, err := netip.ParseAddr(remoteHost)
+	if err != nil {
+		return false
+	}
+
+	addr = addr.Unmap()
+	for _, p := range s.trustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// parseTrustedProxies parses a comma-separated list of CIDRs; a bare
+// IP is accepted as a single-address prefix.
+func parseTrustedProxies(raw string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		if p, err := netip.ParsePrefix(part); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+
+		addr, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, fmt.Errorf("--trusted-proxies entry %q is neither a CIDR nor an IP", part)
+		}
+
+		out = append(out, netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()))
+	}
+
+	return out, nil
 }
 
 func main() {
@@ -173,7 +231,14 @@ func runServe(args []string) error {
 	sessionKeyFile := fs.String("session-key-file", "session.key", "path to the web-UI session signing key (generated if missing)")
 	adminUser := fs.String("admin-user", "admin", "username seeded on first boot with the admin token as its initial password")
 	flowRetention := fs.Duration("flow-retention", 7*24*time.Hour, "how long to keep flow log rows")
-	trustProxy := fs.Bool("trust-proxy", false, "trust X-Forwarded-For for client addresses (only behind a reverse proxy)")
+	trustProxy := fs.Bool("trust-proxy", false, "trust X-Forwarded-For for client addresses from ANY source (only when a reverse proxy is the sole way to reach this port; prefer --trusted-proxies)")
+	trustedProxies := fs.String("trusted-proxies", "", "comma-separated CIDRs (or bare IPs) of reverse proxies whose X-Forwarded-For is trusted; safe when the listener is also directly reachable")
+	proxyProtocol := fs.Bool("proxy-protocol", false, "accept PROXY protocol from --trusted-proxies sources (for TCP/SNI passthrough proxies); restores real client IPs for rate limiting and logs")
+	acmeDomain := fs.String("acme-domain", "", "obtain a publicly trusted certificate (Let's Encrypt, Cloudflare DNS-01) for these comma-separated names and serve it; agents then need no --server-ca")
+	acmeEmail := fs.String("acme-email", "", "contact email for the ACME account (expiry notices)")
+	acmeDNSTokenFile := fs.String("acme-dns-token-file", "", "path to a Cloudflare API token with Zone/DNS/Edit on the domain's zone (default: $CLOUDFLARE_API_TOKEN)")
+	acmeStorage := fs.String("acme-storage", "acme", "directory for the ACME account and issued certificates; must persist across restarts")
+	acmeStaging := fs.Bool("acme-staging", false, "use the Let's Encrypt staging CA (untrusted test certificates, no rate limits)")
 	relayHost := fs.String("relay-host", "", "address agents dial for relayed traffic (enables relay fallback)")
 	relayEmbedded := fs.Bool("relay-embedded", false, "run the relay inside this process (NetBird-style single binary; no relay-control/secret needed)")
 	relayPortMin := fs.Int("relay-port-min", 51900, "embedded relay: lowest forwarding UDP port")
@@ -206,12 +271,29 @@ func runServe(args []string) error {
 	}
 	slog.Info("wgmesh server starting", "git_commit", buildinfo.Commit())
 
+	if *trustProxy && *trustedProxies != "" {
+		return errors.New("--trust-proxy and --trusted-proxies are mutually exclusive; keep only --trusted-proxies")
+	}
+
 	if *trustProxy && !isLoopback(*listen) {
 		// XFF from a direct client is attacker-controlled; only trust
 		// it when a proxy terminates in front. Binding non-loopback
 		// with trust-proxy means the proxy MUST be the only reachable
 		// front door — warn loudly so a misconfig is visible.
-		slog.Warn("--trust-proxy is set on a non-loopback listener: ensure a reverse proxy is the ONLY thing that can reach this port, or clients can spoof X-Forwarded-For", "listen", *listen)
+		slog.Warn("--trust-proxy is set on a non-loopback listener: ensure a reverse proxy is the ONLY thing that can reach this port, or clients can spoof X-Forwarded-For; --trusted-proxies scopes the trust instead", "listen", *listen)
+	}
+
+	proxyCIDRs, err := parseTrustedProxies(*trustedProxies)
+	if err != nil {
+		return err
+	}
+
+	if *proxyProtocol && len(proxyCIDRs) == 0 {
+		return errors.New("--proxy-protocol requires --trusted-proxies: honoring the header from anyone lets clients forge their address")
+	}
+
+	if *acmeDomain != "" && *noTLS {
+		return errors.New("--acme-domain and --no-tls are mutually exclusive")
 	}
 
 	accessMode, err := parseAccessLogMode(*accessLogRaw)
@@ -318,17 +400,18 @@ func runServe(args []string) error {
 	}
 
 	srv := &server{
-		store:        st,
-		networkCIDR:  networkCfg.NetworkCIDR,
-		network6CIDR: networkCfg.NetworkCIDR6,
-		pskMaster:    networkPSK,
-		deviceKeys:   deviceKeys,
-		adminToken:   adminToken,
-		sessionKey:   sessionKey,
-		trustProxy:   *trustProxy,
-		accessLog:    newAccessLogSink(accessMode, *accessLogSize),
-		signalHub:    newSignalHub(),
-		punchEpochs:  make(map[string]punchEpoch),
+		store:          st,
+		networkCIDR:    networkCfg.NetworkCIDR,
+		network6CIDR:   networkCfg.NetworkCIDR6,
+		pskMaster:      networkPSK,
+		deviceKeys:     deviceKeys,
+		adminToken:     adminToken,
+		sessionKey:     sessionKey,
+		trustProxy:     *trustProxy,
+		trustedProxies: proxyCIDRs,
+		accessLog:      newAccessLogSink(accessMode, *accessLogSize),
+		signalHub:      newSignalHub(),
+		punchEpochs:    make(map[string]punchEpoch),
 	}
 
 	switch {
@@ -508,6 +591,54 @@ func runServe(args []string) error {
 	}
 
 	httpSrv := newHTTPServer(*listen, handler)
+
+	// The listener is built once for every TLS mode so PROXY protocol
+	// (SNI-passthrough proxies) wraps the accept path underneath TLS.
+	ln, err := buildListener(*listen, *proxyProtocol, proxyCIDRs)
+	if err != nil {
+		return err
+	}
+
+	if *proxyProtocol {
+		slog.Info("proxy protocol enabled", "trusted_proxies", *trustedProxies)
+	}
+
+	if *acmeDomain != "" {
+		domains, err := acmeManagedDomains(*acmeDomain, srv.quicHub != nil, *relayHost)
+		if err != nil {
+			return err
+		}
+
+		slog.Info("acme: ensuring certificate (first boot performs a live DNS-01 issuance and can take ~1min)",
+			"domains", strings.Join(domains, ","), "staging", *acmeStaging)
+
+		acmeTLS, err := acmeTLSConfig(context.Background(), domains, *acmeEmail, *acmeDNSTokenFile, *acmeStorage, *acmeStaging)
+		if err != nil {
+			return err
+		}
+
+		httpSrv.TLSConfig = acmeTLS
+
+		if srv.quicHub != nil {
+			quicTLS := acmeTLS.Clone()
+			quicTLS.NextProtos = []string{relayQUICALPN}
+
+			closeQUIC, err := srv.startQUICRelay(*relayQUICPort, quicTLS)
+			if err != nil {
+				return err
+			}
+			defer closeQUIC()
+		}
+
+		slog.Info("control plane up",
+			"url", "https://"+*listen, "network", srv.networkCIDR+srv.network6LogSuffix(), "db", *dbPath)
+		slog.Info("web ui ready", "url", "https://"+*listen+"/", "token_file", *adminTokenFile)
+		slog.Info("certificate is publicly trusted; agents need no --server-ca")
+
+		// Empty cert paths: the listener serves from GetCertificate.
+		return runHTTPListener(httpSrv, ln, true, "", "")
+	}
+
 	hosts := strings.Split(*tlsHosts, ",")
 	for i := range hosts {
 		hosts[i] = strings.TrimSpace(hosts[i])
@@ -521,7 +652,12 @@ func runServe(args []string) error {
 		}
 	}
 	if srv.quicHub != nil {
-		closeQUIC, err := srv.startQUICRelay(*relayQUICPort, *tlsCert, *tlsKey)
+		quicTLS, err := quicFileTLSConfig(*tlsCert, *tlsKey)
+		if err != nil {
+			return err
+		}
+
+		closeQUIC, err := srv.startQUICRelay(*relayQUICPort, quicTLS)
 		if err != nil {
 			return err
 		}
@@ -529,15 +665,15 @@ func runServe(args []string) error {
 	}
 
 	if *noTLS {
-		if !isLoopback(*listen) && !*trustProxy {
-			slog.Warn("serving plain HTTP with no TLS: setup keys, the admin token, and peer tokens cross the wire in cleartext; use only on a trusted network, or put TLS in front (Traefik) and set --trust-proxy", "listen", *listen)
+		if !isLoopback(*listen) && !*trustProxy && len(srv.trustedProxies) == 0 {
+			slog.Warn("serving plain HTTP with no TLS: setup keys, the admin token, and peer tokens cross the wire in cleartext; use only on a trusted network, or put TLS in front (Traefik) and set --trusted-proxies", "listen", *listen)
 		}
 
 		slog.Info("control plane up (plain HTTP; terminate TLS upstream or use for dev only)",
 			"url", "http://"+*listen, "network", srv.networkCIDR+srv.network6LogSuffix(), "db", *dbPath)
 		slog.Info("web ui ready", "url", "http://"+*listen+"/", "token_file", *adminTokenFile)
 
-		return runHTTPServer(httpSrv, false, "", "")
+		return runHTTPListener(httpSrv, ln, false, "", "")
 	}
 
 	slog.Info("control plane up",
@@ -545,7 +681,7 @@ func runServe(args []string) error {
 	slog.Info("web ui ready", "url", "https://"+*listen+"/", "token_file", *adminTokenFile)
 	slog.Info("agents should pin the certificate", "server_ca", *tlsCert)
 
-	return runHTTPServer(httpSrv, true, *tlsCert, *tlsKey)
+	return runHTTPListener(httpSrv, ln, true, *tlsCert, *tlsKey)
 }
 
 func network6CIDR(prefix netip.Prefix) string {

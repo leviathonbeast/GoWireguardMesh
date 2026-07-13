@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,6 +37,18 @@ func NewServer(addr string, handler http.Handler) *http.Server {
 // caller-owned deferred cleanup can run. Hijacked connections (active
 // WebSocket relays) are not waited on; agents re-establish them.
 func RunServer(srv *http.Server, serveTLS bool, certFile, keyFile string) error {
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", srv.Addr, err)
+	}
+
+	return RunServerListener(srv, ln, serveTLS, certFile, keyFile)
+}
+
+// RunServerListener is RunServer over a caller-built listener — the
+// seam for wrapping the accept path (PROXY protocol). With serveTLS,
+// empty cert paths serve from TLSConfig (GetCertificate/Certificates).
+func RunServerListener(srv *http.Server, ln net.Listener, serveTLS bool, certFile, keyFile string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -43,9 +56,9 @@ func RunServer(srv *http.Server, serveTLS bool, certFile, keyFile string) error 
 
 	go func() {
 		if serveTLS {
-			errCh <- srv.ListenAndServeTLS(certFile, keyFile)
+			errCh <- srv.ServeTLS(ln, certFile, keyFile)
 		} else {
-			errCh <- srv.ListenAndServe()
+			errCh <- srv.Serve(ln)
 		}
 	}()
 

@@ -300,6 +300,17 @@ func newPinnedTLSConfig(caFile string) (*tls.Config, error) {
 	return &tls.Config{RootCAs: pool}, nil
 }
 
+// enrollRejectedError is a non-200 answer from the control plane: the
+// request arrived and was refused, as opposed to never getting there.
+// The status code lets startup retry logic separate "server said no"
+// from "server overloaded".
+type enrollRejectedError struct {
+	status int
+	msg    string
+}
+
+func (e *enrollRejectedError) Error() string { return e.msg }
+
 // enroll registers this node with the control plane and returns the
 // mesh configuration. Never sends the private key.
 func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostname string, listenPort int, publicEndpoint string, candidates []proto.AgentCandidate) (*proto.EnrollResponse, error) {
@@ -332,7 +343,7 @@ func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostnam
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("enroll rejected: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return nil, &enrollRejectedError{status: resp.StatusCode, msg: fmt.Sprintf("enroll rejected: %s: %s", resp.Status, strings.TrimSpace(string(body)))}
 	}
 
 	var out proto.EnrollResponse

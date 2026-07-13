@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/netip"
+	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -82,7 +84,7 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 	cleanupFirewall := r.openFirewall(listenPort)
 	defer cleanupFirewall()
 
-	state, err := r.startupState(privateKey, listenPort)
+	state, err := r.startupStateRetry(privateKey, listenPort, stop)
 	if err != nil {
 		return err
 	}
@@ -195,6 +197,58 @@ func (r *agentRunner) openFirewall(listenPort int) func() {
 	}
 }
 
+const (
+	startupRetryMin = 2 * time.Second
+	startupRetryMax = time.Minute
+)
+
+// startupStateRetry retries transient startup failures — control plane
+// not up yet, DNS not ready, STUN unreachable — with capped exponential
+// backoff instead of exiting: a docker-sidecar'd agent routinely boots
+// before the server it enrolls with, and a crash-loop through the
+// container restart policy is just this loop with worse logging.
+// Permanent rejections (bad or revoked setup key) still fail fast.
+func (r *agentRunner) startupStateRetry(privateKey wgtypes.Key, listenPort int, stop <-chan struct{}) (agentStartupState, error) {
+	delay := startupRetryMin
+
+	for {
+		state, err := r.startupState(privateKey, listenPort)
+		if err == nil || isPermanentStartupErr(err) {
+			return state, err
+		}
+
+		slog.Warn("startup failed; retrying", "error", err, "retry_in", delay)
+
+		select {
+		case <-stop:
+			return agentStartupState{}, fmt.Errorf("stopped while retrying startup: %w", err)
+		case <-time.After(delay):
+		}
+
+		delay = min(delay*2, startupRetryMax)
+	}
+}
+
+// isPermanentStartupErr reports whether retrying cannot help: the
+// server understood the request and refused it. 408/429 stay
+// retryable; so do network errors and 5xx, which carry no verdict.
+func isPermanentStartupErr(err error) bool {
+	if errors.Is(err, errSetupKeyRequired) {
+		return true
+	}
+
+	var rejected *enrollRejectedError
+	if errors.As(err, &rejected) {
+		return rejected.status >= 400 && rejected.status < 500 &&
+			rejected.status != http.StatusRequestTimeout &&
+			rejected.status != http.StatusTooManyRequests
+	}
+
+	return false
+}
+
+var errSetupKeyRequired = errors.New("--setup-key is required with --server")
+
 func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agentStartupState, error) {
 	state := agentStartupState{
 		overlayAddr:  r.cfg.Addr,
@@ -206,7 +260,7 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 	}
 
 	if r.cfg.SetupKey == "" {
-		return state, errors.New("--setup-key is required with --server")
+		return state, errSetupKeyRequired
 	}
 
 	hostname := agentHostname(r.cfg.Hostname)

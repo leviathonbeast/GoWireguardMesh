@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 
@@ -30,6 +31,10 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 
 func runHTTPServer(srv *http.Server, serveTLS bool, certFile, keyFile string) error {
 	return httpx.RunServer(srv, serveTLS, certFile, keyFile)
+}
+
+func runHTTPListener(srv *http.Server, ln net.Listener, serveTLS bool, certFile, keyFile string) error {
+	return httpx.RunServerListener(srv, ln, serveTLS, certFile, keyFile)
 }
 
 func securityHeaders(next http.Handler) http.Handler {
