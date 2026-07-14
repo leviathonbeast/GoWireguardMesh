@@ -41,3 +41,11 @@ func applyGatewayRoutes(_ string, routes []string, enabled *bool) error {
 	*enabled = true
 	return nil
 }
+
+// enableMSSClamp is a no-op on non-Linux agents: TCP MSS clamping is
+// programmed via iptables/ip6tables, which only exist on Linux. The
+// overlay MTU is still set per-platform, so only PMTU-blackholed paths
+// are affected here.
+func enableMSSClamp(_ string, _ bool) func() {
+	return func() {}
+}

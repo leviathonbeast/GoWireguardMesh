@@ -114,6 +114,12 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 		return err
 	}
 
+	// Clamp TCP MSS on the overlay so large transfers survive
+	// PMTU-blackholed underlay paths (the classic large-download hang).
+	// Best-effort; teardown runs before the interface is deleted.
+	cleanupMSS := enableMSSClamp(ifaceName, state.overlayAddr6 != "")
+	defer cleanupMSS()
+
 	backend, err := newWGBackend(ifaceName)
 	if err != nil {
 		return err
