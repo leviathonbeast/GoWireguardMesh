@@ -16,6 +16,18 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+// peerLabel renders a peer for logs: "hostname (ab12cd)" when the
+// control plane has told us the name via sync, else the short key
+// alone. Names are advisory only — routing stays keyed on the full
+// public key.
+func (t *telemetryReporter) peerLabel(key wgtypes.Key) string {
+	short := key.String()[:6]
+	if name := t.hostnames[key]; name != "" {
+		return fmt.Sprintf("%s (%s)", name, short)
+	}
+	return short
+}
+
 // directStaleAfter is how long a direct peer may be silent before the
 // agent gives up and asks for a relay. It keys off inbound bytes too:
 // WireGuard rekeys roughly every 120s, but persistent keepalives arrive
@@ -237,7 +249,7 @@ func (t *telemetryReporter) startDirectProbe(peer wgtypes.Key, candidates []*net
 			t.directProbes = make(map[wgtypes.Key]directProbe)
 		}
 		t.directProbes[peer] = probe
-		fmt.Printf("[agent] relay: retrying direct endpoint for %s via %s\n", peer, candidates[0])
+		fmt.Printf("[agent] relay: retrying direct endpoint for %s via %s\n", t.peerLabel(peer), candidates[0])
 	}
 }
 
@@ -252,7 +264,7 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 		peer.LastHandshakeTime.After(probe.started) && directEndpoint {
 		probe.confirmedAt = now
 		t.directProbes[peer.PublicKey] = probe
-		fmt.Printf("[agent] relay: direct handshake with %s; verifying bidirectional stability\n", peer.PublicKey)
+		fmt.Printf("[agent] relay: direct handshake with %s; verifying bidirectional stability\n", t.peerLabel(peer.PublicKey))
 		return
 	}
 
@@ -297,7 +309,7 @@ func (t *telemetryReporter) checkDirectProbe(peer wgtypes.Peer, now time.Time) {
 		}
 
 		t.directProbes[peer.PublicKey] = probe
-		fmt.Printf("[agent] relay: trying next direct endpoint for %s via %s\n", peer.PublicKey, next)
+		fmt.Printf("[agent] relay: trying next direct endpoint for %s via %s\n", t.peerLabel(peer.PublicKey), next)
 
 		return
 	}
@@ -325,7 +337,7 @@ func (t *telemetryReporter) promoteDirect(key wgtypes.Key, now time.Time) {
 	delete(t.quicUnavailable, key)
 	t.firstSeen[key] = now
 
-	fmt.Printf("[agent] relay: bidirectional direct path for %s stable; leaving relay\n", key)
+	fmt.Printf("[agent] relay: bidirectional direct path for %s stable; leaving relay\n", t.peerLabel(key))
 }
 
 func (t *telemetryReporter) restoreRelayAfterProbe(key wgtypes.Key, probe directProbe, now time.Time, reason string) {
@@ -348,7 +360,7 @@ func (t *telemetryReporter) restoreRelayAfterProbe(key wgtypes.Key, probe direct
 	t.directFailures[key]++
 
 	fmt.Printf("[agent] relay: %s for %s; staying on relay (attempt %d)\n",
-		reason, key, t.directFailures[key])
+		reason, t.peerLabel(key), t.directFailures[key])
 }
 
 func (t *telemetryReporter) applyDirectProbeEndpoint(peer wgtypes.Key, endpoint *net.UDPAddr) bool {
@@ -378,7 +390,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 				t.relayEndpoints[peer] = proxy.endpoint()
 				t.pathKinds[peer] = "quic-relay"
 				fmt.Printf("[agent] relay: no handshake with %s for %s, tunnelling WireGuard ciphertext over QUIC\n",
-					peer, silentFor.Round(time.Second))
+					t.peerLabel(peer), silentFor.Round(time.Second))
 				return true
 			}
 			t.quicUnavailable[peer] = true
@@ -395,7 +407,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 		t.wsProxies[peer] = proxy
 		t.relayEndpoints[peer] = proxy.endpoint()
 		t.pathKinds[peer] = "ws-relay"
-		fmt.Printf("[agent] relay: QUIC unavailable; tunnelling WireGuard ciphertext over HTTPS WebSocket for %s\n", peer)
+		fmt.Printf("[agent] relay: QUIC unavailable; tunnelling WireGuard ciphertext over HTTPS WebSocket for %s\n", t.peerLabel(peer))
 		return true
 	case relayWebSocket:
 		proxy, err := t.startWSRelay(peer)
@@ -417,7 +429,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 		t.pathKinds[peer] = "ws-relay"
 
 		fmt.Printf("[agent] relay: no handshake with %s for %s, tunnelling over websocket\n",
-			peer, silentFor.Round(time.Second))
+			t.peerLabel(peer), silentFor.Round(time.Second))
 
 		return true
 
@@ -455,7 +467,7 @@ func (t *telemetryReporter) switchToRelay(peer wgtypes.Key, silentFor time.Durat
 		t.pathKinds[peer] = "udp-relay"
 
 		fmt.Printf("[agent] relay: no handshake with %s for %s, switched to udp relay %s\n",
-			peer, silentFor.Round(time.Second), endpoint)
+			t.peerLabel(peer), silentFor.Round(time.Second), endpoint)
 
 		return true
 	}

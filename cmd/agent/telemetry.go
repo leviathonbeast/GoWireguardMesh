@@ -133,8 +133,9 @@ type telemetryReporter struct {
 	quicProxies     map[wgtypes.Key]*quicRelayProxy
 	pathKinds       map[wgtypes.Key]string
 	quicUnavailable map[wgtypes.Key]bool
-	relayBroken     bool // control plane said no relay; stop asking
-	directProbeOff  bool // keep relay stable after fallback; useful for service sidecars
+	hostnames       map[wgtypes.Key]string // control-plane names from sync, for readable logs
+	relayBroken     bool                   // control plane said no relay; stop asking
+	directProbeOff  bool                   // keep relay stable after fallback; useful for service sidecars
 }
 
 // relayTransport selects how the agent tunnels to a relayed peer.
@@ -204,6 +205,7 @@ func newTelemetryReporter(
 		quicProxies:     make(map[wgtypes.Key]*quicRelayProxy),
 		pathKinds:       make(map[wgtypes.Key]string),
 		quicUnavailable: make(map[wgtypes.Key]bool),
+		hostnames:       make(map[wgtypes.Key]string),
 	}
 
 	dumper, err := newFlowDumper(iface, parseSelfAddr(selfAddr), parseSelfAddr(selfAddr6))
@@ -825,6 +827,10 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 		if err != nil {
 			slog.Warn("bad peer in sync payload", "error", err)
 			return // don't apply a partial view
+		}
+
+		if e.Hostname != "" {
+			t.hostnames[cfg.PublicKey] = e.Hostname
 		}
 
 		t.maybeRetryDirect(cfg.PublicKey, endpointCandidatesFromProto(e, cfg.Endpoint), e.PunchEpoch)

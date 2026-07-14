@@ -80,6 +80,7 @@ func (s *Store) setNetworks(network4, network6 netip.Prefix) {
 type PeerRow struct {
 	ID          int64
 	PublicKey   string
+	Hostname    string // control-plane name; "" if unset
 	AssignedIP  string
 	AssignedIP6 string // "" when the IPv6 overlay is not configured
 
@@ -833,7 +834,7 @@ type querier interface {
 // learns the other's key, overlay IP, or endpoint.
 func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool) ([]PeerRow, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT p.id, p.public_key, p.assigned_ip, COALESCE(p.assigned_ip6, ''),
+		`SELECT p.id, p.public_key, COALESCE(p.hostname, ''), p.assigned_ip, COALESCE(p.assigned_ip6, ''),
 		        COALESCE(p.peer_type, 'agent'), COALESCE(p.gateway_peer_id, 0),
 		        COALESCE(p.public_endpoint, ''), COALESCE(p.observed_ip, ''), COALESCE(p.listen_port, 0),
 		        COALESCE(p.candidates, ''), COALESCE(p.nat_type, '')
@@ -856,7 +857,7 @@ func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool
 
 	for rows.Next() {
 		var p PeerRow
-		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6,
+		if err := rows.Scan(&p.ID, &p.PublicKey, &p.Hostname, &p.AssignedIP, &p.AssignedIP6,
 			&p.PeerType, &p.GatewayPeerID,
 			&p.PublicEndpoint, &p.ObservedIP, &p.ListenPort,
 			&p.CandidatesJSON, &p.NATType); err != nil {

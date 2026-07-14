@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
 	"gowireguard/internal/proto"
 	"gowireguard/internal/store"
 )
@@ -51,7 +53,11 @@ func TestEndpointCandidatesPreferLANForSamePublicEndpoint(t *testing.T) {
 }
 
 func TestEndpointCandidatesSameNATPrefersHostAddresses(t *testing.T) {
-	self := store.PeerRow{PublicEndpoint: "203.0.113.1:51820"}
+	self := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51820",
+		// Same LAN /24 as the peer, so peer's host address is reachable.
+		CandidatesJSON: `[{"endpoint":"192.168.1.9:51820","type":"host"}]`,
+	}
 	peer := store.PeerRow{
 		PublicEndpoint: "203.0.113.1:51821",
 		ObservedIP:     "203.0.113.1", // VPS control plane: observed = shared WAN
@@ -74,6 +80,40 @@ func TestEndpointCandidatesSameNATPrefersHostAddresses(t *testing.T) {
 	}
 	if got[0].Endpoint != "192.168.1.20:51820" {
 		t.Fatalf("first candidate = %q, want the host address", got[0].Endpoint)
+	}
+}
+
+// Two agents behind one WAN IP (same "NAT") but in different docker
+// bridge networks: each advertises a private host address the other
+// cannot route to. The unreachable host candidate must be dropped so
+// the remote does not burn a probe attempt on it.
+func TestEndpointCandidatesSameNATDropsUnreachableDockerHost(t *testing.T) {
+	self := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51820",
+		CandidatesJSON: `[{"endpoint":"172.18.0.5:51820","type":"host"}]`, // proxy net
+	}
+	peer := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51821",
+		ObservedIP:     "203.0.113.1",
+		ListenPort:     51820,
+		CandidatesJSON: `[{"endpoint":"172.22.0.2:51820","type":"host"},` + // different bridge
+			`{"endpoint":"203.0.113.1:60000","type":"upnp"}]`,
+	}
+
+	got := endpointCandidates(self, peer)
+
+	for _, c := range got {
+		if c.Endpoint == "172.22.0.2:51820" {
+			t.Fatalf("unreachable cross-bridge docker host advertised: %+v", got)
+		}
+		if c.Type == "host" {
+			t.Fatalf("no reachable host candidate exists; none should be advertised: %+v", got)
+		}
+	}
+	// The punchable candidates (lan/stun/upnp via the shared WAN) still
+	// make the list — dropping the docker host must not empty it.
+	if len(got) == 0 {
+		t.Fatalf("expected fallback candidates, got none")
 	}
 }
 
@@ -462,5 +502,47 @@ func TestRelayedReportEmitsPunchEpoch(t *testing.T) {
 	}
 	if out.Peers[0].PunchEpoch == 0 {
 		t.Fatalf("PunchEpoch = 0, want nonzero in peer config: %+v", out.Peers[0])
+	}
+}
+
+func TestKeepaliveOrDefault(t *testing.T) {
+	if got := (&server{}).keepaliveOrDefault(); got != defaultKeepaliveSeconds {
+		t.Fatalf("zero-value server: got %d, want default %d", got, defaultKeepaliveSeconds)
+	}
+	if got := (&server{keepalive: 10}).keepaliveOrDefault(); got != 10 {
+		t.Fatalf("configured keepalive: got %d, want 10", got)
+	}
+	if got := (&server{keepalive: -3}).keepaliveOrDefault(); got != defaultKeepaliveSeconds {
+		t.Fatalf("negative keepalive: got %d, want default", got)
+	}
+}
+
+func TestBuildPeerEntriesUsesConfiguredKeepalive(t *testing.T) {
+	pskMaster, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &server{keepalive: 12, pskMaster: pskMaster}
+	self := store.PeerRow{ID: 1, PublicKey: selfKey.PublicKey().String()}
+	other := store.PeerRow{ID: 2, PublicKey: otherKey.PublicKey().String(), PeerType: "agent", AssignedIP: "100.64.0.2"}
+
+	entries, err := srv.buildPeerEntries(self, []store.PeerRow{other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if entries[0].PersistentKeepaliveInterval == nil || *entries[0].PersistentKeepaliveInterval != 12 {
+		t.Fatalf("keepalive = %v, want 12", entries[0].PersistentKeepaliveInterval)
 	}
 }

@@ -39,9 +39,21 @@ import (
 	"gowireguard/internal/tlsutil"
 )
 
-// keepaliveSeconds is handed to every peer. The control plane decides
-// this, not the agent — resolves the old agent-side TODO.
-const keepaliveSeconds = 25
+// defaultKeepaliveSeconds is the WireGuard PersistentKeepalive pushed
+// to every peer unless --keepalive overrides it. The control plane
+// decides this, not the agent. 25s holds most NAT mappings and the
+// tunnel; drop it toward 10s for fleets behind aggressive NATs that
+// expire UDP bindings sooner (the flap-to-relay symptom).
+const defaultKeepaliveSeconds = 25
+
+// keepaliveBounds clamps --keepalive: below ~5s the chatter/battery
+// cost outweighs the benefit, and WireGuard's own handshake retry is
+// ~5s anyway; above 120s most consumer NATs have already dropped the
+// mapping, defeating the point.
+const (
+	minKeepaliveSeconds = 5
+	maxKeepaliveSeconds = 120
+)
 
 const defaultNetwork6CIDR = "fd00:100:64::/64"
 
@@ -66,16 +78,20 @@ type server struct {
 	// trustedProxies scopes XFF trust to these source networks, so the
 	// same listener can face both a reverse proxy and direct agents.
 	trustedProxies []netip.Prefix
-	relay          relayAllocator // nil when no relay is configured
-	relayHost      string         // public data-plane address agents dial
-	wsHub          *relay.WSHub   // nil unless the embedded WS relay is enabled
-	quicHub        *relay.WSHub   // nil unless the embedded QUIC relay is enabled
-	quicEndpoint   string         // public host:port agents dial for QUIC relay
-	stunServers    []string       // mesh STUN endpoints advertised to agents; empty when disabled
-	signalHub      *signalHub
-	accessLog      *accessLogSink
-	punchMu        sync.Mutex
-	punchEpochs    map[string]punchEpoch
+	// keepalive is the WireGuard PersistentKeepalive (seconds) pushed to
+	// every peer. Lower values hold NAT pinholes open on aggressive
+	// routers at the cost of more idle chatter; see --keepalive.
+	keepalive    int
+	relay        relayAllocator // nil when no relay is configured
+	relayHost    string         // public data-plane address agents dial
+	wsHub        *relay.WSHub   // nil unless the embedded WS relay is enabled
+	quicHub      *relay.WSHub   // nil unless the embedded QUIC relay is enabled
+	quicEndpoint string         // public host:port agents dial for QUIC relay
+	stunServers  []string       // mesh STUN endpoints advertised to agents; empty when disabled
+	signalHub    *signalHub
+	accessLog    *accessLogSink
+	punchMu      sync.Mutex
+	punchEpochs  map[string]punchEpoch
 }
 
 type punchEpoch struct {
@@ -223,6 +239,7 @@ func runServe(args []string) error {
 	network := fs.String("network", "100.64.0.0/16", "overlay network (CIDR)")
 	network6 := fs.String("network6", defaultNetwork6CIDR, "IPv6 overlay network (CIDR)")
 	pskFile := fs.String("psk-file", "mesh-psk.key", "path to network preshared key file")
+	keepalive := fs.Int("keepalive", defaultKeepaliveSeconds, "WireGuard PersistentKeepalive (seconds) pushed to every peer; lower it (toward 10) if peers behind aggressive NATs flap direct->relay when idle")
 	noTLS := fs.Bool("no-tls", false, "serve plain HTTP: for dev, or production behind a TLS-terminating reverse proxy (e.g. Traefik)")
 	tlsCert := fs.String("tls-cert", "cert.pem", "path to TLS certificate (self-signed generated if missing)")
 	tlsKey := fs.String("tls-key", "key.pem", "path to TLS private key (generated if missing)")
@@ -290,6 +307,10 @@ func runServe(args []string) error {
 
 	if *proxyProtocol && len(proxyCIDRs) == 0 {
 		return errors.New("--proxy-protocol requires --trusted-proxies: honoring the header from anyone lets clients forge their address")
+	}
+
+	if *keepalive < minKeepaliveSeconds || *keepalive > maxKeepaliveSeconds {
+		return fmt.Errorf("--keepalive must be between %d and %d seconds, got %d", minKeepaliveSeconds, maxKeepaliveSeconds, *keepalive)
 	}
 
 	if *acmeDomain != "" && *noTLS {
@@ -409,6 +430,7 @@ func runServe(args []string) error {
 		sessionKey:     sessionKey,
 		trustProxy:     *trustProxy,
 		trustedProxies: proxyCIDRs,
+		keepalive:      *keepalive,
 		accessLog:      newAccessLogSink(accessMode, *accessLogSize),
 		signalHub:      newSignalHub(),
 		punchEpochs:    make(map[string]punchEpoch),
@@ -965,10 +987,21 @@ func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 	sameNAT := p.PublicEndpoint != "" && self.PublicEndpoint != "" && sameHost(self.PublicEndpoint, p.PublicEndpoint)
 
 	if sameNAT {
+		selfReported := agentCandidates(self)
+
 		for _, c := range reported {
 			switch c.Type {
 			case "host":
-				add(c.Endpoint, "host", 110)
+				// A private host address only routes when the other side
+				// shares its /24 — same LAN, or the same docker network.
+				// Two agents behind one WAN IP but in different docker
+				// bridges (e.g. a sidecar and a co-located control plane)
+				// each advertise a 172.x/10.x the other cannot reach; the
+				// remote wastes a probe attempt on it before falling
+				// through to the punchable candidates.
+				if sameV4Subnet(selfReported, c.Endpoint) {
+					add(c.Endpoint, "host", 110)
+				}
 			case "host6":
 				add(c.Endpoint, "host6", 100)
 			}
@@ -1107,6 +1140,17 @@ func (s *server) pairCandidates(self, p store.PeerRow) []proto.EndpointCandidate
 	return sortCandidates(out)
 }
 
+// keepaliveOrDefault returns the configured keepalive, falling back to
+// the default for zero-valued servers (test literals that never ran
+// through flag parsing) so no peer is ever pushed keepalive 0, which
+// WireGuard reads as "disabled".
+func (s *server) keepaliveOrDefault() int {
+	if s.keepalive <= 0 {
+		return defaultKeepaliveSeconds
+	}
+	return s.keepalive
+}
+
 // buildPeerEntries renders the WireGuard peer list for self out of the
 // peers it may reach. Routed static/mobile peers (an iPhone importing a
 // plain WireGuard config, pinned to a gateway agent) are handled by route,
@@ -1119,7 +1163,7 @@ func (s *server) pairCandidates(self, p store.PeerRow) []proto.EndpointCandidate
 //     (PSK'd, no endpoint hint — it roams in — AllowedIPs = its /32,/128),
 //     and the gateway is told (via GatewayRoutes) to forward without NAT.
 func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([]proto.PeerConfigResponse, error) {
-	keepalive := keepaliveSeconds
+	keepalive := s.keepaliveOrDefault()
 
 	// Group routed mobiles by the gateway agent that carries their /32.
 	mobilesByGateway := make(map[int64][]store.PeerRow)
@@ -1149,6 +1193,7 @@ func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([
 
 		entry := proto.PeerConfigResponse{
 			PublicKey:                   o.PublicKey,
+			Hostname:                    o.Hostname,
 			PresharedKey:                &pairPSK,
 			PunchEpoch:                  s.punchEpoch(self.PublicKey, o.PublicKey),
 			PersistentKeepaliveInterval: &keepalive,

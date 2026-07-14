@@ -337,3 +337,22 @@ func TestMaybeRetryDirectBackoffAndCandidateReset(t *testing.T) {
 		t.Fatal("new candidate set did not re-arm a prompt direct probe")
 	}
 }
+
+func TestPeerLabel(t *testing.T) {
+	var key wgtypes.Key
+	for i := range key {
+		key[i] = byte(i)
+	}
+	short := key.String()[:6]
+
+	tel := &telemetryReporter{hostnames: map[wgtypes.Key]string{}}
+
+	if got := tel.peerLabel(key); got != short {
+		t.Fatalf("unknown peer: got %q, want short key %q", got, short)
+	}
+
+	tel.hostnames[key] = "traefik"
+	if want := "traefik (" + short + ")"; tel.peerLabel(key) != want {
+		t.Fatalf("named peer: got %q, want %q", tel.peerLabel(key), want)
+	}
+}

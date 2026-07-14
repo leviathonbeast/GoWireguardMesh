@@ -337,7 +337,7 @@ func (s *server) mobileWireGuardConfig(peer store.PeerInfo, privateKey, gatewayP
 		allowed = append(allowed, network6)
 	}
 	fmt.Fprintf(&b, "AllowedIPs = %s\n", strings.Join(allowed, ", "))
-	fmt.Fprintf(&b, "PersistentKeepalive = %d\n", keepaliveSeconds)
+	fmt.Fprintf(&b, "PersistentKeepalive = %d\n", s.keepaliveOrDefault())
 
 	return b.String()
 }

@@ -145,6 +145,7 @@ Flags for `server`:
 | `--session-key-file` | `session.key` | HMAC key for web-UI session cookies (generated if missing) |
 | `--admin-user` | `admin` | username seeded on first boot with the admin token as its initial password |
 | `--default-policy` | `allow` | ACL default: `allow` (open mesh) or `deny` (rule-connected pairs only) |
+| `--keepalive` | `25` | WireGuard PersistentKeepalive (seconds, 5–120) pushed to every peer; lower toward 10 if peers behind aggressive NATs flap direct→relay when idle |
 | **DNS** | | |
 | `--dns-enabled` | off | push DNS settings to enrolled agents |
 | `--dns-nameservers` | — | comma-separated IPv4/IPv6 DNS server IPs to push, e.g. your CoreDNS overlay IPs |

@@ -74,6 +74,11 @@ type DNSConfig struct {
 type PeerConfigResponse struct {
 	PublicKey string `json:"public_key"`
 
+	// Hostname is the peer's control-plane name, for human-readable
+	// agent logs (relay/probe lines). Advisory only — never used for
+	// routing or identity, which are keyed on PublicKey.
+	Hostname string `json:"hostname,omitempty"`
+
 	PresharedKey *string `json:"preshared_key,omitempty"`
 
 	Endpoint *string `json:"endpoint,omitempty"`
