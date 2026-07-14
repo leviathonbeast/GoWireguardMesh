@@ -78,3 +78,29 @@ func TestGatherLocalCandidatesSuppressesV6WhenNotAdvertising(t *testing.T) {
 		}
 	}
 }
+
+// A cached reflexive v6 endpoint is emitted as a stun6 candidate, and
+// suppressed when withdrawn (v6 stopped answering STUN).
+func TestSelfCandidatesIncludesV6Endpoint(t *testing.T) {
+	tel := &telemetryReporter{
+		listenPort:      51820,
+		publicEndpoint6: "[2001:db8::7]:51820",
+	}
+
+	found := false
+	for _, c := range tel.selfCandidates() {
+		if c.Type == "stun6" && c.Endpoint == "[2001:db8::7]:51820" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("stun6 candidate not present: %+v", tel.selfCandidates())
+	}
+
+	tel.publicEndpoint6 = ""
+	for _, c := range tel.selfCandidates() {
+		if c.Type == "stun6" {
+			t.Fatalf("stun6 candidate emitted after withdrawal: %+v", tel.selfCandidates())
+		}
+	}
+}

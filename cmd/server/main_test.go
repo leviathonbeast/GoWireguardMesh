@@ -546,3 +546,43 @@ func TestBuildPeerEntriesUsesConfiguredKeepalive(t *testing.T) {
 		t.Fatalf("keepalive = %v, want 12", entries[0].PersistentKeepaliveInterval)
 	}
 }
+
+// A reachability-proven stun6 endpoint must rank above every v4
+// traversal path in both same-NAT and cross-NAT topologies — v6 needs
+// no NAT traversal, so it is the best available direct path.
+func TestEndpointCandidatesStun6RanksFirst(t *testing.T) {
+	stun6 := "[2001:db8::5]:51820"
+
+	// Cross-NAT: different WAN IPs.
+	self := store.PeerRow{PublicEndpoint: "198.51.100.7:51820"}
+	peer := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51821",
+		CandidatesJSON: `[{"endpoint":"` + stun6 + `","type":"stun6"},` +
+			`{"endpoint":"203.0.113.1:60000","type":"upnp"}]`,
+	}
+	got := endpointCandidates(self, peer)
+	if len(got) == 0 || got[0].Type != "stun6" || got[0].Endpoint != stun6 {
+		t.Fatalf("cross-NAT: stun6 should rank first, got %+v", got)
+	}
+
+	// Same-NAT: shared WAN IP.
+	self2 := store.PeerRow{PublicEndpoint: "203.0.113.1:51820"}
+	peer2 := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51821",
+		ObservedIP:     "203.0.113.1",
+		ListenPort:     51820,
+		CandidatesJSON: `[{"endpoint":"` + stun6 + `","type":"stun6"}]`,
+	}
+	got2 := endpointCandidates(self2, peer2)
+	if len(got2) == 0 || got2[0].Type != "stun6" {
+		t.Fatalf("same-NAT: stun6 should rank first, got %+v", got2)
+	}
+}
+
+func TestEncodeAgentCandidatesKeepsStun6(t *testing.T) {
+	in := []proto.AgentCandidate{{Endpoint: "[2001:db8::9]:51820", Type: "stun6"}}
+	got := agentCandidates(store.PeerRow{CandidatesJSON: encodeAgentCandidates(in)})
+	if len(got) != 1 || got[0].Type != "stun6" {
+		t.Fatalf("stun6 candidate not preserved: %+v", got)
+	}
+}

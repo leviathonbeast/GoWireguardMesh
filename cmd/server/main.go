@@ -257,6 +257,7 @@ func runServe(args []string) error {
 	acmeStorage := fs.String("acme-storage", "acme", "directory for the ACME account and issued certificates; must persist across restarts")
 	acmeStaging := fs.Bool("acme-staging", false, "use the Let's Encrypt staging CA (untrusted test certificates, no rate limits)")
 	relayHost := fs.String("relay-host", "", "address agents dial for relayed traffic (enables relay fallback)")
+	relayHost6 := fs.String("relay-host6", "", "optional IPv6 address of this relay host; advertised so agents can refresh their reflexive v6 endpoint against the mesh's own STUN")
 	relayEmbedded := fs.Bool("relay-embedded", false, "run the relay inside this process (NetBird-style single binary; no relay-control/secret needed)")
 	relayPortMin := fs.Int("relay-port-min", 51900, "embedded relay: lowest forwarding UDP port")
 	relayPortMax := fs.Int("relay-port-max", 51999, "embedded relay: highest forwarding UDP port")
@@ -476,7 +477,16 @@ func runServe(args []string) error {
 					net.JoinHostPort(*relayHost, strconv.Itoa(*stunPort)),
 					net.JoinHostPort(*relayHost, strconv.Itoa(*stunPort+1)),
 				}
-				slog.Info("mesh stun enabled", "ports", []int{*stunPort, *stunPort + 1}, "host", *relayHost)
+				// The responder binds dual-stack, so with a v6 relay
+				// address advertised, agents can also refresh their
+				// reflexive v6 endpoint against the mesh's own STUN.
+				if *relayHost6 != "" {
+					srv.stunServers = append(srv.stunServers,
+						net.JoinHostPort(*relayHost6, strconv.Itoa(*stunPort)),
+						net.JoinHostPort(*relayHost6, strconv.Itoa(*stunPort+1)),
+					)
+				}
+				slog.Info("mesh stun enabled", "ports", []int{*stunPort, *stunPort + 1}, "host", *relayHost, "host6", *relayHost6)
 			}
 		}
 
@@ -893,7 +903,7 @@ func encodeAgentCandidates(cands []proto.AgentCandidate) string {
 		}
 
 		switch c.Type {
-		case "host", "host6", "upnp":
+		case "host", "host6", "stun6", "upnp":
 		default:
 			continue
 		}
@@ -1004,6 +1014,10 @@ func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 				}
 			case "host6":
 				add(c.Endpoint, "host6", 100)
+			case "stun6":
+				// Reachability-proven global v6: no NAT to traverse, so
+				// it's the best path when both sides have working v6.
+				add(c.Endpoint, "stun6", 130)
 			}
 		}
 		if lan != nil {
@@ -1018,6 +1032,13 @@ func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 	} else {
 		selfReported := agentCandidates(self)
 
+		// Reachability-proven global v6 outranks every v4 traversal path:
+		// no NAT, no hole punch, works across different v4 NATs outright.
+		for _, c := range reported {
+			if c.Type == "stun6" {
+				add(c.Endpoint, "stun6", 130)
+			}
+		}
 		for _, c := range reported {
 			if c.Type == "upnp" {
 				add(c.Endpoint, "upnp", 120)

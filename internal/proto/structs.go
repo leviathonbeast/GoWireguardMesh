@@ -23,8 +23,8 @@ type EnrollRequest struct {
 type AgentCandidate struct {
 	Endpoint string `json:"endpoint"`
 	// Type is "host" (an IPv4 interface address), "host6" (a global
-	// IPv6 interface address), or "upnp" (a router mapping obtained
-	// via UPnP/NAT-PMP).
+	// IPv6 interface address), "stun6" (a STUN-reflexive, reachability-
+	// proven global IPv6 endpoint), or "upnp" (a UPnP/NAT-PMP mapping).
 	Type string `json:"type"`
 }
 

@@ -9,7 +9,7 @@ import (
 	"github.com/pion/stun/v3"
 )
 
-// discoverPublicEndpoint asks a STUN server how this host's
+// discoverPublicEndpoint asks a STUN server how this host's IPv4
 // listenPort appears from the internet, returning "ip:port".
 //
 // It must run while the WireGuard interface does NOT exist: it binds
@@ -18,13 +18,28 @@ import (
 // For endpoint-independent ("full cone"-ish) NATs that mapping stays
 // valid; symmetric NATs will defeat this and need the relay.
 func discoverPublicEndpoint(stunServer string, listenPort int) (string, error) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: listenPort})
+	return discoverPublicEndpointFamily("udp4", stunServer, listenPort)
+}
+
+// discoverPublicEndpoint6 does the same over IPv6. Global v6 is almost
+// never NATed, so the reflected address is normally this host's own
+// global address — the point here is reachability: a value comes back
+// only if the v6 STUN server could actually reach the bound port, which
+// is exactly the signal for whether to advertise a v6 direct endpoint.
+// No v6 connectivity (or a firewalled port) fails, and the caller
+// simply omits the v6 candidate.
+func discoverPublicEndpoint6(stunServer string, listenPort int) (string, error) {
+	return discoverPublicEndpointFamily("udp6", stunServer, listenPort)
+}
+
+func discoverPublicEndpointFamily(network, stunServer string, listenPort int) (string, error) {
+	conn, err := net.ListenUDP(network, &net.UDPAddr{Port: listenPort})
 	if err != nil {
-		return "", fmt.Errorf("bind udp port %d for STUN: %w", listenPort, err)
+		return "", fmt.Errorf("bind %s port %d for STUN: %w", network, listenPort, err)
 	}
 	defer conn.Close()
 
-	mapped, err := stunQuery(conn, stunServer, 5*time.Second)
+	mapped, err := stunQueryFamily(conn, network, stunServer, 5*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -32,11 +47,17 @@ func discoverPublicEndpoint(stunServer string, listenPort int) (string, error) {
 	return mapped.String(), nil
 }
 
-// stunQuery sends one binding request from conn and returns the mapped
-// address the server saw. The conn is reusable across queries (each
-// call reads until it sees its own transaction ID or times out).
+// stunQuery sends one binding request from an IPv4 conn.
 func stunQuery(conn *net.UDPConn, stunServer string, timeout time.Duration) (netip.AddrPort, error) {
-	serverAddr, err := net.ResolveUDPAddr("udp4", stunServer)
+	return stunQueryFamily(conn, "udp4", stunServer, timeout)
+}
+
+// stunQueryFamily sends one binding request from conn and returns the
+// mapped address the server saw, resolving the server in the given
+// family. The conn is reusable across queries (each call reads until it
+// sees its own transaction ID or times out).
+func stunQueryFamily(conn *net.UDPConn, network, stunServer string, timeout time.Duration) (netip.AddrPort, error) {
+	serverAddr, err := net.ResolveUDPAddr(network, stunServer)
 	if err != nil {
 		return netip.AddrPort{}, fmt.Errorf("resolve STUN server %q: %w", stunServer, err)
 	}
@@ -81,6 +102,22 @@ func stunQuery(conn *net.UDPConn, stunServer string, timeout time.Duration) (net
 
 		return netip.AddrPortFrom(addr.Unmap(), uint16(mapped.Port)), nil
 	}
+}
+
+// stunReflexive6 probes a v6-capable STUN server from a throwaway
+// ephemeral socket and returns the reflexive mapping. Used by the
+// periodic refresh: the kernel owns the WG port, so this measures the
+// current public v6 address (v6 is not NATed in practice, so the
+// caller pairs the returned IP with the WG listen port). Failure means
+// no usable global v6 right now — the v6 endpoint should be withdrawn.
+func stunReflexive6(stunServer string) (netip.AddrPort, error) {
+	conn, err := net.ListenUDP("udp6", nil)
+	if err != nil {
+		return netip.AddrPort{}, fmt.Errorf("bind ephemeral v6 socket for STUN: %w", err)
+	}
+	defer conn.Close()
+
+	return stunQueryFamily(conn, "udp6", stunServer, 3*time.Second)
 }
 
 // checkNAT probes STUN servers from one throwaway ephemeral socket.

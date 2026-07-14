@@ -22,18 +22,19 @@ type agentRunner struct {
 }
 
 type agentStartupState struct {
-	overlayAddr    string
-	overlayAddr6   string
-	enrolledPeers  []wgtypes.PeerConfig
-	gatewayRoutes  []string
-	authToken      string
-	initialACL     *proto.ACLPolicy
-	initialDNS     proto.DNSConfig
-	networkPrefix  netip.Prefix
-	networkPrefix6 netip.Prefix
-	publicEndpoint string   // startup STUN result, "" if unavailable
-	stunServers    []string // mesh STUN endpoints from enrollment
-	listenPort     int
+	overlayAddr     string
+	overlayAddr6    string
+	enrolledPeers   []wgtypes.PeerConfig
+	gatewayRoutes   []string
+	authToken       string
+	initialACL      *proto.ACLPolicy
+	initialDNS      proto.DNSConfig
+	networkPrefix   netip.Prefix
+	networkPrefix6  netip.Prefix
+	publicEndpoint  string   // startup STUN result, "" if unavailable
+	publicEndpoint6 string   // startup reflexive v6 endpoint, "" if none
+	stunServers     []string // mesh STUN endpoints from enrollment
+	listenPort      int
 }
 
 func (r *agentRunner) run(stop <-chan struct{}) error {
@@ -291,6 +292,16 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 	// Host candidates gathered before the interface exists — nothing to
 	// exclude yet beyond the built-in filters; overlay prefixes are only
 	// assigned after enrollment.
+	candidates := gatherLocalCandidates(effectivePort, r.cfg.ManageFirewall)
+
+	// A STUN-reflexive v6 endpoint is only produced when v6 actually
+	// works and the port is reachable, so it's a genuine direct-path
+	// candidate — added here so peers get it from first enrollment.
+	publicEndpoint6 := r.discoverPublicEndpoint6(effectivePort)
+	if publicEndpoint6 != "" {
+		candidates = append(candidates, proto.AgentCandidate{Endpoint: publicEndpoint6, Type: "stun6"})
+	}
+
 	resp, err := enroll(
 		r.cfg.Server,
 		r.cfg.SetupKey,
@@ -299,7 +310,7 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 		hostname,
 		effectivePort,
 		publicEndpoint,
-		gatherLocalCandidates(effectivePort, r.cfg.ManageFirewall),
+		candidates,
 	)
 	if err != nil {
 		return state, err
@@ -310,6 +321,7 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 	state.initialDNS = resp.DNS
 	state.gatewayRoutes = resp.GatewayRoutes
 	state.publicEndpoint = publicEndpoint
+	state.publicEndpoint6 = publicEndpoint6
 	state.stunServers = resp.STUNServers
 	state.listenPort = effectivePort
 
@@ -373,6 +385,29 @@ func (r *agentRunner) discoverPublicEndpoint(listenPort int) (string, error) {
 	agentPrintf("[agent] stun public endpoint: %s\n", publicEndpoint)
 
 	return publicEndpoint, nil
+}
+
+// discoverPublicEndpoint6 probes the STUN server over IPv6 and returns
+// a reflexive v6 endpoint, or "" if the host has no usable global v6
+// (no connectivity, firewalled, or the STUN server has no AAAA). A
+// value coming back IS the reachability signal, so unlike interface
+// enumeration this never advertises a v6 address a peer can't reach.
+// Disabled when --advertise-endpoint pins a specific endpoint or STUN
+// is off; best-effort otherwise (failure returns "" without erroring).
+func (r *agentRunner) discoverPublicEndpoint6(listenPort int) string {
+	if r.cfg.AdvertiseEndpoint != "" || r.cfg.STUNServer == "" || r.cfg.NoIPv6 {
+		return ""
+	}
+
+	ep6, err := discoverPublicEndpoint6(r.cfg.STUNServer, listenPort)
+	if err != nil {
+		slog.Debug("v6 stun discovery unavailable; no v6 direct endpoint advertised", "error", err)
+		return ""
+	}
+
+	agentPrintf("[agent] stun public v6 endpoint: %s\n", ep6)
+
+	return ep6
 }
 
 // validateAdvertiseEndpoint rejects a malformed --advertise-endpoint at
@@ -498,6 +533,9 @@ func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) 
 	reporter.stunFallback = r.cfg.STUNServer
 	reporter.stunServers = state.stunServers
 	reporter.advertiseV6 = r.cfg.ManageFirewall
+	reporter.publicEndpoint6 = state.publicEndpoint6
+	reporter.stun6Server = r.cfg.STUNServer
+	reporter.noIPv6 = r.cfg.NoIPv6
 
 	if r.cfg.PortMapping {
 		reporter.portMapper = newPortMapper(state.listenPort)

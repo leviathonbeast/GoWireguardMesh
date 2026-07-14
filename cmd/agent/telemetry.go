@@ -102,15 +102,18 @@ type telemetryReporter struct {
 	// NAT-traversal material shipped with every report. listenPort and
 	// stunFallback are set once by the runner; the rest is refreshed by
 	// maybeNATCheck (async, so guarded by syncMu like the relay state).
-	listenPort     int
-	stunFallback   string      // --stun-server value; used until mesh STUN is known
-	stunServers    []string    // mesh STUN endpoints adopted from sync responses
-	publicEndpoint string      // last known public ip:port of the WG socket
-	endpointPinned bool        // --advertise-endpoint: never overwrite publicEndpoint
-	natType        string      // "easy", "hard", or "" unknown
-	portMapper     *portMapper // nil when --port-mapping=false or no router mapping
-	natTick        int         // report ticks since start, for the re-check cadence
-	natBusy        atomic.Bool // one NAT check in flight at a time
+	listenPort      int
+	stunFallback    string      // --stun-server value; used until mesh STUN is known
+	stunServers     []string    // mesh STUN endpoints adopted from sync responses
+	publicEndpoint  string      // last known public ip:port of the WG socket
+	publicEndpoint6 string      // last known reflexive v6 endpoint, "" if none
+	endpointPinned  bool        // --advertise-endpoint: never overwrite publicEndpoint
+	stun6Server     string      // v6-capable STUN for the periodic v6 refresh; "" disables
+	noIPv6          bool        // --no-ipv6-endpoints: never advertise v6 direct
+	natType         string      // "easy", "hard", or "" unknown
+	portMapper      *portMapper // nil when --port-mapping=false or no router mapping
+	natTick         int         // report ticks since start, for the re-check cadence
+	natBusy         atomic.Bool // one NAT check in flight at a time
 
 	prevLink map[wgtypes.Key]linkCounters
 	prevFlow map[flowKey]flowCounters
@@ -422,6 +425,11 @@ func (t *telemetryReporter) maybeNATCheck() {
 			slog.Info("nat classified", "type", natType)
 		}
 
+		// Refresh the reflexive v6 endpoint on the same cadence, before
+		// the v4 early-return below so it runs even when the v4 IP is
+		// unchanged.
+		t.refreshV6Endpoint()
+
 		mappedIP := mapped.Addr().String()
 		curHost := ""
 		if h, _, err := net.SplitHostPort(t.publicEndpoint); err == nil {
@@ -457,7 +465,41 @@ func (t *telemetryReporter) selfCandidates() []proto.AgentCandidate {
 		}
 	}
 
+	// The reflexive v6 endpoint (refreshed by maybeNATCheck) is a
+	// reachability-proven direct path — kept as its own candidate so a
+	// v6 address that stops answering STUN drops out on the next check.
+	if t.publicEndpoint6 != "" {
+		out = append(out, proto.AgentCandidate{Endpoint: t.publicEndpoint6, Type: "stun6"})
+	}
+
 	return out
+}
+
+// refreshV6Endpoint re-probes the reflexive v6 endpoint from a throwaway
+// socket and updates publicEndpoint6. The kernel owns the WG port, so
+// (like the v4 NAT check) this uses an ephemeral socket: v6 is not NATed
+// in practice, so the reflected IP paired with the WG listen port is the
+// endpoint peers dial. A failure clears it — a v6 path that stopped
+// working must stop being advertised. Best-effort; runs under syncMu.
+func (t *telemetryReporter) refreshV6Endpoint() {
+	if t.noIPv6 || t.endpointPinned || t.stun6Server == "" {
+		return
+	}
+
+	mapped, err := stunReflexive6(t.stun6Server)
+	if err != nil {
+		if t.publicEndpoint6 != "" {
+			slog.Debug("v6 endpoint no longer reachable; withdrawing", "error", err)
+			t.publicEndpoint6 = ""
+		}
+		return
+	}
+
+	ep6 := net.JoinHostPort(mapped.Addr().String(), strconv.Itoa(t.listenPort))
+	if ep6 != t.publicEndpoint6 {
+		t.publicEndpoint6 = ep6
+		fmt.Printf("[agent] v6 direct endpoint now advertising %s\n", ep6)
+	}
 }
 
 func (t *telemetryReporter) collect() {

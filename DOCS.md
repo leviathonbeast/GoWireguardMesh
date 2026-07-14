@@ -78,6 +78,7 @@ The UI is embedded via `go:embed`, so plain `go build` needs no Node. After edit
 | **Relay** | | |
 | `--relay-embedded` | off | run relay in-process (needs `--relay-host`) |
 | `--relay-host` | — | address agents dial for relayed traffic |
+| `--relay-host6` | — | optional v6 address of the relay host; lets agents refresh their v6 endpoint against the mesh's STUN |
 | `--relay-quic-port` | `51890` | QUIC datagram relay port |
 | `--relay-port-min` / `-max` | `51900` / `51999` | UDP relay range |
 | `--stun-port` | `3478` | mesh STUN (this port + next; `0` disables) |
@@ -122,6 +123,7 @@ sudo ./bin/agent --server https://192.168.1.10:8443 --setup-key <token> --server
 | `--port-mapping=false` | don't ask the router to forward the WG port (UPnP/NAT-PMP) |
 | `--dns-fallback=false` | resolv.conf mode: don't keep original nameservers as fallback |
 | `--gateway-nat-cidrs 100.78.0.9/32` | masquerade static/mobile peers through this agent (legacy; prefer routed mobiles) |
+| `--no-ipv6-endpoints` | never advertise IPv6 direct endpoints for this host (v4 + overlay v6 unaffected) |
 | `--stun-server`, `--key-file`, `--manage-firewall` | STUN server / key path / firewall toggle |
 
 ### Standalone mode (no control plane)
@@ -174,7 +176,9 @@ Connectivity is attempted in this order, all automatic:
 
 1. **Router port mapping (UPnP/NAT-PMP)** — `--port-mapping` (on) asks the router to forward the WG port. Narrow by design: own listen port only, UDP, lease-limited (30 min), labeled `wgmesh-agent`, removed on shutdown; double-NAT is detected and skipped.
 2. **STUN** — the agent probes from the *same port* WireGuard uses so the mapping is valid for tunnel traffic. With a relay, the mesh serves **its own STUN** (`--stun-port` + next); periodic re-checks catch IP changes and classify NAT as **easy** (hole-punchable) or **hard** (symmetric) — shown per peer, used to skip unpunchable hard↔hard pairs.
-3. **Endpoint candidates** — the server distributes each peer's ordered candidates (host addresses, router mappings, STUN, relay-observed live mapping, server-observed source). Ordering flips on topology: same WAN IP → LAN paths first; different NATs → mappings/STUN first, private v4 only on a shared /24. Hints only; WireGuard roaming overrides them.
+3. **Endpoint candidates** — the server distributes each peer's ordered candidates (host addresses, router mappings, STUN, relay-observed live mapping, server-observed source, and a reachability-proven IPv6 endpoint). Ordering flips on topology: a working global-v6 (`stun6`) path ranks first when present (no NAT to traverse); then same WAN IP → LAN paths, different NATs → mappings/STUN, private v4 only on a shared /24. Hints only; WireGuard roaming overrides them.
+
+   **IPv6 direct paths** — the agent probes STUN over v6 from the WireGuard port; a reflected address (proving the port is actually reachable over v6) is advertised as a `stun6` candidate and, because v6 needs no NAT traversal, preferred over every v4 path. It's only advertised when v6 genuinely works — no connectivity, a firewalled port, or `--no-ipv6-endpoints` yields nothing, so peers never waste probes on unreachable v6. `host6` interface candidates are likewise gated on the agent managing its own firewall (SLAAC privacy addresses are always skipped). Set `--relay-host6` on the server to let agents refresh their v6 endpoint against the mesh's own STUN instead of a public one.
 4. **Relay fallback** — if a direct peer goes silent 90s, the agent moves it to a relay. The relay is a dumb forwarder: it only ever sees WireGuard ciphertext (can drop, never read or forge), on a lock-free path that rejects non-WireGuard-shaped packets. Replaces TURN, which kernel WireGuard can't speak.
 
 **Relay transports** (`--relay-transport auto` tries first two):
