@@ -4,6 +4,7 @@ import type { AppCtx } from "../appctx";
 import type { DNSConfig, NetworkMigrationPlan } from "../types";
 import { parseListInput, splitNameservers } from "../lib/format";
 import { migrationChangeMatches } from "../lib/match";
+import { randomOverlayV4, randomOverlayV6 } from "../lib/randomnet";
 import { Badge, PageHead, Paginated, SearchBox, Section } from "../components/ui";
 
 export default function Settings({ ctx }: { ctx: AppCtx }) {
@@ -41,6 +42,20 @@ export default function Settings({ ctx }: { ctx: AppCtx }) {
     setDNSNameservers6(nameservers.v6.join("\n"));
     setDNSSearchDomains((d.search_domains || []).join("\n"));
   }
+
+  // Fill the editor with a random private v4/v6 pair that avoids the
+  // active overlay, whatever is currently typed, and Docker's default
+  // pools (the generator's built-in exclusions).
+  const randomizeNetwork = () => {
+    ctx.setError("");
+    try {
+      setNetworkCIDR(randomOverlayV4([network.network_cidr, networkCIDR]));
+      setNetworkCIDR6(randomOverlayV6([network.network_cidr6, networkCIDR6]));
+      setPlan(null);
+    } catch (e) {
+      ctx.setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const previewMigration = async () => {
     ctx.setError("");
@@ -173,9 +188,16 @@ export default function Settings({ ctx }: { ctx: AppCtx }) {
                   }}
                 />
               </label>
-              <div>
+              <div className="flex items-center gap-2">
                 <button className="btn-primary" onClick={() => void previewMigration()}>
                   preview changes
+                </button>
+                <button
+                  className="btn-ghost"
+                  title="Fill in a random private IPv4 /16 and IPv6 ULA /64 that avoid the current overlay and Docker's default subnets"
+                  onClick={randomizeNetwork}
+                >
+                  randomize ranges
                 </button>
               </div>
             </div>
