@@ -42,13 +42,13 @@ func TestGatherLocalCandidatesExcludesAndFormats(t *testing.T) {
 	all4 := netip.MustParsePrefix("0.0.0.0/0")
 	all6 := netip.MustParsePrefix("::/0")
 
-	if got := gatherLocalCandidates(51820, all4, all6); len(got) != 0 {
+	if got := gatherLocalCandidates(51820, true, all4, all6); len(got) != 0 {
 		t.Fatalf("gatherLocalCandidates with everything excluded = %v, want none", got)
 	}
 
 	// Unfiltered: whatever comes back must be well-formed, carry the
 	// listen port, and never be loopback/link-local.
-	for _, c := range gatherLocalCandidates(51820) {
+	for _, c := range gatherLocalCandidates(51820, true) {
 		if c.Type != "host" && c.Type != "host6" {
 			t.Errorf("candidate type = %q, want host/host6", c.Type)
 		}
@@ -65,6 +65,16 @@ func TestGatherLocalCandidatesExcludesAndFormats(t *testing.T) {
 		}
 		if strings.Contains(c.Endpoint, "%") {
 			t.Errorf("candidate %q carries a zone", c.Endpoint)
+		}
+	}
+}
+
+// With advertiseV6 off (the --manage-firewall=false case), no host6
+// candidate may ever be produced, whatever v6 addresses this host has.
+func TestGatherLocalCandidatesSuppressesV6WhenNotAdvertising(t *testing.T) {
+	for _, c := range gatherLocalCandidates(51820, false) {
+		if c.Type == "host6" {
+			t.Errorf("host6 candidate %q emitted with advertiseV6=false", c.Endpoint)
 		}
 	}
 }

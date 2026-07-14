@@ -299,7 +299,7 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 		hostname,
 		effectivePort,
 		publicEndpoint,
-		gatherLocalCandidates(effectivePort),
+		gatherLocalCandidates(effectivePort, r.cfg.ManageFirewall),
 	)
 	if err != nil {
 		return state, err
@@ -497,6 +497,7 @@ func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) 
 	}
 	reporter.stunFallback = r.cfg.STUNServer
 	reporter.stunServers = state.stunServers
+	reporter.advertiseV6 = r.cfg.ManageFirewall
 
 	if r.cfg.PortMapping {
 		reporter.portMapper = newPortMapper(state.listenPort)

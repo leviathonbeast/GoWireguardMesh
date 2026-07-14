@@ -31,14 +31,26 @@ var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 // Excluded: loopback, link-local, CGNAT space, the mesh's own overlay
 // prefixes and interface (those route through the tunnel being set
 // up), and ULA IPv6 (no way to tell site ULA from another mesh's; the
-// same-LAN case is covered by the v4 candidates). Global IPv6 is
-// included — v6 pairs need no NAT traversal at all. WireGuard binds
-// dual-stack, so the one listen port serves every address.
-func gatherLocalCandidates(listenPort int, overlays ...netip.Prefix) []proto.AgentCandidate {
+// same-LAN case is covered by the v4 candidates), plus SLAAC privacy
+// (temporary) v6 addresses, which rotate and make dead endpoints.
+//
+// advertiseV6 gates global-IPv6 (host6) candidates: wgmesh has no v6
+// reachability signal (no v6 STUN or relay-observed mapping), so it
+// cannot tell a firewall-open global v6 from a closed one. It only
+// advertises v6 when this agent manages its own firewall — i.e. it
+// actually opened the port on both families. Hosts with a hand-managed
+// firewall (--manage-firewall=false) that never opened v6 inbound stop
+// handing peers unreachable v6 candidates to waste probes on.
+//
+// WireGuard binds dual-stack, so the one listen port serves every
+// address.
+func gatherLocalCandidates(listenPort int, advertiseV6 bool, overlays ...netip.Prefix) []proto.AgentCandidate {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
+
+	temporary := temporaryV6Addrs()
 
 	var v4, v6 []netip.Addr
 
@@ -70,7 +82,7 @@ func gatherLocalCandidates(listenPort int, overlays ...netip.Prefix) []proto.Age
 
 			if addr.Is4() {
 				v4 = append(v4, addr)
-			} else {
+			} else if advertiseV6 && !temporary[addr] {
 				v6 = append(v6, addr)
 			}
 		}

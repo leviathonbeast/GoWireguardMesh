@@ -134,6 +134,7 @@ type telemetryReporter struct {
 	pathKinds       map[wgtypes.Key]string
 	quicUnavailable map[wgtypes.Key]bool
 	hostnames       map[wgtypes.Key]string // control-plane names from sync, for readable logs
+	advertiseV6     bool                   // gather global-v6 host candidates (only when we manage the firewall)
 	relayBroken     bool                   // control plane said no relay; stop asking
 	directProbeOff  bool                   // keep relay stable after fallback; useful for service sidecars
 }
@@ -448,7 +449,7 @@ func (t *telemetryReporter) selfCandidates() []proto.AgentCandidate {
 		return nil
 	}
 
-	out := gatherLocalCandidates(t.listenPort, t.network, t.network6)
+	out := gatherLocalCandidates(t.listenPort, t.advertiseV6, t.network, t.network6)
 
 	if t.portMapper != nil {
 		if ep := t.portMapper.external(); ep != "" {

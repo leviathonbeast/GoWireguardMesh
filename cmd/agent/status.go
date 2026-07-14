@@ -148,13 +148,33 @@ func (r *logRing) clear() {
 // before any agent loop runs; it is never mutated afterwards.
 var logMirror io.Writer
 
-// agentPrintf is fmt.Printf plus the GUI log mirror. The agent's
-// human-facing status lines go through here so they show up in the
-// GUI's Logs tab as well as on a console.
+// agentPrintf is fmt.Printf plus the GUI log mirror, with a short
+// clock-time prefix so relay/probe progress lines can be timed (how
+// long a pair takes to go direct) at a glance. These are human-facing
+// status lines, so the prefix is a compact local HH:MM:SS rather than
+// the full RFC3339 stamp the machine-parsed slog stream carries.
 func agentPrintf(format string, args ...any) {
-	fmt.Printf(format, args...)
+	line := timestampLine(fmt.Sprintf(format, args...))
+
+	fmt.Print(line)
 
 	if logMirror != nil {
-		fmt.Fprintf(logMirror, format, args...)
+		fmt.Fprint(logMirror, line)
 	}
+}
+
+// timestampLine prefixes a log line with a compact local time,
+// e.g. "[17:54:35] ". Leading newlines (blank-line separators) stay
+// ahead of the timestamp, and an empty message is passed through
+// untouched.
+func timestampLine(s string) string {
+	lead := 0
+	for lead < len(s) && s[lead] == '\n' {
+		lead++
+	}
+	if lead == len(s) {
+		return s
+	}
+
+	return s[:lead] + time.Now().Format("[15:04:05] ") + s[lead:]
 }
