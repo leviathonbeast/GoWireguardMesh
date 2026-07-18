@@ -138,8 +138,15 @@ type telemetryReporter struct {
 	quicUnavailable map[wgtypes.Key]bool
 	hostnames       map[wgtypes.Key]string // control-plane names from sync, for readable logs
 	advertiseV6     bool                   // gather global-v6 host candidates (only when we manage the firewall)
-	relayBroken     bool                   // control plane said no relay; stop asking
-	directProbeOff  bool                   // keep relay stable after fallback; useful for service sidecars
+	// Flap damping: a promote that doesn't hold is a flap, and repeated
+	// flaps earn an escalating hold-down during which no direct probe —
+	// coordinated or not — may run. Bounds direct<->relay churn on
+	// marginal paths that can handshake but not stay up.
+	directSince    map[wgtypes.Key]time.Time // when the current direct stint began (via promoteDirect)
+	directFlaps    map[wgtypes.Key]int       // consecutive short-lived direct stints
+	holdDownUntil  map[wgtypes.Key]time.Time // no relay->direct probing before this
+	relayBroken    bool                      // control plane said no relay; stop asking
+	directProbeOff bool                      // keep relay stable after fallback; useful for service sidecars
 }
 
 // relayTransport selects how the agent tunnels to a relayed peer.
@@ -210,6 +217,9 @@ func newTelemetryReporter(
 		pathKinds:       make(map[wgtypes.Key]string),
 		quicUnavailable: make(map[wgtypes.Key]bool),
 		hostnames:       make(map[wgtypes.Key]string),
+		directSince:     make(map[wgtypes.Key]time.Time),
+		directFlaps:     make(map[wgtypes.Key]int),
+		holdDownUntil:   make(map[wgtypes.Key]time.Time),
 	}
 
 	dumper, err := newFlowDumper(iface, parseSelfAddr(selfAddr), parseSelfAddr(selfAddr6))

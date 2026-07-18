@@ -356,3 +356,91 @@ func TestPeerLabel(t *testing.T) {
 		t.Fatalf("named peer: got %q, want %q", tel.peerLabel(key), want)
 	}
 }
+
+func TestFlapHoldDownEscalatesAndCaps(t *testing.T) {
+	want := []time.Duration{0, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 16 * time.Minute}
+	for flaps, w := range want {
+		if got := flapHoldDown(flaps); got != w {
+			t.Fatalf("flapHoldDown(%d) = %s, want %s", flaps, got, w)
+		}
+	}
+}
+
+func TestNoteDirectStintEndedFlapAccounting(t *testing.T) {
+	key := wgtypes.Key{1}
+	now := time.Now()
+	tel := &telemetryReporter{
+		directSince:   map[wgtypes.Key]time.Time{},
+		directFlaps:   map[wgtypes.Key]int{},
+		holdDownUntil: map[wgtypes.Key]time.Time{},
+	}
+
+	// Never promoted: first fallback is not a flap.
+	tel.noteDirectStintEnded(key, now)
+	if tel.directFlaps[key] != 0 {
+		t.Fatalf("flap counted without a direct stint: %d", tel.directFlaps[key])
+	}
+
+	// Short stint: flap counted, hold-down armed.
+	tel.directSince[key] = now.Add(-3 * time.Minute)
+	tel.noteDirectStintEnded(key, now)
+	if tel.directFlaps[key] != 1 {
+		t.Fatalf("flaps = %d, want 1", tel.directFlaps[key])
+	}
+	if until := tel.holdDownUntil[key]; !until.After(now.Add(flapHoldDownBase - time.Second)) {
+		t.Fatalf("hold-down not armed: %v", until)
+	}
+
+	// Second short stint: escalates.
+	tel.directSince[key] = now.Add(-time.Minute)
+	tel.noteDirectStintEnded(key, now)
+	if tel.directFlaps[key] != 2 {
+		t.Fatalf("flaps = %d, want 2", tel.directFlaps[key])
+	}
+	if until := tel.holdDownUntil[key]; !until.After(now.Add(2*flapHoldDownBase - time.Second)) {
+		t.Fatalf("hold-down did not escalate: %v", until)
+	}
+
+	// A stint that held past directStableTenure clears the history.
+	tel.directSince[key] = now.Add(-directStableTenure - time.Minute)
+	tel.noteDirectStintEnded(key, now)
+	if _, ok := tel.directFlaps[key]; ok {
+		t.Fatalf("stable stint did not clear flap history")
+	}
+}
+
+func TestMaybeRetryDirectRespectsHoldDown(t *testing.T) {
+	key := wgtypes.Key{1}
+	backend := &fakeWGBackend{}
+	cand := []*net.UDPAddr{{IP: net.ParseIP("192.0.2.1"), Port: 51820}}
+
+	tel := &telemetryReporter{
+		wg:             backend,
+		relayed:        map[wgtypes.Key]bool{key: true},
+		relayedAt:      map[wgtypes.Key]time.Time{key: time.Now().Add(-time.Hour)},
+		relayEndpoints: map[wgtypes.Key]*net.UDPAddr{key: {IP: net.ParseIP("127.0.0.1"), Port: 40000}},
+		directProbes:   map[wgtypes.Key]directProbe{},
+		lastPunchEpoch: map[wgtypes.Key]int{},
+		holdDownUntil:  map[wgtypes.Key]time.Time{key: time.Now().Add(time.Minute)},
+	}
+
+	// Held down: even a fresh punch epoch must not start a probe...
+	tel.maybeRetryDirect(key, cand, 7)
+	if _, ok := tel.directProbes[key]; ok {
+		t.Fatal("probe started during hold-down")
+	}
+	if len(backend.configured) != 0 {
+		t.Fatal("ConfigureDevice called during hold-down")
+	}
+	// ...but the epoch is consumed, not saved for a stale late firing.
+	if tel.lastPunchEpoch[key] != 7 {
+		t.Fatalf("punch epoch not consumed: %d", tel.lastPunchEpoch[key])
+	}
+
+	// Hold-down expired: the same call now probes.
+	tel.holdDownUntil[key] = time.Now().Add(-time.Second)
+	tel.maybeRetryDirect(key, cand, 8)
+	if _, ok := tel.directProbes[key]; !ok {
+		t.Fatal("probe did not start after hold-down expired")
+	}
+}

@@ -84,6 +84,62 @@ func directRetryInterval(failures int) time.Duration {
 	return d
 }
 
+// directStableTenure is how long a direct stint must last to count as
+// genuinely working. A demotion after a shorter stint is a flap: the
+// path could handshake but not hold (marginal NAT mapping, asymmetric
+// reachability), and re-probing it eagerly just repeats the cycle —
+// especially via coordinated punches, whose server-side attempt budget
+// resets every time the pair reaches direct.
+const directStableTenure = 10 * time.Minute
+
+// flapHoldDownBase escalates 2m -> 4m -> 8m -> 16m (cap) with
+// consecutive flaps. During hold-down no direct probe runs at all, so
+// worst-case direct<->relay churn slows geometrically no matter what
+// the path metrics or punch epochs say.
+const flapHoldDownBase = 2 * time.Minute
+
+func flapHoldDown(flaps int) time.Duration {
+	if flaps < 1 {
+		return 0
+	}
+
+	return flapHoldDownBase << min(flaps-1, 3)
+}
+
+// noteDirectStintEnded runs flap accounting when a peer that had been
+// promoted to direct falls back to relay. A stint that held for
+// directStableTenure clears the flap history (the path genuinely
+// works; this failure is fresh news). A shorter stint increments it
+// and arms the hold-down. Peers that were never promoted (first
+// fallback after startup, relay-transport churn) are not flaps.
+func (t *telemetryReporter) noteDirectStintEnded(key wgtypes.Key, now time.Time) {
+	since, ok := t.directSince[key]
+	if !ok {
+		return
+	}
+	delete(t.directSince, key)
+
+	tenure := now.Sub(since)
+	if tenure >= directStableTenure {
+		delete(t.directFlaps, key)
+		return
+	}
+
+	if t.directFlaps == nil {
+		t.directFlaps = make(map[wgtypes.Key]int)
+	}
+	t.directFlaps[key]++
+
+	hold := flapHoldDown(t.directFlaps[key])
+	if t.holdDownUntil == nil {
+		t.holdDownUntil = make(map[wgtypes.Key]time.Time)
+	}
+	t.holdDownUntil[key] = now.Add(hold)
+
+	fmt.Printf("[agent] relay: direct path for %s held only %s; staying on relay for at least %s (flap %d)\n",
+		t.peerLabel(key), tenure.Round(time.Second), hold, t.directFlaps[key])
+}
+
 // candidateDigest is a stable fingerprint of a peer's candidate set, used
 // to detect when a new path appears (which re-arms a prompt direct retry).
 func candidateDigest(candidates []*net.UDPAddr) string {
@@ -159,6 +215,7 @@ func (t *telemetryReporter) checkHandshakes() {
 		if t.switchToRelay(peer.PublicKey, silentFor) {
 			t.relayed[peer.PublicKey] = true
 			t.relayedAt[peer.PublicKey] = now
+			t.noteDirectStintEnded(peer.PublicKey, now)
 		}
 	}
 }
@@ -206,6 +263,18 @@ func (t *telemetryReporter) maybeRetryDirect(peer wgtypes.Key, candidates []*net
 		}
 		t.lastPunchEpoch[peer] = punchEpoch
 		fast = true
+	}
+
+	// Flap hold-down outranks everything, including coordinated punch
+	// epochs — a marginal path that handshakes but won't hold re-arms
+	// the server's punch budget on every promote, so without this gate
+	// the pair oscillates at the punch cooldown rate forever. The epoch
+	// above is still consumed: firing it late, uncoordinated, would be
+	// useless anyway. Deliberately NOT cleared on candidate-set change —
+	// relay-observed candidates change ports every relay episode, which
+	// would otherwise defeat the hold-down each flap.
+	if until, held := t.holdDownUntil[peer]; held && time.Now().Before(until) {
+		return
 	}
 
 	if _, probing := t.directProbes[peer]; probing && !fast {
@@ -336,6 +405,15 @@ func (t *telemetryReporter) promoteDirect(key wgtypes.Key, now time.Time) {
 	delete(t.pathKinds, key)
 	delete(t.quicUnavailable, key)
 	t.firstSeen[key] = now
+
+	// Start the stint clock; the hold-down is moot while direct. The
+	// flap counter intentionally survives promotion — only a stint that
+	// holds directStableTenure clears it (see noteDirectStintEnded).
+	if t.directSince == nil {
+		t.directSince = make(map[wgtypes.Key]time.Time)
+	}
+	t.directSince[key] = now
+	delete(t.holdDownUntil, key)
 
 	fmt.Printf("[agent] relay: bidirectional direct path for %s stable; leaving relay\n", t.peerLabel(key))
 }
