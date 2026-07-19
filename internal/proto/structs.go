@@ -24,7 +24,9 @@ type AgentCandidate struct {
 	Endpoint string `json:"endpoint"`
 	// Type is "host" (an IPv4 interface address), "host6" (a global
 	// IPv6 interface address), "stun6" (a STUN-reflexive, reachability-
-	// proven global IPv6 endpoint), or "upnp" (a UPnP/NAT-PMP mapping).
+	// proven global IPv6 endpoint), "upnp" (a UPnP/NAT-PMP mapping), or
+	// "pinned" (the operator-asserted --advertise-endpoint address —
+	// a guarantee, not a discovery, so servers rank it first).
 	Type string `json:"type"`
 }
 
@@ -98,7 +100,7 @@ type PeerConfigResponse struct {
 
 type EndpointCandidate struct {
 	Endpoint string `json:"endpoint"`
-	Type     string `json:"type"`     // host, host6, upnp, lan, stun, relay
+	Type     string `json:"type"`     // pinned, host, host6, stun6, upnp, lan, stun, relay
 	Priority int    `json:"priority"` // larger wins
 }
 

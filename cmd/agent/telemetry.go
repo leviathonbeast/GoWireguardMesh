@@ -257,7 +257,10 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 
 	// The GUI refreshes peer state faster than the report interval; a
 	// publish is one device read and no-ops entirely in console and
-	// service runs (hub disabled).
+	// service runs (hub disabled). The same tick drives direct-probe
+	// candidate rotation: probe dwells (8s coordinated, 20s normal) are
+	// far shorter than the report interval, so checking them only on
+	// report ticks would quantize every dwell up to ~30s.
 	statusTicker := time.NewTicker(5 * time.Second)
 	defer statusTicker.Stop()
 
@@ -305,6 +308,7 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 			t.syncOnce(true)
 			t.publishPeers()
 		case <-statusTicker.C:
+			t.checkProbes()
 			t.publishPeers()
 		}
 	}
@@ -480,6 +484,15 @@ func (t *telemetryReporter) selfCandidates() []proto.AgentCandidate {
 	// v6 address that stops answering STUN drops out on the next check.
 	if t.publicEndpoint6 != "" {
 		out = append(out, proto.AgentCandidate{Endpoint: t.publicEndpoint6, Type: "stun6"})
+	}
+
+	// An operator-pinned endpoint (--advertise-endpoint) also rides
+	// publicEndpoint, but the server cannot tell it apart from a STUN
+	// guess there — and a STUN guess ranks below UPnP and v6 candidates.
+	// The typed candidate lets the server rank the one endpoint the
+	// operator has guaranteed above the discovered maybes.
+	if t.endpointPinned && t.publicEndpoint != "" {
+		out = append(out, proto.AgentCandidate{Endpoint: t.publicEndpoint, Type: "pinned"})
 	}
 
 	return out

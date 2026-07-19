@@ -35,8 +35,10 @@ func (t *telemetryReporter) peerLabel(key wgtypes.Key) string {
 const directStaleAfter = 90 * time.Second
 
 // directProbeInterval is the normal candidate dwell time during an
-// uncoordinated relay->direct retry.
-const directProbeInterval = 60 * time.Second
+// uncoordinated relay->direct retry. WireGuard retries handshakes every
+// ~5s, so 20s gives each candidate four attempts — a dead candidate
+// should cost 20s, not a minute, before the next one gets its turn.
+const directProbeInterval = 20 * time.Second
 
 // coordinatedProbeInterval gives WireGuard's ~5s handshake retry a real
 // chance on each candidate while still rotating fast enough for NAT
@@ -216,6 +218,34 @@ func (t *telemetryReporter) checkHandshakes() {
 			t.relayed[peer.PublicKey] = true
 			t.relayedAt[peer.PublicKey] = now
 			t.noteDirectStintEnded(peer.PublicKey, now)
+		}
+	}
+}
+
+// checkProbes advances active direct probes (candidate rotation,
+// probation, give-up) between report ticks. Dwells are 8-20s while the
+// report interval is 30s; checked only there, every dwell would round up
+// to the tick and a full candidate sweep would take minutes. Runs on the
+// 5s status tick — a no-op without active probes, one device read with.
+// The demote/stale logic stays on report ticks: its inputs (rx counters
+// via collect) refresh there, and directStaleAfter is 90s anyway.
+func (t *telemetryReporter) checkProbes() {
+	t.syncMu.Lock()
+	defer t.syncMu.Unlock()
+
+	if len(t.directProbes) == 0 {
+		return
+	}
+
+	device, err := t.wg.Device()
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	for _, peer := range device.Peers {
+		if _, ok := t.directProbes[peer.PublicKey]; ok {
+			t.checkDirectProbe(peer, now)
 		}
 	}
 }

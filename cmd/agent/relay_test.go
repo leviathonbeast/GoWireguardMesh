@@ -444,3 +444,61 @@ func TestMaybeRetryDirectRespectsHoldDown(t *testing.T) {
 		t.Fatal("probe did not start after hold-down expired")
 	}
 }
+
+// Probe rotation is driven by checkProbes on the 5s status tick, not
+// only by report ticks: a candidate past its dwell rotates to the next
+// one without waiting for the ~30s report interval.
+func TestCheckProbesRotatesBetweenReportTicks(t *testing.T) {
+	key := wgtypes.Key{1}
+	relayEP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40000}
+	cands := []*net.UDPAddr{
+		{IP: net.ParseIP("192.0.2.1"), Port: 51820},
+		{IP: net.ParseIP("192.0.2.2"), Port: 51820},
+	}
+
+	backend := &fakeWGBackend{device: &wgtypes.Device{Peers: []wgtypes.Peer{
+		{PublicKey: key, Endpoint: cands[0]},
+	}}}
+	tel := &telemetryReporter{
+		wg:             backend,
+		relayed:        map[wgtypes.Key]bool{key: true},
+		relayEndpoints: map[wgtypes.Key]*net.UDPAddr{key: relayEP},
+		directProbes: map[wgtypes.Key]directProbe{key: {
+			started:       time.Now().Add(-directProbeInterval - time.Second),
+			candidates:    cands,
+			relayEndpoint: relayEP,
+			interval:      directProbeInterval,
+		}},
+	}
+
+	tel.checkProbes()
+
+	if got := tel.directProbes[key].index; got != 1 {
+		t.Fatalf("probe.index = %d, want 1 (rotated on status tick)", got)
+	}
+	if len(backend.configured) != 1 {
+		t.Fatalf("ConfigureDevice called %d times, want 1 (next candidate applied)", len(backend.configured))
+	}
+
+	// A dwell still in progress must not rotate.
+	probe := tel.directProbes[key]
+	probe.started = time.Now()
+	tel.directProbes[key] = probe
+	tel.checkProbes()
+	if got := tel.directProbes[key].index; got != 1 {
+		t.Fatalf("probe.index = %d, want 1 (mid-dwell rotation)", got)
+	}
+}
+
+// checkProbes with no active probes must not touch the device at all —
+// it runs every 5s for the life of the agent.
+func TestCheckProbesNoOpWithoutProbes(t *testing.T) {
+	backend := &fakeWGBackend{err: errors.New("device must not be read")}
+	tel := &telemetryReporter{wg: backend}
+
+	tel.checkProbes()
+
+	if len(backend.configured) != 0 {
+		t.Fatal("ConfigureDevice called without active probes")
+	}
+}

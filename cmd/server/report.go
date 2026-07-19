@@ -47,6 +47,12 @@ func (s *server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Same allowlist as enrollment: only parseable endpoints of known
+	// types may enter the store — they fan out into every agent's
+	// WireGuard config. Dropping all of them means "no update", which
+	// matches ApplyReport's empty-list contract.
+	report.Candidates = validAgentCandidates(report.Candidates)
+
 	if err := s.store.ApplyReport(r.Context(), peerID, s.clientIP(r), &report); err != nil {
 		slog.Error("apply report failed", "peer_id", peerID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

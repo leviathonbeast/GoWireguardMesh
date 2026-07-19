@@ -890,11 +890,11 @@ const maxEndpointCandidates = 6
 // peer's sync payload without limit.
 const maxAgentCandidates = 8
 
-// encodeAgentCandidates canonicalizes an agent-supplied candidate list
-// for storage: parseable udp host:port endpoints only (these get handed
-// to every other agent's WireGuard config), known types only, capped.
-// Returns "" when nothing valid remains.
-func encodeAgentCandidates(cands []proto.AgentCandidate) string {
+// validAgentCandidates filters an agent-supplied candidate list down to
+// parseable udp host:port endpoints of known types, capped. This is the
+// single allowlist for both intake paths (enroll and telemetry report) —
+// these endpoints get handed to every other agent's WireGuard config.
+func validAgentCandidates(cands []proto.AgentCandidate) []proto.AgentCandidate {
 	kept := make([]proto.AgentCandidate, 0, len(cands))
 
 	for _, c := range cands {
@@ -903,7 +903,7 @@ func encodeAgentCandidates(cands []proto.AgentCandidate) string {
 		}
 
 		switch c.Type {
-		case "host", "host6", "stun6", "upnp":
+		case "host", "host6", "stun6", "upnp", "pinned":
 		default:
 			continue
 		}
@@ -915,6 +915,13 @@ func encodeAgentCandidates(cands []proto.AgentCandidate) string {
 		kept = append(kept, c)
 	}
 
+	return kept
+}
+
+// encodeAgentCandidates canonicalizes an agent-supplied candidate list
+// for storage. Returns "" when nothing valid remains.
+func encodeAgentCandidates(cands []proto.AgentCandidate) string {
+	kept := validAgentCandidates(cands)
 	if len(kept) == 0 {
 		return ""
 	}
@@ -971,11 +978,12 @@ func endpointHint(self, p store.PeerRow) *string {
 // itself be the shared WAN IP when the control plane is off-site), and
 // anything via the public IP would have to hairpin through their
 // router, which most consumer NATs refuse — so those sort last, kept
-// only as a long shot. Across different NATs it inverts: a router
-// mapping is a genuinely open port, STUN is the punchable mapping,
-// global IPv6 needs no NAT at all, and private v4 addresses are
-// unreachable (included only when a shared /24 with self suggests the
-// sides are on the same wire despite different WAN IPs).
+// only as a long shot. Across different NATs it inverts: an operator-
+// pinned endpoint is a promise rather than a guess and sorts first, a
+// router mapping is a genuinely open port, STUN is the punchable
+// mapping, global IPv6 needs no NAT at all, and private v4 addresses
+// are unreachable (included only when a shared /24 with self suggests
+// the sides are on the same wire despite different WAN IPs).
 func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 	var out []proto.EndpointCandidate
 	seen := map[string]bool{}
@@ -1001,6 +1009,11 @@ func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 
 		for _, c := range reported {
 			switch c.Type {
+			case "pinned":
+				// Operator-guaranteed, but behind a shared NAT it still
+				// needs a hairpin — above the STUN guess it duplicates,
+				// below the LAN paths that route without one.
+				add(c.Endpoint, "pinned", 95)
 			case "host":
 				// A private host address only routes when the other side
 				// shares its /24 — same LAN, or the same docker network.
@@ -1032,6 +1045,15 @@ func endpointCandidates(self, p store.PeerRow) []proto.EndpointCandidate {
 	} else {
 		selfReported := agentCandidates(self)
 
+		// An operator-pinned endpoint is the one address the operator has
+		// guaranteed reaches this peer's WireGuard port — no discovery
+		// heuristics involved, so it outranks every guessed path and the
+		// first probe lands on it instead of burning a dwell per maybe.
+		for _, c := range reported {
+			if c.Type == "pinned" {
+				add(c.Endpoint, "pinned", 140)
+			}
+		}
 		// Reachability-proven global v6 outranks every v4 traversal path:
 		// no NAT, no hole punch, works across different v4 NATs outright.
 		for _, c := range reported {

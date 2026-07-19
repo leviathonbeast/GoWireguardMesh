@@ -302,6 +302,13 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 		candidates = append(candidates, proto.AgentCandidate{Endpoint: publicEndpoint6, Type: "stun6"})
 	}
 
+	// A pinned endpoint doubles as a typed candidate (see selfCandidates)
+	// so peers rank it first from the very first enrollment, not only
+	// after the first telemetry report.
+	if r.cfg.AdvertiseEndpoint != "" {
+		candidates = append(candidates, proto.AgentCandidate{Endpoint: r.cfg.AdvertiseEndpoint, Type: "pinned"})
+	}
+
 	resp, err := enroll(
 		r.cfg.Server,
 		r.cfg.SetupKey,

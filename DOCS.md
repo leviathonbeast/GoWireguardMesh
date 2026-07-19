@@ -117,7 +117,7 @@ sudo ./bin/agent --server https://192.168.1.10:8443 --setup-key <token> --server
 |---|---|
 | `--listen-port 51820` | pin the WireGuard port (stable firewall rule) |
 | `--server-ca` | pin a self-signed server cert |
-| `--advertise-endpoint host:51820` | pin the public endpoint peers dial; overrides STUN and survives re-checks — for hosts whose observed address lies (docker-sidecar on a VPS looks symmetric via hairpin NAT) |
+| `--advertise-endpoint host:51820` | pin the public endpoint peers dial; overrides STUN and survives re-checks — for hosts whose observed address lies (docker-sidecar on a VPS looks symmetric via hairpin NAT). Distributed as a top-ranked `pinned` candidate, so peers probe it first |
 | `--relay-transport auto\|websocket\|udp` | relay path (default `auto` = QUIC then WebSocket) |
 | `--direct-probe=false` | keep a relay pinned after fallback (reverse-proxy/service sidecars) |
 | `--port-mapping=false` | don't ask the router to forward the WG port (UPnP/NAT-PMP) |
@@ -176,7 +176,7 @@ Connectivity is attempted in this order, all automatic:
 
 1. **Router port mapping (UPnP/NAT-PMP)** — `--port-mapping` (on) asks the router to forward the WG port. Narrow by design: own listen port only, UDP, lease-limited (30 min), labeled `wgmesh-agent`, removed on shutdown; double-NAT is detected and skipped.
 2. **STUN** — the agent probes from the *same port* WireGuard uses so the mapping is valid for tunnel traffic. With a relay, the mesh serves **its own STUN** (`--stun-port` + next); periodic re-checks catch IP changes and classify NAT as **easy** (hole-punchable) or **hard** (symmetric) — shown per peer, used to skip unpunchable hard↔hard pairs.
-3. **Endpoint candidates** — the server distributes each peer's ordered candidates (host addresses, router mappings, STUN, relay-observed live mapping, server-observed source, and a reachability-proven IPv6 endpoint). Ordering flips on topology: a working global-v6 (`stun6`) path ranks first when present (no NAT to traverse); then same WAN IP → LAN paths, different NATs → mappings/STUN, private v4 only on a shared /24. Hints only; WireGuard roaming overrides them.
+3. **Endpoint candidates** — the server distributes each peer's ordered candidates (host addresses, router mappings, STUN, relay-observed live mapping, server-observed source, and a reachability-proven IPv6 endpoint). Ordering flips on topology: a `--advertise-endpoint` address is a `pinned` candidate and ranks first across NATs (an operator guarantee, not a discovery — the first probe lands on it instead of burning a dwell per guess); a working global-v6 (`stun6`) path ranks next (no NAT to traverse); then same WAN IP → LAN paths, different NATs → mappings/STUN, private v4 only on a shared /24. Hints only; WireGuard roaming overrides them.
 
    **IPv6 direct paths** — the agent probes STUN over v6 from the WireGuard port; a reflected address (proving the port is actually reachable over v6) is advertised as a `stun6` candidate and, because v6 needs no NAT traversal, preferred over every v4 path. It's only advertised when v6 genuinely works — no connectivity, a firewalled port, or `--no-ipv6-endpoints` yields nothing, so peers never waste probes on unreachable v6. `host6` interface candidates are likewise gated on the agent managing its own firewall (SLAAC privacy addresses are always skipped). Set `--relay-host6` on the server to let agents refresh their v6 endpoint against the mesh's own STUN instead of a public one.
 4. **Relay fallback** — if a direct peer goes silent 90s, the agent moves it to a relay. The relay is a dumb forwarder: it only ever sees WireGuard ciphertext (can drop, never read or forge), on a lock-free path that rejects non-WireGuard-shaped packets. Replaces TURN, which kernel WireGuard can't speak.
@@ -187,7 +187,7 @@ Connectivity is attempted in this order, all automatic:
 - **websocket** — rides the API port (443), so relayed traffic needs **no holes beyond 443** and crosses UDP-blocking networks. WireGuard-over-TCP = last resort. Embedded relay only.
 - **udp** (`--relay-port-min/-max`, 51900–51999) — raw forwarder, one port pair per peer pair. Fastest; needs the range reachable. Embedded or standalone.
 
-Relayed pairs periodically retry direct. When both peers are online with candidates (and not both hard NATs), the control plane bumps a punch epoch and pushes `sync-now` over the **`/signal` WebSocket** so both agents probe within ~1s of each other — simultaneity is what lands hole punching. The signal socket also triggers immediate re-sync after DNS/ACL/peer/network changes; `/report` is the fallback.
+Relayed pairs periodically retry direct, dwelling ~20s per candidate (four WireGuard handshake attempts; coordinated punches rotate every 8s) with rotation checked every 5s, so a failed sweep costs seconds, not minutes. When both peers are online with candidates (and not both hard NATs), the control plane bumps a punch epoch and pushes `sync-now` over the **`/signal` WebSocket** so both agents probe within ~1s of each other — simultaneity is what lands hole punching. The signal socket also triggers immediate re-sync after DNS/ACL/peer/network changes; `/report` is the fallback.
 
 **Relay setup:**
 

@@ -586,3 +586,64 @@ func TestEncodeAgentCandidatesKeepsStun6(t *testing.T) {
 		t.Fatalf("stun6 candidate not preserved: %+v", got)
 	}
 }
+
+func TestEndpointCandidatesPinnedRanking(t *testing.T) {
+	pinned := "203.0.113.1:51822"
+
+	// Cross-NAT: the operator's guarantee outranks every discovered
+	// path, and the STUN entry (same address) dedupes away.
+	self := store.PeerRow{PublicEndpoint: "198.51.100.7:51820"}
+	peer := store.PeerRow{
+		PublicEndpoint: pinned,
+		CandidatesJSON: `[{"endpoint":"` + pinned + `","type":"pinned"},` +
+			`{"endpoint":"[2001:db8::5]:51820","type":"stun6"},` +
+			`{"endpoint":"203.0.113.1:60000","type":"upnp"}]`,
+	}
+
+	got := endpointCandidates(self, peer)
+	wantOrder := []string{"pinned", "stun6", "upnp"}
+	if len(got) != len(wantOrder) {
+		t.Fatalf("candidates = %+v, want %d entries", got, len(wantOrder))
+	}
+	for i, typ := range wantOrder {
+		if got[i].Type != typ {
+			t.Fatalf("candidate[%d].Type = %q, want %q (%+v)", i, got[i].Type, typ, got)
+		}
+	}
+	if got[0].Endpoint != pinned {
+		t.Fatalf("pinned endpoint = %q, want %q", got[0].Endpoint, pinned)
+	}
+
+	// Same-NAT (two VPS sidecars behind one WAN IP): the docker-bridge
+	// host address routes without a hairpin and stays first; pinned
+	// still beats the remaining long shots.
+	self2 := store.PeerRow{
+		PublicEndpoint: "203.0.113.1:51820",
+		CandidatesJSON: `[{"endpoint":"172.18.0.9:51820","type":"host"}]`,
+	}
+	peer2 := store.PeerRow{
+		PublicEndpoint: pinned,
+		CandidatesJSON: `[{"endpoint":"` + pinned + `","type":"pinned"},` +
+			`{"endpoint":"172.18.0.2:51820","type":"host"}]`,
+	}
+
+	got2 := endpointCandidates(self2, peer2)
+	if len(got2) != 2 || got2[0].Type != "host" || got2[1].Type != "pinned" {
+		t.Fatalf("same-NAT candidates = %+v, want host then pinned", got2)
+	}
+}
+
+// The report path shares the enroll allowlist: pinned survives, junk
+// types and unparseable endpoints do not reach the store.
+func TestValidAgentCandidatesSharedAllowlist(t *testing.T) {
+	in := []proto.AgentCandidate{
+		{Endpoint: "203.0.113.1:51822", Type: "pinned"},
+		{Endpoint: "not an endpoint", Type: "pinned"},
+		{Endpoint: "192.168.1.21:51820", Type: "relay"}, // server-owned type
+	}
+
+	got := validAgentCandidates(in)
+	if len(got) != 1 || got[0].Type != "pinned" || got[0].Endpoint != "203.0.113.1:51822" {
+		t.Fatalf("validAgentCandidates = %+v, want the one pinned entry", got)
+	}
+}

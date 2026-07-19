@@ -104,3 +104,31 @@ func TestSelfCandidatesIncludesV6Endpoint(t *testing.T) {
 		}
 	}
 }
+
+// A pinned endpoint (--advertise-endpoint) is emitted as a typed
+// candidate so the server can rank the operator's guarantee above
+// discovered guesses; an unpinned public endpoint must not be.
+func TestSelfCandidatesIncludesPinnedEndpoint(t *testing.T) {
+	tel := &telemetryReporter{
+		listenPort:     51820,
+		publicEndpoint: "203.0.113.9:51820",
+		endpointPinned: true,
+	}
+
+	found := false
+	for _, c := range tel.selfCandidates() {
+		if c.Type == "pinned" && c.Endpoint == "203.0.113.9:51820" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pinned candidate not present: %+v", tel.selfCandidates())
+	}
+
+	tel.endpointPinned = false
+	for _, c := range tel.selfCandidates() {
+		if c.Type == "pinned" {
+			t.Fatalf("pinned candidate emitted for STUN-discovered endpoint: %+v", tel.selfCandidates())
+		}
+	}
+}
