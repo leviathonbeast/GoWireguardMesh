@@ -4,6 +4,7 @@ import type { AppCtx } from "../appctx";
 import type { MobilePeerResponse, Peer } from "../types";
 import {
   endpointOf,
+  exitNodeCandidates,
   formatTime,
   gatewayCandidates,
   gatewayName,
@@ -208,6 +209,14 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
                           <button className="btn-ghost p-0 font-medium" onClick={() => setSelectedPeerID(p.id)}>
                             {p.hostname || `peer ${p.id}`}
                           </button>
+                          {p.advertise_exit_node && (
+                            <span
+                              className="ml-1.5 text-xs text-muted"
+                              title="offers to carry other peers' internet traffic (--advertise-exit-node)"
+                            >
+                              exit node
+                            </span>
+                          )}
                         </td>
                         <td>
                           {p.assigned_ip}
@@ -230,6 +239,14 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
                             endpointOf(p) || <span className="text-muted">unknown</span>
                           )}
                           {p.nat_type && <div className="text-xs text-muted">{natLabel(p.nat_type)}</div>}
+                          {!!p.exit_node_peer_id && (
+                            <div
+                              className="text-xs text-muted"
+                              title="all internet traffic routes through this exit node"
+                            >
+                              exits via {gatewayName(peers, p.exit_node_peer_id)}
+                            </div>
+                          )}
                         </td>
                         <td className="hidden text-muted xl:table-cell">{formatTime(p.created_at)}</td>
                         <td>
@@ -270,6 +287,106 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
         />
       )}
     </>
+  );
+}
+
+// ExitNodeSection assigns which advertising agent carries this peer's
+// entire internet traffic. Server-validated (must advertise, no chains);
+// both agents pick the change up on their next sync.
+function ExitNodeSection({ ctx, peer }: { ctx: AppCtx; peer: Peer }) {
+  const { peers } = ctx.data;
+  const [saving, setSaving] = useState(false);
+
+  const current = peer.exit_node_peer_id || 0;
+  const candidates = exitNodeCandidates(peers, peer.id);
+  // Keep a stale assignment selectable so the dropdown reflects reality
+  // even after the assigned exit stopped advertising.
+  const assignedStale = current !== 0 && !candidates.some((c) => c.id === current);
+
+  const setExit = async (id: number) => {
+    ctx.setError("");
+    setSaving(true);
+    try {
+      await api(`/api/peers/${peer.id}/exit-node`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ exit_node_peer_id: id }),
+      });
+      await ctx.refresh();
+      ctx.toast(id ? `Internet traffic now routes via ${gatewayName(peers, id)}` : "Exit node cleared");
+    } catch (e) {
+      ctx.setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onChange = (id: number) => {
+    if (id === current) return;
+    const name = peer.hostname || `peer ${peer.id}`;
+    if (id === 0) {
+      ctx.confirm({
+        title: "Clear exit node?",
+        message: `${name} will stop routing its internet traffic through ${gatewayName(peers, current)} and use its own connection again.`,
+        confirmLabel: "clear",
+        onConfirm: () => void setExit(0),
+      });
+      return;
+    }
+    ctx.confirm({
+      title: "Route internet via exit node?",
+      message: `ALL internet traffic from ${name} will route through ${gatewayName(peers, id)}. Mesh and LAN traffic is unaffected, and the tunnel's own packets keep using the normal uplink. Linux agents only.`,
+      confirmLabel: "assign",
+      onConfirm: () => void setExit(id),
+    });
+  };
+
+  return (
+    <Section title="Exit node">
+      <div className="panel">
+        <div className="detail-list">
+          <div>
+            <span>Advertises as exit node</span>
+            <strong>{peer.advertise_exit_node ? "yes" : "no"}</strong>
+          </div>
+          <div>
+            <span>Routes internet through</span>
+            <strong>{current ? gatewayName(peers, current) : "own connection"}</strong>
+          </div>
+        </div>
+
+        {!peer.revoked_at && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <select
+              value={current}
+              disabled={saving || (candidates.length === 0 && current === 0)}
+              onChange={(e) => onChange(Number(e.target.value))}
+            >
+              <option value={0}>own connection (no exit node)</option>
+              {assignedStale && (
+                <option value={current}>{gatewayName(peers, current)} (no longer advertising)</option>
+              )}
+              {candidates.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.hostname || c.assigned_ip || `peer ${c.id}`}
+                </option>
+              ))}
+            </select>
+            {candidates.length === 0 && current === 0 && (
+              <span className="text-xs text-muted">
+                no agents advertise as exit node — run one with --advertise-exit-node
+              </span>
+            )}
+          </div>
+        )}
+
+        <p className="mt-2 text-xs text-muted">
+          An exit node carries this machine's entire internet traffic through the mesh and out its
+          own connection (like Tailscale exit nodes). Assignment applies within one sync interval;
+          the agent installs policy routing so WireGuard itself never loops into the tunnel.
+        </p>
+      </div>
+    </Section>
   );
 }
 
@@ -462,6 +579,8 @@ function PeerDetail({
           )}
         </div>
       </section>
+
+      {peer.peer_type !== "static" && <ExitNodeSection ctx={ctx} peer={peer} />}
 
       {peer.peer_type === "static" && !peer.revoked_at && (
         <Section

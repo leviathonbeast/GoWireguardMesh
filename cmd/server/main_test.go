@@ -647,3 +647,72 @@ func TestValidAgentCandidatesSharedAllowlist(t *testing.T) {
 		t.Fatalf("validAgentCandidates = %+v, want the one pinned entry", got)
 	}
 }
+
+// The assigned exit node's peer entry must carry the full-tunnel
+// AllowedIPs for BOTH families (a v4-only 0.0.0.0/0 would let v6 leak
+// around the exit) and the exit_node marker the agent keys its policy
+// routing on; every other peer stays untouched.
+func TestBuildPeerEntriesExitNode(t *testing.T) {
+	pskMaster, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 3)
+	for i := range keys {
+		k, err := wgtypes.GeneratePrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[i] = k.PublicKey().String()
+	}
+
+	srv := &server{pskMaster: pskMaster}
+	self := store.PeerRow{ID: 1, PublicKey: keys[0], AssignedIP: "100.64.0.1", ExitNodePeerID: 2}
+	exit := store.PeerRow{ID: 2, PublicKey: keys[1], PeerType: "agent", AssignedIP: "100.64.0.2", AdvertiseExitNode: true}
+	other := store.PeerRow{ID: 3, PublicKey: keys[2], PeerType: "agent", AssignedIP: "100.64.0.3"}
+
+	entries, err := srv.buildPeerEntries(self, []store.PeerRow{exit, other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+
+	byKey := map[string]proto.PeerConfigResponse{}
+	for _, e := range entries {
+		byKey[e.PublicKey] = e
+	}
+
+	exitEntry := byKey[keys[1]]
+	if !exitEntry.ExitNode {
+		t.Fatalf("exit entry not marked exit_node: %+v", exitEntry)
+	}
+	has := map[string]bool{}
+	for _, a := range exitEntry.AllowedIPs {
+		has[a] = true
+	}
+	if !has["100.64.0.2/32"] || !has["0.0.0.0/0"] || !has["::/0"] {
+		t.Fatalf("exit entry AllowedIPs = %v, want /32 plus both default routes", exitEntry.AllowedIPs)
+	}
+
+	otherEntry := byKey[keys[2]]
+	if otherEntry.ExitNode {
+		t.Fatalf("non-exit entry marked exit_node")
+	}
+	for _, a := range otherEntry.AllowedIPs {
+		if a == "0.0.0.0/0" || a == "::/0" {
+			t.Fatalf("non-exit entry gained a default route: %v", otherEntry.AllowedIPs)
+		}
+	}
+}
+
+func TestExitNodeActiveFor(t *testing.T) {
+	self := store.PeerRow{ID: 2}
+	if exitNodeActiveFor(self, []store.PeerRow{{ID: 1}, {ID: 3, ExitNodePeerID: 5}}) {
+		t.Fatal("no client points at self; want inactive")
+	}
+	if !exitNodeActiveFor(self, []store.PeerRow{{ID: 1, ExitNodePeerID: 2}}) {
+		t.Fatal("client points at self; want active")
+	}
+}

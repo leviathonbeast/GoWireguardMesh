@@ -25,6 +25,7 @@ type agentConfig struct {
 	DNSFallback       bool
 	ManageFirewall    bool
 	NoIPv6            bool
+	AdvertiseExitNode bool
 	KeyFile           string
 	LogLevel          string
 	TraefikAccessLog  string
@@ -55,6 +56,7 @@ func agentConfigFromFlags() agentConfig {
 		DNSFallback:       *dnsFallbackFlag,
 		ManageFirewall:    *manageFirewallFlag,
 		NoIPv6:            *noIPv6Flag,
+		AdvertiseExitNode: *advertiseExitFlag,
 		KeyFile:           *keyFileFlag,
 		LogLevel:          *logLevelFlag,
 		TraefikAccessLog:  *traefikAccessLogFlag,

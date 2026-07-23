@@ -9,6 +9,8 @@ export interface Peer {
   gateway_peer_id?: number; // for a routed mobile peer, the agent that carries its /32
   gateway_endpoint?: string; // the address a static peer dials
   has_stored_config?: boolean; // GET /api/peers/{id}/config can rebuild its WireGuard config
+  advertise_exit_node?: boolean; // agent offers to carry other peers' internet traffic
+  exit_node_peer_id?: number; // the exit node this peer's internet traffic routes through
   health_status: "online" | "stale" | "offline" | "revoked" | "static" | "unknown";
   last_seen_age_seconds?: number;
   hostname?: string;

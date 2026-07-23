@@ -124,7 +124,16 @@ sudo ./bin/agent --server https://192.168.1.10:8443 --setup-key <token> --server
 | `--dns-fallback=false` | resolv.conf mode: don't keep original nameservers as fallback |
 | `--gateway-nat-cidrs 100.78.0.9/32` | masquerade static/mobile peers through this agent (legacy; prefer routed mobiles) |
 | `--no-ipv6-endpoints` | never advertise IPv6 direct endpoints for this host (v4 + overlay v6 unaffected) |
+| `--advertise-exit-node` | offer this agent as an **exit node**; nothing routes through it until an admin assigns it per peer in the UI (Linux only) |
 | `--stun-server`, `--key-file`, `--manage-firewall` | STUN server / key path / firewall toggle |
+
+### Exit nodes
+
+Tailscale-style full-tunnel egress: an agent started with `--advertise-exit-node` shows up as assignable under **Peers → (machine) → Exit node**; assigning it routes that machine's **entire internet traffic** through the mesh and out the exit node's own connection. Both sides reconfigure within one sync interval (~30s), no restarts.
+
+Mechanics (all Linux): the client gets `0.0.0.0/0, ::/0` in the exit peer's AllowedIPs plus wg-quick-style policy routing — the WireGuard device and the agent's own control/relay/STUN sockets carry fwmark `51821`, a dedicated table holds `default dev wg-int`, and `suppress_prefixlength 0` keeps every more-specific main-table route (LAN, docker bridges, the overlay itself) working. The exit node enables forwarding and masquerades overlay-sourced traffic out its non-overlay interfaces, with FORWARD accepts kept ahead of the default-deny ACL chain. Assignment pierces default-deny visibility the same way mobile gateways do (the pair must see each other to handshake), and chained exits are rejected server-side.
+
+Caveats: client and exit must both be Linux agents (Windows warns and keeps its normal routes); a docker-sidecar'd client resolves DNS through Docker's embedded resolver **on the host**, so DNS queries bypass the tunnel unless mesh DNS is pushed; the exit sees and NATs the client's cleartext egress, so assign exits you own.
 
 ### Standalone mode (no control plane)
 
@@ -161,6 +170,7 @@ Requires `Authorization: Bearer <admin-token>` or the session cookie.
 | `GET /api/peers/{id}/config` | rebuild a static peer's config (audited) |
 | `GET /api/peers/{id}/ping` | liveness from last report |
 | `POST /api/peers/{id}/revoke` | revoke (IP stays reserved) |
+| `POST /api/peers/{id}/exit-node` | `{"exit_node_peer_id": N}` routes the peer's internet via N; `0` clears |
 | `GET /api/network` · `POST /api/network/preview` · `.../apply` | overlay re-IP |
 | `GET`/`POST /api/setup-keys` · `POST /api/setup-keys/{id}/revoke` | setup keys |
 | `GET`/`POST /api/acl` · `POST /api/acl/{id}/delete` | ACL rules |

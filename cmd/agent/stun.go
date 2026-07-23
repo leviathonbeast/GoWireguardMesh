@@ -33,7 +33,7 @@ func discoverPublicEndpoint6(stunServer string, listenPort int) (string, error) 
 }
 
 func discoverPublicEndpointFamily(network, stunServer string, listenPort int) (string, error) {
-	conn, err := net.ListenUDP(network, &net.UDPAddr{Port: listenPort})
+	conn, err := listenUDPMarked(network, &net.UDPAddr{Port: listenPort})
 	if err != nil {
 		return "", fmt.Errorf("bind %s port %d for STUN: %w", network, listenPort, err)
 	}
@@ -111,7 +111,7 @@ func stunQueryFamily(conn *net.UDPConn, network, stunServer string, timeout time
 // caller pairs the returned IP with the WG listen port). Failure means
 // no usable global v6 right now — the v6 endpoint should be withdrawn.
 func stunReflexive6(stunServer string) (netip.AddrPort, error) {
-	conn, err := net.ListenUDP("udp6", nil)
+	conn, err := listenUDPMarked("udp6", nil)
 	if err != nil {
 		return netip.AddrPort{}, fmt.Errorf("bind ephemeral v6 socket for STUN: %w", err)
 	}
@@ -140,7 +140,7 @@ func checkNAT(servers []string) (mapped netip.AddrPort, natType string, err erro
 		return netip.AddrPort{}, "", fmt.Errorf("no STUN servers configured")
 	}
 
-	conn, err := net.ListenUDP("udp4", nil)
+	conn, err := listenUDPMarked("udp4", nil)
 	if err != nil {
 		return netip.AddrPort{}, "", fmt.Errorf("bind ephemeral socket for STUN: %w", err)
 	}

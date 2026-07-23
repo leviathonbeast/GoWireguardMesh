@@ -30,6 +30,8 @@ type quicRelayProxy struct {
 	peer  wgtypes.Key
 	udp   *net.UDPConn
 	conn  *quic.Conn
+	tr    *quic.Transport // owns the outbound (SO_MARK'd) socket
+	sock  *net.UDPConn    // the socket tr rides; closed with the proxy
 	ctx   context.Context
 	stop  context.CancelFunc
 	wgDst *net.UDPAddr
@@ -69,52 +71,70 @@ func (t *telemetryReporter) startQUICRelay(peer wgtypes.Key) (*quicRelayProxy, e
 	tlsConfig.NextProtos = []string{relayQUICALPN}
 	tlsConfig.MinVersion = tls.VersionTLS13
 
+	// A dedicated socket instead of quic.DialAddr's internal one so it
+	// can carry the SO_MARK that keeps this relay leg on the underlay
+	// when exit-node routing sends default traffic into the tunnel.
+	raddr, err := net.ResolveUDPAddr("udp", endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("resolve QUIC relay %q: %w", endpoint, err)
+	}
+	sock, err := listenUDPMarked("udp", nil)
+	if err != nil {
+		return nil, fmt.Errorf("bind QUIC relay socket: %w", err)
+	}
+	tr := &quic.Transport{Conn: sock}
+
 	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := quic.DialAddr(ctx, endpoint, tlsConfig, &quic.Config{
+	conn, err := tr.Dial(ctx, raddr, tlsConfig, &quic.Config{
 		EnableDatagrams:      true,
 		KeepAlivePeriod:      20 * time.Second,
 		HandshakeIdleTimeout: 10 * time.Second,
 	})
 	if err != nil {
 		cancel()
+		tr.Close()
+		sock.Close()
 		return nil, fmt.Errorf("dial QUIC relay: %w", err)
 	}
-	if !conn.ConnectionState().SupportsDatagrams.Remote {
-		conn.CloseWithError(4, "datagrams required")
+
+	// closeDial unwinds everything the dial built, on any later error.
+	closeDial := func(code quic.ApplicationErrorCode, msg string) {
+		conn.CloseWithError(code, msg)
 		cancel()
+		tr.Close()
+		sock.Close()
+	}
+
+	if !conn.ConnectionState().SupportsDatagrams.Remote {
+		closeDial(4, "datagrams required")
 		return nil, errors.New("QUIC relay did not negotiate datagrams")
 	}
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		conn.CloseWithError(1, "authentication failed")
-		cancel()
+		closeDial(1, "authentication failed")
 		return nil, err
 	}
 	if err := json.NewEncoder(stream).Encode(quicRelayAuth{Token: t.authToken, Target: peer.String()}); err != nil {
-		conn.CloseWithError(1, "authentication failed")
-		cancel()
+		closeDial(1, "authentication failed")
 		return nil, err
 	}
 	_ = stream.SetReadDeadline(time.Now().Add(10 * time.Second))
 	ack, err := bufio.NewReader(io.LimitReader(stream, 16)).ReadString('\n')
 	if err != nil || ack != "ok\n" {
-		conn.CloseWithError(1, "authentication failed")
-		cancel()
+		closeDial(1, "authentication failed")
 		return nil, errors.New("QUIC relay authentication rejected")
 	}
 	_ = stream.Close()
 
 	dev, err := t.wg.Device()
 	if err != nil || dev.ListenPort == 0 {
-		conn.CloseWithError(0, "closed")
-		cancel()
+		closeDial(0, "closed")
 		return nil, errors.New("wireguard device has no listen port yet")
 	}
 	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		conn.CloseWithError(0, "closed")
-		cancel()
+		closeDial(0, "closed")
 		return nil, err
 	}
 	_ = udp.SetReadBuffer(4 << 20)
@@ -124,12 +144,11 @@ func (t *telemetryReporter) startQUICRelay(peer wgtypes.Key) (*quicRelayProxy, e
 		PublicKey: peer, UpdateOnly: true, Endpoint: local,
 	}}}); err != nil {
 		udp.Close()
-		conn.CloseWithError(0, "closed")
-		cancel()
+		closeDial(0, "closed")
 		return nil, err
 	}
 
-	p := &quicRelayProxy{peer: peer, udp: udp, conn: conn, ctx: ctx, stop: cancel,
+	p := &quicRelayProxy{peer: peer, udp: udp, conn: conn, tr: tr, sock: sock, ctx: ctx, stop: cancel,
 		wgDst: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: dev.ListenPort}}
 	go p.udpToQUIC()
 	go p.quicToUDP()
@@ -242,7 +261,13 @@ func (p *quicRelayProxy) quicToUDP() {
 }
 
 func (p *quicRelayProxy) close() {
-	p.once.Do(func() { p.stop(); p.udp.Close(); p.conn.CloseWithError(0, "closed") })
+	p.once.Do(func() {
+		p.stop()
+		p.udp.Close()
+		p.conn.CloseWithError(0, "closed")
+		p.tr.Close()
+		p.sock.Close()
+	})
 }
 func (p *quicRelayProxy) endpoint() *net.UDPAddr { return p.udp.LocalAddr().(*net.UDPAddr) }
 func (p *quicRelayProxy) alive() bool {

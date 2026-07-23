@@ -37,6 +37,11 @@ type ReportRequest struct {
 	// tailed from the node's reverse proxy (e.g. Traefik) since the
 	// previous report. Bounded per report.
 	ProxyEvents []ProxyEvent `json:"proxy_events,omitempty"`
+
+	// AdvertiseExitNode mirrors the enroll-time flag on every report so
+	// removing (or adding) --advertise-exit-node propagates without a
+	// re-enroll. Always sent; the server stores the reported value.
+	AdvertiseExitNode bool `json:"advertise_exit_node,omitempty"`
 }
 
 // ReportResponse doubles as the config-sync channel: every accepted
@@ -55,6 +60,11 @@ type ReportResponse struct {
 	// gateway for (a routed mobile peer's /32 and /128). Non-empty ⇒
 	// the agent enables forwarding without NAT for its overlay iface.
 	GatewayRoutes []string `json:"gateway_routes,omitempty"`
+
+	// ExitNodeActive mirrors EnrollResponse.ExitNodeActive: some peer
+	// is assigned to exit through this agent, so keep forwarding + NAT
+	// for overlay-sourced traffic up. Torn down when it goes false.
+	ExitNodeActive bool `json:"exit_node_active,omitempty"`
 
 	// STUNServers mirrors EnrollResponse.STUNServers so a running
 	// agent adopts mesh STUN endpoints without re-enrolling.

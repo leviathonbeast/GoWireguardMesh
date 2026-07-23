@@ -5,6 +5,7 @@ A self-hosted WireGuard mesh — a NetBird/Tailscale-style overlay network in Go
 - Kernel WireGuard data plane (links survive agent restarts)
 - Automatic NAT traversal: STUN, hole punching, and a relay fallback over 443
 - Per-pair preshared keys, ACL segmentation, embedded web UI, DNS push
+- Exit nodes: route a machine's entire internet traffic out another agent (assigned in the UI)
 - Single binary control plane with an optional built-in relay
 
 ## Build

@@ -63,6 +63,7 @@ var (
 	dnsModeFlag          = flag.String("dns-mode", "auto", "how pushed DNS settings are applied: auto (systemd-resolved when available, else write /etc/resolv.conf directly), resolved, resolv-conf, or off (never touch host DNS); on Windows only off has an effect")
 	noIPv6Flag           = flag.Bool("no-ipv6-endpoints", false, "never advertise IPv6 direct-connection endpoints for this host (v4 and overlay v6 unaffected); for hosts with global v6 you deliberately don't want peers to dial")
 	manageFirewallFlag   = flag.Bool("manage-firewall", true, "open the WireGuard listen port on the host firewall (removed again on shutdown)")
+	advertiseExitFlag    = flag.Bool("advertise-exit-node", false, "offer this agent as an exit node other peers can route their entire internet traffic through; nothing routes here until an admin assigns it per peer in the UI (Linux only)")
 	keyFileFlag          = flag.String("key-file", "wgkey.key", "path to private key file")
 	logLevelFlag         = flag.String("log-level", "info", "minimum log level: debug, info, warn, or error")
 	traefikAccessLogFlag = flag.String("traefik-access-log", "", "path to a Traefik JSON access log to ingest as Proxy Events (empty disables)")
@@ -256,20 +257,20 @@ func loadOrGenerateKey(path string) (wgtypes.Key, error) {
 // nothing else — pinning replaces the system pool rather than adding
 // to it. An empty caFile means the system pool.
 func newHTTPClient(caFile string) (*http.Client, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-
 	tlsConfig, err := newPinnedTLSConfig(caFile)
 	if err != nil {
 		return nil, err
 	}
 
-	if tlsConfig != nil {
-		client.Transport = &http.Transport{
+	// markedDialContext keeps control-plane traffic on the underlay
+	// when exit-node routing is active (SO_MARK bypass; no-op elsewhere).
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
 			TLSClientConfig: tlsConfig,
-		}
-	}
-
-	return client, nil
+			DialContext:     markedDialContext,
+		},
+	}, nil
 }
 
 func newWebSocketDialer(caFile string) (*websocket.Dialer, error) {
@@ -281,6 +282,9 @@ func newWebSocketDialer(caFile string) (*websocket.Dialer, error) {
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 	dialer.TLSClientConfig = tlsConfig
+	// Signal and WS-relay legs must ride the underlay even when
+	// exit-node routing sends default traffic into the tunnel.
+	dialer.NetDialContext = markedDialContext
 
 	return &dialer, nil
 }
@@ -316,14 +320,15 @@ func (e *enrollRejectedError) Error() string { return e.msg }
 
 // enroll registers this node with the control plane and returns the
 // mesh configuration. Never sends the private key.
-func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostname string, listenPort int, publicEndpoint string, candidates []proto.AgentCandidate) (*proto.EnrollResponse, error) {
+func enroll(serverURL, setupKey, serverCA string, publicKey wgtypes.Key, hostname string, listenPort int, publicEndpoint string, candidates []proto.AgentCandidate, advertiseExitNode bool) (*proto.EnrollResponse, error) {
 	reqBody, err := json.Marshal(proto.EnrollRequest{
-		SetupKey:       setupKey,
-		PublicKey:      publicKey.String(),
-		Hostname:       hostname,
-		ListenPort:     listenPort,
-		PublicEndpoint: publicEndpoint,
-		Candidates:     candidates,
+		SetupKey:          setupKey,
+		PublicKey:         publicKey.String(),
+		Hostname:          hostname,
+		ListenPort:        listenPort,
+		PublicEndpoint:    publicEndpoint,
+		Candidates:        candidates,
+		AdvertiseExitNode: advertiseExitNode,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode enroll request: %w", err)

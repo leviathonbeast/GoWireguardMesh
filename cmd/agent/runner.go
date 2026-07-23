@@ -26,6 +26,8 @@ type agentStartupState struct {
 	overlayAddr6    string
 	enrolledPeers   []wgtypes.PeerConfig
 	gatewayRoutes   []string
+	exitNodePeer    bool // one of the enrolled peers is this agent's exit node
+	exitNodeActive  bool // some peer exits through this agent
 	authToken       string
 	initialACL      *proto.ACLPolicy
 	initialDNS      proto.DNSConfig
@@ -62,6 +64,10 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 	if err := deleteInterface(ifaceName); err != nil {
 		return err
 	}
+
+	// A crashed previous run may have left exit-node policy rules and
+	// NAT chains behind; they survive interface deletion.
+	cleanupExitState()
 
 	// A previous run that took over /etc/resolv.conf and crashed left the
 	// takeover in place; put the original back before this run decides
@@ -132,9 +138,12 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 		return err
 	}
 
+	// FirewallMark (Linux) lets WireGuard's own UDP bypass exit-node
+	// policy routing; inert until those rules exist, so always set.
 	if err := backend.ConfigureDevice(wgtypes.Config{
 		PrivateKey:   &privateKey,
 		ListenPort:   &listenPort,
+		FirewallMark: wgFirewallMark(),
 		ReplacePeers: true,
 		Peers:        peers,
 	}); err != nil {
@@ -162,10 +171,21 @@ func (r *agentRunner) run(stop <-chan struct{}) error {
 		slog.Warn("initial gateway route forwarding failed", "error", err)
 	}
 
+	// Exit-node roles known at enrollment start immediately too; the
+	// reporter re-ensures both each sync and tears them down on stop.
+	exitRoutesOn := false
+	if err := applyExitRoutes(ifaceName, state.exitNodePeer, state.overlayAddr6 != "", &exitRoutesOn); err != nil {
+		slog.Warn("initial exit-node routing failed", "error", err)
+	}
+	exitNATOn := false
+	if err := applyExitNodeNAT(ifaceName, state.exitNodeActive, state.networkPrefix, state.networkPrefix6, &exitNATOn); err != nil {
+		slog.Warn("initial exit-node forwarding failed", "error", err)
+	}
+
 	agentPrintf("[agent] wireguard interface setup complete\n")
 	agentPrintf("[agent] direct peer connectivity requires each peer to reach the configured endpoint over UDP\n")
 
-	reporterStop, err := r.startReporter(backend, state)
+	reporterStop, err := r.startReporter(backend, state, exitRoutesOn, exitNATOn)
 	if err != nil {
 		return err
 	}
@@ -318,6 +338,7 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 		effectivePort,
 		publicEndpoint,
 		candidates,
+		r.cfg.AdvertiseExitNode,
 	)
 	if err != nil {
 		return state, err
@@ -327,6 +348,12 @@ func (r *agentRunner) startupState(privateKey wgtypes.Key, listenPort int) (agen
 	state.initialACL = resp.ACL
 	state.initialDNS = resp.DNS
 	state.gatewayRoutes = resp.GatewayRoutes
+	state.exitNodeActive = resp.ExitNodeActive
+	for _, p := range resp.Peers {
+		if p.ExitNode {
+			state.exitNodePeer = true
+		}
+	}
 	state.publicEndpoint = publicEndpoint
 	state.publicEndpoint6 = publicEndpoint6
 	state.stunServers = resp.STUNServers
@@ -494,7 +521,7 @@ func (r *agentRunner) initialPeers(enrolledPeers []wgtypes.PeerConfig) ([]wgtype
 	return append(peers, peerCfg), nil
 }
 
-func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) (chan struct{}, error) {
+func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState, exitRoutesOn, exitNATOn bool) (chan struct{}, error) {
 	if state.authToken == "" {
 		return nil, nil
 	}
@@ -543,6 +570,11 @@ func (r *agentRunner) startReporter(backend wgBackend, state agentStartupState) 
 	reporter.publicEndpoint6 = state.publicEndpoint6
 	reporter.stun6Server = r.cfg.STUNServer
 	reporter.noIPv6 = r.cfg.NoIPv6
+	reporter.advertiseExitNode = r.cfg.AdvertiseExitNode
+	// Seed with what the runner already installed so an assignment
+	// removed before the first sync still gets torn down.
+	reporter.exitRoutesOn = exitRoutesOn
+	reporter.exitNATOn = exitNATOn
 
 	if r.cfg.PortMapping {
 		reporter.portMapper = newPortMapper(state.listenPort)

@@ -52,6 +52,13 @@ services:
       #   sysctls: ["net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1"]
       # Legacy source-NAT mode (hides the phone's source IP) is still available:
       #   --gateway-nat-cidrs ${WGMESH_GATEWAY_NAT_CIDRS}
+      # Exit nodes: add --advertise-exit-node to OFFER this node as full-tunnel
+      # egress (assign per machine in the UI; needs the forwarding sysctls
+      # above). To make THIS container's internet traffic leave via an exit
+      # node, no flag is needed — assign one to this machine in the UI and the
+      # agent installs the policy routing. Caveat: with Docker's embedded DNS,
+      # name lookups happen on the host and bypass the tunnel unless mesh DNS
+      # is pushed.
       # To surface Traefik access logs as Proxy Events, add the flag below
       # and mount Traefik's JSON access log into this sidecar (see volumes):
       #   --traefik-access-log /logs/access.log

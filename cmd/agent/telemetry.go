@@ -94,7 +94,12 @@ type telemetryReporter struct {
 	interval         time.Duration
 	gatewayNATCIDRs  string
 	gatewayForwardOn bool // routed-mobile FORWARD accept currently installed
-	syncMu           sync.Mutex
+
+	advertiseExitNode bool // --advertise-exit-node, re-asserted on every report
+	exitRoutesOn      bool // client-role exit-node policy routing installed
+	exitNATOn         bool // exit-role forwarding + masquerade installed
+
+	syncMu sync.Mutex
 
 	ct        flowDumper   // nil when the platform has no flow source
 	proxyTail *proxyTailer // nil unless --traefik-access-log is set
@@ -300,6 +305,14 @@ func (t *telemetryReporter) run(stop <-chan struct{}) {
 			// Remove the routed-mobile FORWARD accept if we installed it.
 			if err := applyGatewayRoutes(t.iface, nil, &t.gatewayForwardOn); err != nil {
 				slog.Warn("gateway route teardown failed", "error", err)
+			}
+
+			// And any exit-node state, either role.
+			if err := applyExitRoutes(t.iface, false, false, &t.exitRoutesOn); err != nil {
+				slog.Warn("exit-node routing teardown failed", "error", err)
+			}
+			if err := applyExitNodeNAT(t.iface, false, t.network, t.network6, &t.exitNATOn); err != nil {
+				slog.Warn("exit-node forwarding teardown failed", "error", err)
 			}
 
 			return
@@ -729,22 +742,24 @@ func (t *telemetryReporter) send() {
 		// Still send: an empty report is the liveness heartbeat that
 		// keeps last_seen_at fresh on the server.
 		t.post(&proto.ReportRequest{
-			PublicEndpoint: t.publicEndpoint,
-			Candidates:     t.selfCandidates(),
-			NATType:        t.natType,
-			PathStates:     t.currentPathStates(),
+			PublicEndpoint:    t.publicEndpoint,
+			Candidates:        t.selfCandidates(),
+			NATType:           t.natType,
+			PathStates:        t.currentPathStates(),
+			AdvertiseExitNode: t.advertiseExitNode,
 		})
 		return
 	}
 
 	report := &proto.ReportRequest{
-		PublicEndpoint: t.publicEndpoint,
-		Candidates:     t.selfCandidates(),
-		NATType:        t.natType,
-		Counters:       make([]proto.PeerCounter, 0, len(t.pendingCounters)),
-		Flows:          make([]proto.FlowRecord, 0, len(t.pendingFlows)),
-		PathStates:     t.currentPathStates(),
-		ProxyEvents:    proxyEvents,
+		PublicEndpoint:    t.publicEndpoint,
+		Candidates:        t.selfCandidates(),
+		NATType:           t.natType,
+		Counters:          make([]proto.PeerCounter, 0, len(t.pendingCounters)),
+		Flows:             make([]proto.FlowRecord, 0, len(t.pendingFlows)),
+		PathStates:        t.currentPathStates(),
+		ProxyEvents:       proxyEvents,
+		AdvertiseExitNode: t.advertiseExitNode,
 	}
 
 	for _, c := range t.pendingCounters {
@@ -887,6 +902,7 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 	}
 
 	desired := make([]wgtypes.PeerConfig, 0, len(sync.Peers))
+	exitPeer := false
 
 	for _, e := range sync.Peers {
 		cfg, err := peerConfigFromProto(e)
@@ -897,6 +913,9 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 
 		if e.Hostname != "" {
 			t.hostnames[cfg.PublicKey] = e.Hostname
+		}
+		if e.ExitNode {
+			exitPeer = true
 		}
 
 		t.maybeRetryDirect(cfg.PublicKey, endpointCandidatesFromProto(e, cfg.Endpoint), e.PunchEpoch)
@@ -916,6 +935,17 @@ func (t *telemetryReporter) applySync(sync proto.ReportResponse) {
 	}
 	if err := applyGatewayRoutes(t.iface, sync.GatewayRoutes, &t.gatewayForwardOn); err != nil {
 		slog.Warn("gateway route forwarding failed", "error", err)
+	}
+
+	// Exit-node state follows the sync payload both ways: assignment
+	// installs the client policy routing / exit NAT, unassignment tears
+	// it down. Runs AFTER applyOverlayACL so the exit FORWARD jump can
+	// keep itself ahead of a freshly (re)inserted ACL chain.
+	if err := applyExitRoutes(t.iface, exitPeer, t.selfAddr6 != "", &t.exitRoutesOn); err != nil {
+		slog.Warn("exit-node routing sync failed", "error", err)
+	}
+	if err := applyExitNodeNAT(t.iface, sync.ExitNodeActive, t.network, t.network6, &t.exitNATOn); err != nil {
+		slog.Warn("exit-node forwarding sync failed", "error", err)
 	}
 }
 

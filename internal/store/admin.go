@@ -34,14 +34,19 @@ type PeerInfo struct {
 	// peer's private key and can therefore rebuild its config. The sealed
 	// key itself is never carried on PeerInfo.
 	HasStoredConfig bool
-	Hostname        string // "" if unset
-	ListenPort      int    // 0 if unset
-	ObservedIP      string // "" if unknown
-	PublicEndpoint  string // "" if unknown
-	NATType         string // "easy", "hard", or "" if unknown
-	CreatedAt       string
-	LastSeenAt      string // "" if never
-	RevokedAt       string // "" if active
+
+	// AdvertiseExitNode: this agent offers to be an exit node.
+	// ExitNodePeerID: the exit node this peer routes through; 0 if none.
+	AdvertiseExitNode bool
+	ExitNodePeerID    int64
+	Hostname          string // "" if unset
+	ListenPort        int    // 0 if unset
+	ObservedIP        string // "" if unknown
+	PublicEndpoint    string // "" if unknown
+	NATType           string // "easy", "hard", or "" if unknown
+	CreatedAt         string
+	LastSeenAt        string // "" if never
+	RevokedAt         string // "" if active
 }
 
 type SetupKeyInfo struct {
@@ -59,7 +64,9 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, public_key, assigned_ip, COALESCE(assigned_ip6, ''), COALESCE(peer_type, 'agent'),
 		        COALESCE(gateway_peer_id, 0), COALESCE(gateway_endpoint, ''),
-		        private_key_enc IS NOT NULL, hostname, listen_port,
+		        private_key_enc IS NOT NULL,
+		        COALESCE(advertise_exit_node, 0), COALESCE(exit_node_peer_id, 0),
+		        hostname, listen_port,
 		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''), COALESCE(nat_type, ''),
 		        created_at, last_seen_at, revoked_at
 		 FROM peers ORDER BY id`,
@@ -81,7 +88,9 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 		)
 
 		if err := rows.Scan(&p.ID, &p.PublicKey, &p.AssignedIP, &p.AssignedIP6, &p.PeerType,
-			&p.GatewayPeerID, &p.GatewayEndpoint, &p.HasStoredConfig, &hostname, &port,
+			&p.GatewayPeerID, &p.GatewayEndpoint, &p.HasStoredConfig,
+			&p.AdvertiseExitNode, &p.ExitNodePeerID,
+			&hostname, &port,
 			&p.ObservedIP, &p.PublicEndpoint, &p.NATType,
 			&p.CreatedAt, &lastSeen, &revoked); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)

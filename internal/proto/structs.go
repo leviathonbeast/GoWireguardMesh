@@ -16,6 +16,12 @@ type EnrollRequest struct {
 	// agent can know. The STUN endpoint rides PublicEndpoint, and the
 	// server-observed address is added server-side.
 	Candidates []AgentCandidate `json:"candidates,omitempty"`
+
+	// AdvertiseExitNode marks this agent as offering to carry other
+	// peers' full internet traffic (--advertise-exit-node). Advertising
+	// only makes the agent selectable in the admin UI; nothing routes
+	// through it until an admin assigns it to a peer.
+	AdvertiseExitNode bool `json:"advertise_exit_node,omitempty"`
 }
 
 // AgentCandidate is one agent-gathered way to reach this agent's
@@ -47,6 +53,11 @@ type EnrollResponse struct {
 	// overlay interface WITHOUT masquerading, so the mobile peer keeps
 	// its overlay source IP end-to-end. Empty for non-gateway agents.
 	GatewayRoutes []string `json:"gateway_routes,omitempty"`
+
+	// ExitNodeActive means at least one peer is assigned to use THIS
+	// agent as its exit node: enable IP forwarding and masquerade
+	// overlay-sourced traffic leaving through non-overlay interfaces.
+	ExitNodeActive bool `json:"exit_node_active,omitempty"`
 
 	// AuthToken authenticates subsequent agent requests (telemetry
 	// reports). Rotated on every enrollment, including idempotent
@@ -96,6 +107,12 @@ type PeerConfigResponse struct {
 	PersistentKeepaliveInterval *int `json:"persistent_keepalive_interval,omitempty"`
 
 	AllowedIPs []string `json:"allowed_ips"`
+
+	// ExitNode means this peer is the receiving agent's assigned exit
+	// node: its AllowedIPs include 0.0.0.0/0 and ::/0, and the agent
+	// should install policy routing that sends default-route traffic
+	// into the tunnel (WireGuard's own packets excepted via fwmark).
+	ExitNode bool `json:"exit_node,omitempty"`
 }
 
 type EndpointCandidate struct {

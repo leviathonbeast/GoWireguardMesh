@@ -81,15 +81,20 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 		candidatesJSON = string(raw)
 	}
 
+	// advertise_exit_node has no "empty means no update" ambiguity: the
+	// agent knows its flag on every report, so the reported value is
+	// always authoritative (removing the flag withdraws the offer).
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE peers SET last_seen_at = ?,
 		        observed_ip = COALESCE(?, observed_ip),
 		        public_endpoint = COALESCE(?, public_endpoint),
 		        candidates = COALESCE(?, candidates),
-		        nat_type = COALESCE(?, nat_type)
+		        nat_type = COALESCE(?, nat_type),
+		        advertise_exit_node = ?
 		 WHERE id = ?`,
 		now, nullable(observedIP), nullable(report.PublicEndpoint),
-		nullable(candidatesJSON), nullable(natType(report.NATType)), peerID,
+		nullable(candidatesJSON), nullable(natType(report.NATType)),
+		report.AdvertiseExitNode, peerID,
 	); err != nil {
 		return fmt.Errorf("update last_seen_at: %w", err)
 	}

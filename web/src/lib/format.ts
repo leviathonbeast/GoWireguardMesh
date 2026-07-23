@@ -124,6 +124,14 @@ export function gatewayCandidates(peers: Peer[]): Peer[] {
   return peers.filter((p) => p.peer_type === "agent" && !p.revoked_at);
 }
 
+// exitNodeCandidates lists the agents an admin can pick as a peer's exit
+// node: active agents advertising the role, excluding the peer itself.
+export function exitNodeCandidates(peers: Peer[], selfID: number): Peer[] {
+  return peers.filter(
+    (p) => p.peer_type === "agent" && !p.revoked_at && !!p.advertise_exit_node && p.id !== selfID,
+  );
+}
+
 // suggestEndpoint prefills the address the device will dial. A gateway's
 // observed_ip is the source of its last report, so its listen port — not
 // that report's ephemeral source port — is what accepts WireGuard.

@@ -570,6 +570,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /api/peers/{id}/config", srv.requireAdmin(srv.handleStaticPeerConfig))
 	mux.HandleFunc("GET /api/peers/{id}/ping", srv.requireAdmin(srv.handlePingPeer))
 	mux.HandleFunc("POST /api/peers/{id}/address", srv.requireAdmin(srv.handleUpdatePeerAddress))
+	mux.HandleFunc("POST /api/peers/{id}/exit-node", srv.requireAdmin(srv.handleSetExitNode))
 	mux.HandleFunc("POST /api/peers/{id}/revoke", srv.requireAdmin(srv.handleRevokePeer))
 	mux.HandleFunc("POST /api/peers/{id}/remove", srv.requireAdmin(srv.handleRemovePeer))
 	mux.HandleFunc("GET /api/setup-keys", srv.requireAdmin(srv.handleListSetupKeys))
@@ -837,6 +838,16 @@ func (s *server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("store enroll candidates failed", "peer_id", res.Peer.ID, "error", err)
 		} else {
 			res.Peer.CandidatesJSON = cands
+		}
+	}
+
+	// Same non-transactional contract as candidates: every report
+	// re-asserts the exit-node offer, so a lost write self-heals.
+	if req.AdvertiseExitNode != res.Peer.AdvertiseExitNode {
+		if err := s.store.SetAdvertiseExitNode(r.Context(), res.Peer.ID, req.AdvertiseExitNode); err != nil {
+			slog.Warn("store exit-node offer failed", "peer_id", res.Peer.ID, "error", err)
+		} else {
+			res.Peer.AdvertiseExitNode = req.AdvertiseExitNode
 		}
 	}
 
@@ -1254,6 +1265,17 @@ func (s *server) buildPeerEntries(self store.PeerRow, others []store.PeerRow) ([
 			for _, m := range mobilesByGateway[o.ID] {
 				allowed = append(allowed, allowedIPsForPeer(m)...)
 			}
+
+			// Self's assigned exit node carries self's entire internet
+			// traffic: cryptokey-route everything to it. Both families
+			// always — leaving ::/0 out would let v6 leak around the
+			// exit via the underlay. The agent's policy routing decides
+			// what actually uses these routes.
+			if self.ExitNodePeerID != 0 && o.ID == self.ExitNodePeerID {
+				entry.ExitNode = true
+				allowed = append(allowed, "0.0.0.0/0", "::/0")
+			}
+
 			candidates := s.pairCandidates(self, o)
 			if len(candidates) > 0 {
 				entry.Endpoint = &candidates[0].Endpoint
@@ -1279,6 +1301,19 @@ func gatewayRoutesFor(self store.PeerRow, others []store.PeerRow) []string {
 		}
 	}
 	return routes
+}
+
+// exitNodeActiveFor reports whether any visible peer is assigned to
+// route its internet traffic through self — the signal for self to keep
+// forwarding + masquerade up. Assignment implies mutual visibility (see
+// listVisible), so scanning others is exhaustive.
+func exitNodeActiveFor(self store.PeerRow, others []store.PeerRow) bool {
+	for _, o := range others {
+		if o.ExitNodePeerID == self.ID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) buildACLPolicy(ctx context.Context) (*proto.ACLPolicy, error) {
@@ -1374,17 +1409,18 @@ func (s *server) buildResponse(ctx context.Context, res *store.EnrollResult) (pr
 	}
 
 	return proto.EnrollResponse{
-		PeerID:        int(res.Peer.ID),
-		AssignedIP:    res.Peer.AssignedIP,
-		AssignedIP6:   res.Peer.AssignedIP6,
-		NetworkCIDR:   cfg.NetworkCIDR,
-		NetworkCIDR6:  cfg.NetworkCIDR6,
-		DNS:           dnsConfigProto(dnsCfg),
-		Peers:         peers,
-		ACL:           acl,
-		GatewayRoutes: gatewayRoutesFor(res.Peer, res.Others),
-		AuthToken:     res.AuthToken,
-		STUNServers:   s.stunServers,
+		PeerID:         int(res.Peer.ID),
+		AssignedIP:     res.Peer.AssignedIP,
+		AssignedIP6:    res.Peer.AssignedIP6,
+		NetworkCIDR:    cfg.NetworkCIDR,
+		NetworkCIDR6:   cfg.NetworkCIDR6,
+		DNS:            dnsConfigProto(dnsCfg),
+		Peers:          peers,
+		ACL:            acl,
+		GatewayRoutes:  gatewayRoutesFor(res.Peer, res.Others),
+		ExitNodeActive: exitNodeActiveFor(res.Peer, res.Others),
+		AuthToken:      res.AuthToken,
+		STUNServers:    s.stunServers,
 	}, nil
 }
 

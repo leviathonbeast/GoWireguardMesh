@@ -93,6 +93,12 @@ type PeerRow struct {
 	// peer or a normal agent).
 	GatewayPeerID int64
 
+	// AdvertiseExitNode reports whether this agent offers to be an exit
+	// node; ExitNodePeerID is the exit node THIS peer's internet
+	// traffic is assigned to route through (0 = none).
+	AdvertiseExitNode bool
+	ExitNodePeerID    int64
+
 	// Endpoint hint material, in preference order.
 	PublicEndpoint string // STUN-discovered ip:port, "" if unknown
 	ObservedIP     string // enroll/report source IP, "" if unknown
@@ -175,7 +181,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 16
+const schemaVersion = 17
 
 var migrations = map[int]string{
 	2:  migrationV2,
@@ -193,7 +199,19 @@ var migrations = map[int]string{
 	14: migrationV14,
 	15: migrationV15,
 	16: migrationV16,
+	17: migrationV17,
 }
+
+// migrationV17 adds exit-node support. advertise_exit_node is the
+// agent-reported offer (--advertise-exit-node) that makes a peer
+// selectable as an exit; exit_node_peer_id is the admin-assigned exit
+// node this peer's full internet traffic routes through (NULL = none).
+// Assignment is deliberately a separate admin action: advertising
+// alone never moves anyone's traffic.
+const migrationV17 = `
+ALTER TABLE peers ADD COLUMN advertise_exit_node INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE peers ADD COLUMN exit_node_peer_id INTEGER REFERENCES peers(id) ON DELETE SET NULL;
+`
 
 // migrationV16 adds agent-gathered NAT-traversal material. candidates is
 // a JSON array of {endpoint, type} the agent reported for itself (host
@@ -832,21 +850,30 @@ type querier interface {
 // matches bidirectionally, with NULL as a wildcard for "any peer".
 // Filtering here IS the enforcement: an unauthorized peer never
 // learns the other's key, overlay IP, or endpoint.
+//
+// Two relationships pierce default-deny, because the data path cannot
+// exist without them: a gateway agent always sees its routed mobiles,
+// and an exit-node pairing is mutually visible (the client must
+// configure the exit as a WireGuard peer and vice versa).
 func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool) ([]PeerRow, error) {
 	rows, err := q.QueryContext(ctx,
 		`SELECT p.id, p.public_key, COALESCE(p.hostname, ''), p.assigned_ip, COALESCE(p.assigned_ip6, ''),
 		        COALESCE(p.peer_type, 'agent'), COALESCE(p.gateway_peer_id, 0),
+		        COALESCE(p.advertise_exit_node, 0), COALESCE(p.exit_node_peer_id, 0),
 		        COALESCE(p.public_endpoint, ''), COALESCE(p.observed_ip, ''), COALESCE(p.listen_port, 0),
 		        COALESCE(p.candidates, ''), COALESCE(p.nat_type, '')
 		 FROM peers p
 		 WHERE p.revoked_at IS NULL AND p.id != ?
-		   AND (? OR p.gateway_peer_id = ? OR EXISTS (
+		   AND (? OR p.gateway_peer_id = ?
+		        OR p.exit_node_peer_id = ?
+		        OR p.id = (SELECT COALESCE(exit_node_peer_id, 0) FROM peers WHERE id = ?)
+		        OR EXISTS (
 		       SELECT 1 FROM acl_rules r
 		       WHERE (r.src_peer_id IS NULL OR r.src_peer_id IN (?, p.id))
 		         AND (r.dst_peer_id IS NULL OR r.dst_peer_id IN (?, p.id))
 		   ))
 		 ORDER BY p.id`,
-		selfID, defaultAllow, selfID, selfID, selfID,
+		selfID, defaultAllow, selfID, selfID, selfID, selfID, selfID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list peers: %w", err)
@@ -859,6 +886,7 @@ func listVisible(ctx context.Context, q querier, selfID int64, defaultAllow bool
 		var p PeerRow
 		if err := rows.Scan(&p.ID, &p.PublicKey, &p.Hostname, &p.AssignedIP, &p.AssignedIP6,
 			&p.PeerType, &p.GatewayPeerID,
+			&p.AdvertiseExitNode, &p.ExitNodePeerID,
 			&p.PublicEndpoint, &p.ObservedIP, &p.ListenPort,
 			&p.CandidatesJSON, &p.NATType); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
@@ -882,11 +910,13 @@ func (s *Store) PeersForID(ctx context.Context, id int64) (PeerRow, []PeerRow, e
 	err := s.db.QueryRowContext(ctx,
 		`SELECT public_key, assigned_ip, COALESCE(assigned_ip6, ''),
 		        COALESCE(peer_type, 'agent'), COALESCE(gateway_peer_id, 0),
+		        COALESCE(advertise_exit_node, 0), COALESCE(exit_node_peer_id, 0),
 		        COALESCE(public_endpoint, ''), COALESCE(observed_ip, ''), COALESCE(listen_port, 0),
 		        COALESCE(candidates, ''), COALESCE(nat_type, '')
 		 FROM peers WHERE id = ?`, id,
 	).Scan(&self.PublicKey, &self.AssignedIP, &self.AssignedIP6,
 		&self.PeerType, &self.GatewayPeerID,
+		&self.AdvertiseExitNode, &self.ExitNodePeerID,
 		&self.PublicEndpoint, &self.ObservedIP, &self.ListenPort,
 		&self.CandidatesJSON, &self.NATType)
 	if err != nil {
