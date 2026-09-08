@@ -1,27 +1,27 @@
 module gowireguard
 
-go 1.26.5
+go 1.26.8
 
 require (
-	fyne.io/fyne/v2 v2.8.0
-	fyne.io/systray v1.12.2
+	fyne.io/fyne/v2 v2.8.1
+	fyne.io/systray v1.12.3-0.20260810170012-af4e8e793ec4
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/gorilla/websocket v1.5.3
 	github.com/huin/goupnp v1.3.0
-	github.com/jackpal/go-nat-pmp v1.0.2
+	github.com/jackpal/go-nat-pmp v1.1.0
 	github.com/libdns/cloudflare v0.2.2
-	github.com/pion/stun/v3 v3.1.6
+	github.com/pion/stun/v3 v3.1.7
 	github.com/pires/go-proxyproto v0.15.0
-	github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/quic-go v0.62.0
 	github.com/ti-mo/conntrack v0.6.0
 	github.com/vishvananda/netlink v1.3.1
 	go.uber.org/zap v1.28.0
-	golang.org/x/crypto v0.54.0
-	golang.org/x/sys v0.47.0
-	golang.org/x/time v0.15.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/time v0.16.0
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
-	modernc.org/sqlite v1.54.0
+	modernc.org/sqlite v1.58.0
 )
 
 require (
@@ -30,9 +30,7 @@ require (
 	github.com/anthonynsimon/bild v0.16.1 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/fredbi/uri v1.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/fyne-io/gl-js v0.2.1-0.20260315212741-029c47fd27e8 // indirect
 	github.com/fyne-io/glfw-js v0.4.0 // indirect
@@ -63,14 +61,13 @@ require (
 	github.com/nicksnyder/go-i18n/v2 v2.6.1 // indirect
 	github.com/pion/dtls/v3 v3.1.5 // indirect
 	github.com/pion/logging v0.2.4 // indirect
-	github.com/pion/transport/v4 v4.0.2 // indirect
+	github.com/pion/transport/v4 v4.1.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rymdport/portal v0.4.2 // indirect
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/ti-mo/netfilter v0.5.3 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
@@ -78,15 +75,15 @@ require (
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/image v0.44.0 // indirect
-	golang.org/x/mod v0.38.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
-	golang.org/x/tools v0.48.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/tools v0.49.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	modernc.org/libc v1.74.3 // indirect
+	modernc.org/libc v1.75.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.11.0 // indirect
+	modernc.org/memory v1.12.1 // indirect
 )
