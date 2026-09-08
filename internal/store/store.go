@@ -10,7 +10,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/netip"
+	"os"
 	"sync"
 	"time"
 
@@ -172,7 +174,33 @@ func Open(path string, network netip.Prefix, schemaSQL string) (*Store, error) {
 		return nil, err
 	}
 
+	// SQLite creates with 0666&~umask (0644 typically), which would
+	// leave the DB world-readable. It holds setup keys, peer auth token
+	// hashes and argon2id password hashes, so it gets the same 0600 as
+	// every other secret we write (agent key, relay secret, PSK, TLS
+	// key, admin token, session key). Done after ensureSchema so the
+	// -wal/-shm sidecars exist to be tightened too; they carry recently
+	// written pages and matter as much as the main file.
+	if err := secureDBFiles(path); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return &Store{db: db, network: network.Masked()}, nil
+}
+
+// secureDBFiles restricts the SQLite database and its WAL sidecars to
+// owner-only. A sidecar that does not exist yet is not an error: WAL
+// mode recreates it on demand, and SQLite derives the new file's
+// permissions from the main database file.
+func secureDBFiles(path string) error {
+	for _, f := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(f, 0o600); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("secure database file %q: %w", f, err)
+		}
+	}
+
+	return nil
 }
 
 func (s *Store) Close() error {

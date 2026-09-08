@@ -18,6 +18,14 @@
 #
 # State lives in a named volume; back up server-data (db + PSK master +
 # admin token) — losing the PSK master strands enrolled peers.
+#
+# The server and relay images run unprivileged as UID 65532. Upgrading a
+# deployment whose volume was written by an older root-running image
+# needs a one-time chown, or the server cannot write mesh.db:
+#
+#   docker compose run --rm --user 0 server chown -R 65532 /data
+#
+# Fresh deployments need nothing: the image creates /data owned by 65532.
 
 services:
   server:

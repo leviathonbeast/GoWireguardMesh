@@ -23,23 +23,40 @@ RUN CGO_ENABLED=0 go build -ldflags "-X gowireguard/internal/buildinfo.GitCommit
  && CGO_ENABLED=0 go build -ldflags "-X gowireguard/internal/buildinfo.GitCommit=${GIT_COMMIT}" -o /out/agent ./cmd/agent
 
 # --- relay ---
-FROM alpine:3.21 AS relay
-RUN apk add --no-cache ca-certificates
+# Runs unprivileged: the relay only forwards UDP/WebSocket on
+# unprivileged ports and writes its secret to /data. UID 65532 matches
+# the server so a shared volume needs one owner.
+FROM alpine:3.22 AS relay
+RUN apk add --no-cache ca-certificates \
+ && adduser -S -u 65532 -h /data wgmesh \
+ && chown wgmesh /data
 COPY --from=build /out/relay /usr/local/bin/relay
 WORKDIR /data
+USER 65532
 ENTRYPOINT ["relay"]
 
 # --- agent (needs NET_ADMIN + host networking at runtime) ---
-FROM alpine:3.21 AS agent
+# Deliberately stays root: it creates the WireGuard interface, writes
+# routes and policy rules, and drives iptables/nftables. NET_ADMIN
+# without root is not enough for the netlink and iptables work here.
+FROM alpine:3.22 AS agent
 RUN apk add --no-cache ca-certificates iptables
 COPY --from=build /out/agent /usr/local/bin/agent
 WORKDIR /data
 ENTRYPOINT ["agent"]
 
 # --- server (default target) ---
-FROM alpine:3.21 AS server
-RUN apk add --no-cache ca-certificates
+# Runs unprivileged: the control plane is a plain HTTP service over
+# SQLite and needs no capabilities. The default --listen port (8080) is
+# unprivileged, and built-in TLS uses ACME DNS-01, so nothing here has
+# to bind :80/:443. A pre-existing /data volume from an older root-run
+# deployment must be chowned to 65532 once — see docker-compose.yml.
+FROM alpine:3.22 AS server
+RUN apk add --no-cache ca-certificates \
+ && adduser -S -u 65532 -h /data wgmesh \
+ && chown wgmesh /data
 COPY --from=build /out/server /usr/local/bin/server
 WORKDIR /data
 EXPOSE 8080
+USER 65532
 ENTRYPOINT ["server"]

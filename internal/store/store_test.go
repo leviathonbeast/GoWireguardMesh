@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -216,5 +219,42 @@ func TestRemovePeerRequiresRevokedPeerAndFreesAddress(t *testing.T) {
 	}
 	if next.Peer.AssignedIP != first.Peer.AssignedIP {
 		t.Fatalf("next assigned IP = %s, want freed %s", next.Peer.AssignedIP, first.Peer.AssignedIP)
+	}
+}
+
+// TestOpenRestrictsDatabaseFilePermissions: SQLite creates the database
+// with 0666&~umask (0644 under the usual 022), which would leave setup
+// keys, peer auth token hashes and argon2id password hashes readable by
+// every local account — the exact exposure the 0600 on the agent key,
+// relay secret, PSK, TLS key, admin token and session key exists to
+// prevent. The -wal sidecar holds recently written pages, so it counts
+// as much as the main file.
+func TestOpenRestrictsDatabaseFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mesh.db")
+
+	st, err := Open(path, netip.MustParsePrefix("10.42.0.0/16"), gowireguard.SchemaSQL)
+	if err != nil {
+		t.Fatalf("Open() returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	// Force a write so the WAL sidecars are populated, not just created.
+	if _, err := st.CreateSetupKey(context.Background(), 1, time.Hour); err != nil {
+		t.Fatalf("CreateSetupKey() returned error: %v", err)
+	}
+
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		f := path + suffix
+		info, err := os.Stat(f)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Stat(%s) returned error: %v", f, err)
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Fatalf("%s permissions = %v, want owner-only (0600)", filepath.Base(f), perm)
+		}
 	}
 }

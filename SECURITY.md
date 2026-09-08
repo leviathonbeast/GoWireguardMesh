@@ -179,8 +179,19 @@ sqlite3 mesh.db ".backup '/backup/mesh-$(date +%F).db'"
 cp mesh-psk.key admin-token /backup/       # 0600, offsite
 ```
 
-All secret files are written `0600`. Keep them out of the container
-image and out of git (`.gitignore` covers them).
+All secret files are written `0600`, including `mesh.db` and its
+`-wal`/`-shm` sidecars: SQLite would otherwise create them `0644` under
+the usual umask, leaving setup keys, peer auth token hashes and argon2id
+password hashes readable by every local account on the VPS. Keep them
+out of the container image and out of git (`.gitignore` covers them).
+
+The `server` and `relay` container images run unprivileged as UID 65532
+— neither needs capabilities, the default listen port is unprivileged,
+and built-in TLS proves control over DNS (DNS-01), so nothing has to
+bind `:80`/`:443`. The `agent` image stays root by necessity: it creates
+the WireGuard interface and drives netlink, routing rules and iptables.
+Upgrading a volume written by an older root-running image needs a
+one-time `chown -R 65532 /data` (see `docker-compose.yml`).
 
 ## Auditing & logging
 
