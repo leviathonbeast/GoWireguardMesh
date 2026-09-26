@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,26 @@ type quicAssembly struct {
 	at    time.Time
 }
 
+// serverHostname returns the host from the control-plane URL, without
+// any port. Empty when the URL does not parse or the host is itself an
+// IP literal: pinning ServerName to an IP would reintroduce the very
+// IP-SAN requirement this exists to avoid, so in that case the dial
+// falls back to QUIC's own default and a pinned self-signed cert with
+// an IP SAN still verifies.
+func serverHostname(serverURL string) string {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return ""
+	}
+
+	host := u.Hostname()
+	if host == "" || net.ParseIP(host) != nil {
+		return ""
+	}
+
+	return host
+}
+
 func (t *telemetryReporter) startQUICRelay(peer wgtypes.Key) (*quicRelayProxy, error) {
 	endpoint, err := t.requestQUICEndpoint(peer)
 	if err != nil {
@@ -70,6 +91,18 @@ func (t *telemetryReporter) startQUICRelay(peer wgtypes.Key) (*quicRelayProxy, e
 	}
 	tlsConfig.NextProtos = []string{relayQUICALPN}
 	tlsConfig.MinVersion = tls.VersionTLS13
+
+	// Verify against the control plane's hostname, not the relay
+	// endpoint. The relay is served by the control plane on the same
+	// cert, but --relay-host is commonly a bare IP (it is what agents
+	// dial for UDP relay, where a literal address avoids a DNS
+	// dependency). Without this, QUIC derives ServerName from that IP
+	// and an ACME cert — which has only a DNS SAN, as no public CA
+	// issues IP SANs for a domain — fails with "doesn't contain any IP
+	// SANs", dropping every agent to the WebSocket fallback.
+	if host := serverHostname(t.serverURL); host != "" {
+		tlsConfig.ServerName = host
+	}
 
 	// A dedicated socket instead of quic.DialAddr's internal one so it
 	// can carry the SO_MARK that keeps this relay leg on the underlay
