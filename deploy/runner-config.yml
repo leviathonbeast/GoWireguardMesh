@@ -1,0 +1,31 @@
+# gitea-runner config for the wgmesh CI runner.
+# Full reference: `gitea-runner generate-config`.
+
+log:
+  level: info
+
+runner:
+  # One job at a time. The Windows GUI build compiles the whole OpenGL
+  # stack with cgo and wants ~1 GB of gcc RSS on a cold cache; two of
+  # those in parallel is how a small VPS runner gets OOM-killed.
+  capacity: 1
+  timeout: 1h
+  # Must include the label every job in docker-images.yml asks for.
+  labels:
+    - "ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest"
+
+cache:
+  # setup-go's module/build cache rides on this. Leaving it on turns a
+  # cold multi-minute Fyne rebuild into a nearly free one.
+  enabled: true
+
+container:
+  # docker/setup-buildx-action and docker/build-push-action need a real
+  # Docker daemon inside the job. Without this the three image builds
+  # fail with "Cannot connect to the Docker daemon".
+  privileged: true
+  # Let job containers reach the host's daemon and the Gitea instance.
+  network: bridge
+  # Needed so actions/cache and the build context can bind-mount.
+  valid_volumes:
+    - "**"

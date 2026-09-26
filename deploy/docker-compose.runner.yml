@@ -1,0 +1,54 @@
+# Gitea Actions runner for this repo.
+#
+# Registration (one time), on the machine that will run CI:
+#
+#   1. In Gitea: Repo -> Settings -> Actions -> Runners -> "Create new runner"
+#      (or Site Administration -> Actions -> Runners for an instance-wide one)
+#      and copy the registration token.
+#   2. echo "GITEA_RUNNER_REGISTRATION_TOKEN=<token>" > deploy/runner.env
+#   3. docker compose -f deploy/docker-compose.runner.yml up -d
+#
+# The runner registers itself on first start and writes its credentials
+# into the runner-data volume, so the token is only needed once.
+
+services:
+  runner:
+    # v4 renamed the BINARY from act_runner to gitea-runner (and the
+    # dl.gitea.com/act_runner download paths now 404), but the container
+    # image is still published under the old act_runner name.
+    image: docker.gitea.com/act_runner:4.0.0
+    restart: unless-stopped
+    environment:
+      GITEA_INSTANCE_URL: https://gitea.mynetbird.uk
+      # GITEA_RUNNER_REGISTRATION_TOKEN and GITEA_RUNNER_NAME come from
+      # deploy/runner.env below. They are deliberately NOT ${...} here:
+      # env_file is passed into the container, but ${...} interpolation
+      # only reads the shell environment and a .env next to this file,
+      # so a ${...:?} guard would fail before the container ever starts.
+      # The workflow's three jobs all say `runs-on: ubuntu-latest`, so
+      # that label has to exist or every job sits queued forever. Note
+      # the runner logs "Labels from command will be ignored, use labels
+      # defined in config file" — runner-config.yml is the one that
+      # actually takes effect; this stays as a fallback for a run
+      # without the config mount.
+      GITEA_RUNNER_LABELS: ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest
+      # The image's run.sh reads the config path from this env var; it
+      # does NOT take a --config flag. Overriding `command:` here would
+      # bypass run.sh and with it the auto-registration below.
+      CONFIG_FILE: /config.yml
+    env_file:
+      - runner.env
+    volumes:
+      - runner-data:/data
+      # The runner starts job containers on the host's Docker daemon.
+      # This is what makes docker/build-push-action work, and it is also
+      # root-equivalent access to the host: only put this runner on a
+      # machine you trust with the repo's secrets.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # :z relabels for SELinux. Without it the container cannot read
+      # the config on SELinux hosts (openSUSE, Fedora, RHEL) and dies in
+      # a registration retry loop with "permission denied".
+      - ./runner-config.yml:/config.yml:ro,z
+
+volumes:
+  runner-data:

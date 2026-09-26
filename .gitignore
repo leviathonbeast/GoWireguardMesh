@@ -15,3 +15,6 @@ relay-secret
 *.port
 node_modules/
 *.exe
+
+# Gitea Actions runner registration token (never commit)
+deploy/runner.env

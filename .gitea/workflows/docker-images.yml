@@ -95,7 +95,7 @@ jobs:
         uses: actions/checkout@v4
 
       # Caching matters here: the Fyne GUI build compiles the whole
-      # OpenGL stack with cgo (minutes, cold). act_runner's built-in
+      # OpenGL stack with cgo (minutes, cold). The runner's built-in
       # cache server makes reruns nearly free; if caching is disabled
       # on the runner, setup-go just warns and continues.
       - name: Set up Go
@@ -126,7 +126,7 @@ jobs:
             go build -v -trimpath -tags gui -ldflags "-s -w -H windowsgui" -o bin/agent-gui.exe ./cmd/agent
 
       - name: Upload Windows binaries
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: windows-agent
           path: |
@@ -140,6 +140,9 @@ jobs:
   # RELEASE_TOKEN secret.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
+    # Gate on the test/build job: without this the release job races the
+    # tests and a tag whose suite is failing still ships binaries.
+    needs: publish
     runs-on: ubuntu-latest
     permissions:
       contents: write
