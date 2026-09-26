@@ -129,12 +129,17 @@ gitea-runner exec --list -W .gitea/workflows/docker-images.yml
   generated GL bindings takes minutes and ~1 GB of gcc RSS. Keep
   `cache.enabled: true` so reruns are cheap, and `capacity: 1` so two
   never run at once.
-- **`GHESNotSupportedError` on artifact upload** — stay on
-  `actions/upload-artifact@v3`. v4 refuses to run against anything that
-  is not github.com, failing on a hostname check before it ever uses
-  the `ACTIONS_RESULTS_URL` the runner exports. Tag builds do not rely
-  on artifacts regardless: the `release` job attaches the same binaries
-  to the Gitea release.
+- **`GHESNotSupportedError` on artifact upload** — the official
+  `actions/upload-artifact@v4` refuses to run anywhere but github.com,
+  bailing on a hostname check before it ever uses the
+  `ACTIONS_RESULTS_URL` the runner exports. Use the community fork
+  `christopherhx/gitea-upload-artifact@v4` (and
+  `gitea-download-artifact@v4` if you ever need the other half), which
+  stubs `isGhes()` to `false` so the v4 protocol the runner does speak
+  is used as intended. `actions/upload-artifact@v3` also works if you
+  would rather not depend on a fork. Either way tag builds do not rely
+  on artifacts: the `release` job attaches the same binaries to the
+  Gitea release.
 - **`open config file "/config.yml": permission denied`**, looping on
   "Waiting to retry" — SELinux. The bind mounts need the `:z` suffix
   (already set in the compose file); hosts like openSUSE, Fedora and

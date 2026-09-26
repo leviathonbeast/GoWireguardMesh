@@ -125,18 +125,23 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
             go build -v -trimpath -tags gui -ldflags "-s -w -H windowsgui" -o bin/agent-gui.exe ./cmd/agent
 
-      # v3, not v4: upload-artifact@v4 hard-fails on any non-github.com
-      # server with "GHESNotSupportedError" before it ever looks at the
-      # ACTIONS_RESULTS_URL the runner provides. v3 is what works on
-      # Gitea. (Tag builds don't depend on this anyway — the release
-      # job attaches the same binaries to the Gitea release.)
+      # Community fork, not actions/upload-artifact@v4: the official v4
+      # refuses to run anywhere but github.com, failing with
+      # GHESNotSupportedError before it ever uses the
+      # ACTIONS_RESULTS_URL the runner exports. This fork stubs its
+      # isGhes() to return false, so the v4 protocol — which the runner
+      # does speak — is used as intended.
       - name: Upload Windows binaries
-        uses: actions/upload-artifact@v3
+        uses: christopherhx/gitea-upload-artifact@v4
         with:
           name: windows-agent
           path: |
             bin/agent.exe
             bin/agent-gui.exe
+          # v4 makes an artifact immutable once written, so a re-run of
+          # this job would otherwise fail with "an artifact with this
+          # name already exists" instead of replacing it.
+          overwrite: true
 
   # Tag pushes (v*) additionally publish a Gitea release with all
   # binaries attached — a stable download page instead of per-run
