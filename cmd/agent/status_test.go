@@ -100,3 +100,56 @@ func TestLogRingCapsLines(t *testing.T) {
 		t.Fatalf("clear left %q", text)
 	}
 }
+
+// TestSortPeerStatusPutsNamedPeersFirst: the GUI list is scanned by
+// hostname, so named peers lead and sort alphabetically. Unnamed peers
+// (enrolled without a name, or before the first sync lands) fall to the
+// bottom ordered by key, which keeps the list stable rather than
+// reshuffling as names arrive.
+func TestSortPeerStatusPutsNamedPeersFirst(t *testing.T) {
+	peers := []peerStatus{
+		{PublicKey: "aaa"},
+		{PublicKey: "zzz", Hostname: "nas-3"},
+		{PublicKey: "bbb"},
+		{PublicKey: "mmm", Hostname: "homelab-2"},
+		{PublicKey: "ccc", Hostname: "vps-1"},
+	}
+
+	sortPeerStatus(peers)
+
+	want := []string{"homelab-2", "nas-3", "vps-1", "", ""}
+	for i, w := range want {
+		if peers[i].Hostname != w {
+			t.Fatalf("peers[%d].Hostname = %q, want %q (order: %v)", i, peers[i].Hostname, w, hostnamesOf(peers))
+		}
+	}
+
+	// Unnamed tail ordered by key, so the list does not jitter.
+	if peers[3].PublicKey != "aaa" || peers[4].PublicKey != "bbb" {
+		t.Fatalf("unnamed peers not key-ordered: %q, %q", peers[3].PublicKey, peers[4].PublicKey)
+	}
+}
+
+// TestSortPeerStatusStableForDuplicateNames: two hosts can share a
+// name; the key breaks the tie so the order does not flip between
+// refreshes.
+func TestSortPeerStatusStableForDuplicateNames(t *testing.T) {
+	peers := []peerStatus{
+		{PublicKey: "zzz", Hostname: "dup"},
+		{PublicKey: "aaa", Hostname: "dup"},
+	}
+
+	sortPeerStatus(peers)
+
+	if peers[0].PublicKey != "aaa" || peers[1].PublicKey != "zzz" {
+		t.Fatalf("duplicate names not key-ordered: %q, %q", peers[0].PublicKey, peers[1].PublicKey)
+	}
+}
+
+func hostnamesOf(peers []peerStatus) []string {
+	out := make([]string, 0, len(peers))
+	for _, p := range peers {
+		out = append(out, p.Hostname)
+	}
+	return out
+}

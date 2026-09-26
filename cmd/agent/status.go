@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,7 +24,14 @@ const (
 // peerStatus is one WireGuard peer as shown in the GUI: identity,
 // current path, and kernel counters. Snapshots, not live references.
 type peerStatus struct {
-	PublicKey     string
+	PublicKey string
+
+	// Hostname is the peer's control-plane name, when the sync payload
+	// carried one. Advisory display only — identity stays the public
+	// key. Empty for a peer enrolled without a hostname, or before the
+	// first sync has landed.
+	Hostname string
+
 	AllowedIPs    []string // host routes shown bare, wider CIDRs as-is
 	Endpoint      string
 	PathState     string // direct, ws-relay, udp-relay, probing-direct
@@ -177,4 +185,22 @@ func timestampLine(s string) string {
 	}
 
 	return s[:lead] + time.Now().Format("[15:04:05] ") + s[lead:]
+}
+
+// sortPeerStatus orders the GUI peer list: named peers first,
+// alphabetically, then unnamed ones by key. Sorting purely by public
+// key would scatter the hostnames the list is meant to be scanned by;
+// the key stays the tiebreaker so the order is stable when two peers
+// share a name or have none.
+func sortPeerStatus(peers []peerStatus) {
+	sort.Slice(peers, func(i, j int) bool {
+		a, b := peers[i], peers[j]
+		if (a.Hostname == "") != (b.Hostname == "") {
+			return a.Hostname != ""
+		}
+		if a.Hostname != b.Hostname {
+			return a.Hostname < b.Hostname
+		}
+		return a.PublicKey < b.PublicKey
+	})
 }

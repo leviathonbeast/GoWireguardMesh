@@ -455,6 +455,14 @@ func peerTitle(p peerStatus) string {
 		ips = "(no allowed IPs)"
 	}
 
+	// Lead with the control-plane hostname when there is one: it is what
+	// distinguishes peers at a glance, where a column of overlay IPs
+	// does not. The IP stays alongside it, since that is what you need
+	// to actually reach the host.
+	if p.Hostname != "" {
+		return fmt.Sprintf("%s   ·   %s   ·   %s", p.Hostname, ips, pathBadge(p.PathState))
+	}
+
 	return fmt.Sprintf("%s   ·   %s", ips, pathBadge(p.PathState))
 }
 

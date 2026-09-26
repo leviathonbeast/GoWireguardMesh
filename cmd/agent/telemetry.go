@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -361,6 +360,7 @@ func (t *telemetryReporter) publishPeers() {
 
 		peers = append(peers, peerStatus{
 			PublicKey:     peer.PublicKey.String(),
+			Hostname:      t.hostnames[peer.PublicKey],
 			AllowedIPs:    allowed,
 			Endpoint:      endpoint,
 			PathState:     t.pathState(peer.PublicKey),
@@ -374,7 +374,7 @@ func (t *telemetryReporter) publishPeers() {
 
 	t.syncMu.Unlock()
 
-	sort.Slice(peers, func(i, j int) bool { return peers[i].PublicKey < peers[j].PublicKey })
+	sortPeerStatus(peers)
 
 	statusPub.update(func(s *agentStatus) {
 		s.Peers = peers
