@@ -191,7 +191,7 @@ and built-in TLS proves control over DNS (DNS-01), so nothing has to
 bind `:80`/`:443`. The `agent` image stays root by necessity: it creates
 the WireGuard interface and drives netlink, routing rules and iptables.
 Upgrading a volume written by an older root-running image needs a
-one-time `chown -R 65532 /data` (see `docker-compose.yml`).
+one-time `chown -R 65532 /data` (see `UPGRADING.md`).
 
 ## Auditing & logging
 

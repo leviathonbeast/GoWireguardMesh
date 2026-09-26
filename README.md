@@ -40,6 +40,7 @@ The agent enrolls, gets an overlay IP, brings up `wg-int`, and connects to its p
 
 - **[DOCS.md](DOCS.md)** — full reference: every flag, the web UI and admin API, relay/NAT-traversal internals, DNS, ACLs, TLS modes (direct Let's Encrypt, SNI passthrough, behind a proxy), Docker/Gitea deployment, mobile (iPhone/Android), and the Windows agent.
 - **[SECURITY.md](SECURITY.md)** — production hardening and the VPS + per-service-sidecar deployment topology.
+- **[UPGRADING.md](UPGRADING.md)** — operator steps needed when moving between releases (schema migrations, volume ownership); mirrored into each release's notes.
 
 ## Repository layout
 

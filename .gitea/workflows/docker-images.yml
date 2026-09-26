@@ -194,6 +194,20 @@ jobs:
 
           body=$(printf 'wgmesh %s — server + agent binaries (linux/amd64 and windows/amd64).\n\nWindows: agent.exe and agent-gui.exe need wintun.dll from https://www.wintun.net next to the executable.' "$TAG")
 
+          # Surface this tag's operator steps (schema migrations, volume
+          # ownership changes) on the Releases page, next to the binaries
+          # being downloaded — a note buried in docker-compose.yml is not
+          # somewhere anyone looks mid-upgrade. Silent when the release
+          # needs no action.
+          notes=$(awk -v tag="## $TAG" '
+            $0 == tag { grabbing = 1; next }
+            grabbing && /^## / { exit }
+            grabbing { print }
+          ' UPGRADING.md 2>/dev/null || true)
+          if [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            body=$(printf '%s\n\n## Upgrading\n%s' "$body" "$notes")
+          fi
+
           # Create the release; if it already exists (job re-run), look
           # up its id instead.
           id=$(curl -sSf -X POST "$API/repos/$REPO/releases" \

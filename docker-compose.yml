@@ -26,6 +26,9 @@
 #   docker compose run --rm --user 0 server chown -R 65532 /data
 #
 # Fresh deployments need nothing: the image creates /data owned by 65532.
+#
+# Upgrade steps for every release live in UPGRADING.md, and are copied
+# into each release's notes on the Releases page.
 
 services:
   server:
