@@ -125,8 +125,13 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
             go build -v -trimpath -tags gui -ldflags "-s -w -H windowsgui" -o bin/agent-gui.exe ./cmd/agent
 
+      # v3, not v4: upload-artifact@v4 hard-fails on any non-github.com
+      # server with "GHESNotSupportedError" before it ever looks at the
+      # ACTIONS_RESULTS_URL the runner provides. v3 is what works on
+      # Gitea. (Tag builds don't depend on this anyway — the release
+      # job attaches the same binaries to the Gitea release.)
       - name: Upload Windows binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: windows-agent
           path: |

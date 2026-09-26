@@ -106,7 +106,7 @@ That exercises `publish` and `windows-binaries` without cutting a
 release. Then a real tag:
 
 ```sh
-git push origin main v0.8.8
+git push origin main v0.9.0
 ```
 
 Local dry run of the plan, without a server:
@@ -129,8 +129,12 @@ gitea-runner exec --list -W .gitea/workflows/docker-images.yml
   generated GL bindings takes minutes and ~1 GB of gcc RSS. Keep
   `cache.enabled: true` so reruns are cheap, and `capacity: 1` so two
   never run at once.
-- **Artifact upload fails** — needs `actions/upload-artifact@v4` against
-  Gitea 1.28; v3's protocol is not served.
+- **`GHESNotSupportedError` on artifact upload** — stay on
+  `actions/upload-artifact@v3`. v4 refuses to run against anything that
+  is not github.com, failing on a hostname check before it ever uses
+  the `ACTIONS_RESULTS_URL` the runner exports. Tag builds do not rely
+  on artifacts regardless: the `release` job attaches the same binaries
+  to the Gitea release.
 - **`open config file "/config.yml": permission denied`**, looping on
   "Waiting to retry" — SELinux. The bind mounts need the `:z` suffix
   (already set in the compose file); hosts like openSUSE, Fedora and
