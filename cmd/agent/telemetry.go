@@ -18,6 +18,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"gowireguard/internal/buildinfo"
 	"gowireguard/internal/proto"
 
 	"github.com/gorilla/websocket"
@@ -747,6 +748,7 @@ func (t *telemetryReporter) send() {
 			NATType:           t.natType,
 			PathStates:        t.currentPathStates(),
 			AdvertiseExitNode: t.advertiseExitNode,
+			Version:           buildinfo.VersionString(),
 		})
 		return
 	}
@@ -760,6 +762,7 @@ func (t *telemetryReporter) send() {
 		PathStates:        t.currentPathStates(),
 		ProxyEvents:       proxyEvents,
 		AdvertiseExitNode: t.advertiseExitNode,
+		Version:           buildinfo.VersionString(),
 	}
 
 	for _, c := range t.pendingCounters {

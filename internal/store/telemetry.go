@@ -25,6 +25,26 @@ func natType(v string) string {
 	}
 }
 
+// agentVersion bounds an agent-reported build string. Unlike nat_type
+// this cannot be an allowlist — any tag or commit is legitimate — so it
+// is constrained instead: printable ASCII only, no spaces, capped at 64
+// bytes. The value is rendered in the admin UI, and the reporting agent
+// is authenticated but not trusted to send something sane, so anything
+// outside that shape is dropped as "not reported" rather than stored.
+func agentVersion(v string) string {
+	if v == "" || len(v) > 64 {
+		return ""
+	}
+
+	for i := 0; i < len(v); i++ {
+		if v[i] <= ' ' || v[i] > '~' {
+			return ""
+		}
+	}
+
+	return v
+}
+
 // AuthenticatePeer resolves a peer auth token to the peer's id and
 // overlay IP. Returns ErrUnauthorized for unknown tokens, revoked
 // peers, and (when TokenTTL is set) tokens older than the TTL — all
@@ -90,10 +110,12 @@ func (s *Store) ApplyReport(ctx context.Context, peerID int64, observedIP string
 		        public_endpoint = COALESCE(?, public_endpoint),
 		        candidates = COALESCE(?, candidates),
 		        nat_type = COALESCE(?, nat_type),
+		        agent_version = COALESCE(?, agent_version),
 		        advertise_exit_node = ?
 		 WHERE id = ?`,
 		now, nullable(observedIP), nullable(report.PublicEndpoint),
 		nullable(candidatesJSON), nullable(natType(report.NATType)),
+		nullable(agentVersion(report.Version)),
 		report.AdvertiseExitNode, peerID,
 	); err != nil {
 		return fmt.Errorf("update last_seen_at: %w", err)

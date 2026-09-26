@@ -18,3 +18,10 @@ node_modules/
 
 # Gitea Actions runner registration token (never commit)
 deploy/runner.env
+
+# Server secrets, if a binary is ever run from the repo root
+session.key
+admin-token
+*.db
+*.db-wal
+*.db-shm

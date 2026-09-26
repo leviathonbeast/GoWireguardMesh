@@ -113,6 +113,11 @@ type PeerRow struct {
 	// NATType is the agent's NAT classification: "easy", "hard", or
 	// "" (unknown / never reported).
 	NATType string
+
+	// Version is the agent's reported build — a release tag ("v0.9.1")
+	// or a short commit for a dev build. "" for a static/mobile peer,
+	// which runs no agent, or an agent predating the field.
+	Version string
 }
 
 type EnrollResult struct {
@@ -209,7 +214,7 @@ func (s *Store) Close() error {
 
 // schemaVersion is the current PRAGMA user_version. schema.sql is the
 // v1 baseline; later versions are applied as migrations on top.
-const schemaVersion = 17
+const schemaVersion = 18
 
 var migrations = map[int]string{
 	2:  migrationV2,
@@ -228,7 +233,16 @@ var migrations = map[int]string{
 	15: migrationV15,
 	16: migrationV16,
 	17: migrationV17,
+	18: migrationV18,
 }
+
+// migrationV18 records the agent's build so the UI can show what each
+// node runs and flag nodes behind the control plane. Reported on every
+// telemetry cycle, so an upgraded agent refreshes it without a
+// re-enroll; NULL for static/mobile peers, which run no agent.
+const migrationV18 = `
+ALTER TABLE peers ADD COLUMN agent_version TEXT;
+`
 
 // migrationV17 adds exit-node support. advertise_exit_node is the
 // agent-reported offer (--advertise-exit-node) that makes a peer

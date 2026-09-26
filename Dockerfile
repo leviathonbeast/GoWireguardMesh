@@ -13,14 +13,20 @@ RUN npm run build
 # --- Go binaries ---
 FROM golang:1.27-alpine AS build
 ARG GIT_COMMIT=unknown
+# VERSION is the release tag; binaries report it to the control plane so
+# the web UI can flag agents running an older build. Empty off a tag,
+# where buildinfo falls back to the short commit.
+ARG VERSION=
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
-RUN CGO_ENABLED=0 go build -ldflags "-X gowireguard/internal/buildinfo.GitCommit=${GIT_COMMIT}" -o /out/server ./cmd/server \
- && CGO_ENABLED=0 go build -ldflags "-X gowireguard/internal/buildinfo.GitCommit=${GIT_COMMIT}" -o /out/relay ./cmd/relay \
- && CGO_ENABLED=0 go build -ldflags "-X gowireguard/internal/buildinfo.GitCommit=${GIT_COMMIT}" -o /out/agent ./cmd/agent
+RUN LDFLAGS="-X gowireguard/internal/buildinfo.GitCommit=${GIT_COMMIT}"; \
+    if [ -n "${VERSION}" ]; then LDFLAGS="$LDFLAGS -X gowireguard/internal/buildinfo.Version=${VERSION}"; fi; \
+    CGO_ENABLED=0 go build -ldflags "$LDFLAGS" -o /out/server ./cmd/server \
+ && CGO_ENABLED=0 go build -ldflags "$LDFLAGS" -o /out/relay ./cmd/relay \
+ && CGO_ENABLED=0 go build -ldflags "$LDFLAGS" -o /out/agent ./cmd/agent
 
 # --- relay ---
 # Runs unprivileged: the relay only forwards UDP/WebSocket on

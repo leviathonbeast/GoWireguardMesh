@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { AppCtx } from "../appctx";
 import type { DNSConfig, NetworkMigrationPlan } from "../types";
-import { parseListInput, splitNameservers } from "../lib/format";
+import { agentVersionState, parseListInput, peerLabel, splitNameservers } from "../lib/format";
 import { migrationChangeMatches } from "../lib/match";
 import { randomOverlayV4, randomOverlayV6 } from "../lib/randomnet";
 import { Badge, PageHead, Paginated, SearchBox, Section } from "../components/ui";
@@ -127,9 +127,47 @@ export default function Settings({ ctx }: { ctx: AppCtx }) {
 
   const dirty = () => setDNSDirty(true);
 
+  // Agents that have reported a build, and the subset running something
+  // other than the control plane's.
+  const reportingAgents = peers.filter((p) => !p.revoked_at && p.peer_type !== "static" && p.agent_version);
+  const outdatedAgents = reportingAgents.filter(
+    (p) => agentVersionState(p, ctx.data.serverInfo?.version) === "outdated",
+  );
+
   return (
     <>
       <PageHead title="Settings" sub="Overlay network ranges and DNS pushed to peers." />
+
+      <Section title="Build">
+        <div className="panel">
+          <div className="detail-list">
+            <div>
+              <span>Control plane</span>
+              <strong>{ctx.data.serverInfo?.version ?? "unknown"}</strong>
+            </div>
+            <div>
+              <span>Agents out of date</span>
+              <strong className={outdatedAgents.length ? "text-warn" : undefined}>
+                {ctx.data.serverInfo
+                  ? outdatedAgents.length
+                    ? `${outdatedAgents.length} of ${reportingAgents.length}`
+                    : "none"
+                  : "unknown"}
+              </strong>
+            </div>
+            {outdatedAgents.length > 0 && (
+              <div>
+                <span>Which</span>
+                <strong className="text-warn">
+                  {outdatedAgents
+                    .map((p) => `${peerLabel(p.hostname, p.assigned_ip)} (${p.agent_version})`)
+                    .join(", ")}
+                </strong>
+              </div>
+            )}
+          </div>
+        </div>
+      </Section>
 
       <Section title="Overlay network">
         <div className="grid gap-3 lg:grid-cols-2">

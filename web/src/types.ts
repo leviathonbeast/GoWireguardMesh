@@ -18,6 +18,7 @@ export interface Peer {
   observed_ip?: string;
   public_endpoint?: string;
   nat_type?: "easy" | "hard" | "static"; // agent's NAT classification; "static" = operator-pinned endpoint; absent when unknown
+  agent_version?: string; // build the agent last reported; absent for static peers and pre-0.9.2 agents
   created_at: string;
   last_seen_at?: string;
   revoked_at?: string;
@@ -203,4 +204,11 @@ export interface NetworkMigrationPlan {
   target: NetworkConfig;
   changes: NetworkPeerChange[];
   message?: string;
+}
+
+// ServerInfo is the control plane's own build, used as the reference
+// for deciding which agents are running something older.
+export interface ServerInfo {
+  version: string;
+  commit: string;
 }

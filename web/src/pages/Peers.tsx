@@ -10,6 +10,7 @@ import {
   gatewayName,
   humanBytes,
   lastSeenLabel,
+  agentVersionState,
   natLabel,
   peerLabel,
   shortKey,
@@ -185,6 +186,7 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
                     <th>hostname</th>
                     <th>overlay ip</th>
                     <th>last seen</th>
+                    <th className="hidden lg:table-cell">version</th>
                     <th className="hidden md:table-cell">public key</th>
                     <th className="hidden lg:table-cell">endpoint</th>
                     <th className="hidden xl:table-cell">created</th>
@@ -194,7 +196,7 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
                 <tbody>
                   {shown.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="text-muted">
+                      <td colSpan={9} className="text-muted">
                         {peers.length ? "no matching peers" : "no peers enrolled"}
                       </td>
                     </tr>
@@ -223,6 +225,9 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
                           {p.assigned_ip6 && <div className="text-xs text-muted">{p.assigned_ip6}</div>}
                         </td>
                         <td className="text-muted">{lastSeenLabel(p)}</td>
+                        <td className="hidden lg:table-cell">
+                          <AgentVersion peer={p} serverVersion={ctx.data.serverInfo?.version} />
+                        </td>
                         <td className="hidden font-mono text-xs md:table-cell">
                           <span title={p.public_key}>{shortKey(p.public_key)}</span>{" "}
                           <CopyButton text={p.public_key} />
@@ -266,7 +271,7 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
                       </tr>
                       {editingPeerID === p.id && (
                         <tr>
-                          <td colSpan={8}>{addressEditor(p)}</td>
+                          <td colSpan={9}>{addressEditor(p)}</td>
                         </tr>
                       )}
                     </Fragment>
@@ -293,6 +298,36 @@ export default function Peers({ ctx }: { ctx: AppCtx }) {
 // ExitNodeSection assigns which advertising agent carries this peer's
 // entire internet traffic. Server-validated (must advertise, no chains);
 // both agents pick the change up on their next sync.
+// AgentVersion shows the build an agent last reported, flagged when it
+// differs from the control plane's own. A static peer runs no agent and
+// an agent predating the field reports nothing, so both render as a
+// muted dash rather than a false "outdated".
+function AgentVersion({ peer, serverVersion }: { peer: Peer; serverVersion?: string }) {
+  const state = agentVersionState(peer, serverVersion);
+
+  if (!peer.agent_version) {
+    return (
+      <span className="text-muted" title={peer.peer_type === "static" ? "no agent runs on a static peer" : "not reported yet"}>
+        —
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className={state === "outdated" ? "text-warn" : "text-muted"}
+      title={
+        state === "outdated"
+          ? `control plane runs ${serverVersion}; this agent is out of date`
+          : undefined
+      }
+    >
+      {peer.agent_version}
+      {state === "outdated" && " !"}
+    </span>
+  );
+}
+
 function ExitNodeSection({ ctx, peer }: { ctx: AppCtx; peer: Peer }) {
   const { peers } = ctx.data;
   const [saving, setSaving] = useState(false);
@@ -548,6 +583,14 @@ function PeerDetail({
               <div>
                 <span>NAT</span>
                 <strong>{peer.nat_type ? natLabel(peer.nat_type) : "unknown"}</strong>
+              </div>
+            )}
+            {peer.peer_type !== "static" && (
+              <div>
+                <span>Agent version</span>
+                <strong>
+                  <AgentVersion peer={peer} serverVersion={ctx.data.serverInfo?.version} />
+                </strong>
               </div>
             )}
           </div>

@@ -10,6 +10,7 @@ import type {
   NetworkConfig,
   Peer,
   ProxyEvent,
+  ServerInfo,
   SetupKey,
 } from "./types";
 
@@ -51,6 +52,9 @@ export type AppData = {
   dns: DNSConfig;
   account: Account | null;
   users: Account[];
+  // The control plane's own build; null when unavailable (older
+  // server, or a transient fetch failure) — nothing is flagged then.
+  serverInfo: ServerInfo | null;
 };
 
 // AppCtx is what every page receives from the shell: the data snapshot

@@ -42,6 +42,13 @@ type ReportRequest struct {
 	// removing (or adding) --advertise-exit-node propagates without a
 	// re-enroll. Always sent; the server stores the reported value.
 	AdvertiseExitNode bool `json:"advertise_exit_node,omitempty"`
+
+	// Version is the agent's build: a release tag ("v0.9.1") or, for a
+	// dev build, a short commit. Reported every cycle so an upgraded
+	// agent shows up without a re-enroll, and so the UI can flag nodes
+	// running something older than the control plane. Empty from
+	// agents predating this field.
+	Version string `json:"version,omitempty"`
 }
 
 // ReportResponse doubles as the config-sync channel: every accepted

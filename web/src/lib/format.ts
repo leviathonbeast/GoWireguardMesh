@@ -86,6 +86,23 @@ export function natLabel(t: "easy" | "hard" | "static"): string {
   return t === "easy" ? "easy NAT" : "hard NAT (symmetric)";
 }
 
+// agentVersionState classifies a peer's reported build against the
+// control plane's own. Deliberately an exact-match test rather than a
+// semver comparison: server and agents ship from the same tagged
+// release here, so "differs from the server" is the useful signal, and
+// a mismatch is worth surfacing whichever side is newer.
+//
+// Returns "unknown" when there is nothing to judge — a static peer runs
+// no agent, an agent predating the field reports nothing, and the
+// server build is absent on an older control plane.
+export function agentVersionState(
+  p: Peer,
+  serverVersion?: string,
+): "current" | "outdated" | "unknown" {
+  if (p.peer_type === "static" || !p.agent_version || !serverVersion) return "unknown";
+  return p.agent_version === serverVersion ? "current" : "outdated";
+}
+
 export function lastSeenLabel(p: Peer): string {
   if (p.revoked_at) return "revoked";
   if (p.peer_type === "static" || p.health_status === "static") return "WireGuard-only";

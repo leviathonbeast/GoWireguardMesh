@@ -24,6 +24,18 @@ if ! git diff --quiet --ignore-submodules HEAD 2>/dev/null; then
 	GIT_COMMIT="${GIT_COMMIT}-dirty"
 fi
 
+# VERSION is the release tag the binaries report to the control plane
+# (shown in the web UI, and compared against the server's own build to
+# flag out-of-date agents). Prefer an explicit VERSION from the release
+# workflow; otherwise use the tag at HEAD. Left empty off a tag, where
+# buildinfo falls back to the short commit.
+VERSION="${VERSION:-$(git describe --tags --exact-match 2>/dev/null || printf '')}"
+
+LDFLAGS_VERSION="-X gowireguard/internal/buildinfo.GitCommit=$GIT_COMMIT"
+if [[ -n "$VERSION" ]]; then
+	LDFLAGS_VERSION="$LDFLAGS_VERSION -X gowireguard/internal/buildinfo.Version=$VERSION"
+fi
+
 # --web: rebuild the embedded UI bundle (only if npm is available).
 if [[ "${1:-}" == "--web" ]]; then
 	if command -v npm >/dev/null 2>&1; then
@@ -39,10 +51,10 @@ build() {
 	local goos="$1" goarch="$2" cmd="$3" out="$4"
 	printf '>> %-8s %-6s cmd/%-7s -> %s/%s\n' "$goos" "$goarch" "$cmd" "$OUT" "$out"
 	GOOS="$goos" GOARCH="$goarch" \
-		go build -trimpath -ldflags "-s -w -X gowireguard/internal/buildinfo.GitCommit=$GIT_COMMIT" -o "$OUT/$out" "./cmd/$cmd"
+		go build -trimpath -ldflags "-s -w $LDFLAGS_VERSION" -o "$OUT/$out" "./cmd/$cmd"
 }
 
-echo "== building wgmesh (output: $OUT/) =="
+echo "== building wgmesh ${VERSION:-$GIT_COMMIT} (output: $OUT/) =="
 mkdir -p "$OUT"
 
 # Linux amd64 — control plane + agent. The relay is built into the
@@ -69,7 +81,7 @@ WINDOWS_CC="${WINDOWS_CC:-$(command -v x86_64-w64-mingw32-gcc || true)}"
 if [[ -n "$WINDOWS_CC" ]]; then
 	printf '>> %-8s %-6s cmd/%-7s -> %s/%s (gui, cgo)\n' windows amd64 agent "$OUT" agent-gui.exe
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC="$WINDOWS_CC" \
-		go build -trimpath -tags gui -ldflags "-s -w -H windowsgui -X gowireguard/internal/buildinfo.GitCommit=$GIT_COMMIT" -o "$OUT/agent-gui.exe" ./cmd/agent
+		go build -trimpath -tags gui -ldflags "-s -w -H windowsgui $LDFLAGS_VERSION" -o "$OUT/agent-gui.exe" ./cmd/agent
 else
 	echo "!! no x86_64-w64-mingw32 compiler found; skipping agent-gui.exe (set WINDOWS_CC to enable)"
 fi

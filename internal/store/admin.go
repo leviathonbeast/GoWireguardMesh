@@ -44,9 +44,13 @@ type PeerInfo struct {
 	ObservedIP        string // "" if unknown
 	PublicEndpoint    string // "" if unknown
 	NATType           string // "easy", "hard", or "" if unknown
-	CreatedAt         string
-	LastSeenAt        string // "" if never
-	RevokedAt         string // "" if active
+	// AgentVersion is the build the agent last reported: a release tag
+	// ("v0.9.1") or a short commit for a dev build. "" for a static
+	// peer (no agent) or an agent predating the field.
+	AgentVersion string
+	CreatedAt    string
+	LastSeenAt   string // "" if never
+	RevokedAt    string // "" if active
 }
 
 type SetupKeyInfo struct {
@@ -68,6 +72,7 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 		        COALESCE(advertise_exit_node, 0), COALESCE(exit_node_peer_id, 0),
 		        hostname, listen_port,
 		        COALESCE(observed_ip, ''), COALESCE(public_endpoint, ''), COALESCE(nat_type, ''),
+		        COALESCE(agent_version, ''),
 		        created_at, last_seen_at, revoked_at
 		 FROM peers ORDER BY id`,
 	)
@@ -92,6 +97,7 @@ func (s *Store) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 			&p.AdvertiseExitNode, &p.ExitNodePeerID,
 			&hostname, &port,
 			&p.ObservedIP, &p.PublicEndpoint, &p.NATType,
+			&p.AgentVersion,
 			&p.CreatedAt, &lastSeen, &revoked); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}

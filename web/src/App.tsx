@@ -12,6 +12,7 @@ import type {
   NetworkConfig,
   Peer,
   ProxyEvent,
+  ServerInfo,
   SetupKey,
 } from "./types";
 import type { AppCtx, AppData, ConfirmAction, Tab } from "./appctx";
@@ -61,6 +62,7 @@ const EMPTY_DATA: AppData = {
   dns: { enabled: false, magic_dns: true, domain: "vpn", nameservers: [], search_domains: ["vpn"] },
   account: null,
   users: [],
+  serverInfo: null,
 };
 
 async function loadDashboard(): Promise<AppData> {
@@ -84,7 +86,12 @@ async function loadDashboard(): Promise<AppData> {
   const account = await api<Account>("/api/account").catch(() => null);
   const users = await api<Account[]>("/api/users").catch(() => [] as Account[]);
 
-  return { peers, keys, links, flows, connEvents, proxyEvents, acl, audit, access, network, dns, account, users };
+  // Tolerated separately: a control plane older than this UI has no
+  // /api/server-info, and that must not blank the whole dashboard. A
+  // null here just means "no reference build", so nothing is flagged.
+  const serverInfo = await api<ServerInfo>("/api/server-info").catch(() => null);
+
+  return { peers, keys, links, flows, connEvents, proxyEvents, acl, audit, access, network, dns, account, users, serverInfo };
 }
 
 function Brand() {

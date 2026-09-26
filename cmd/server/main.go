@@ -579,6 +579,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("GET /api/link-stats", srv.requireAdmin(srv.handleListLinkStats))
 	mux.HandleFunc("GET /api/flows", srv.requireAdmin(srv.handleListFlows))
 	mux.HandleFunc("GET /api/access-log", srv.requireAdmin(srv.handleListAccessLog))
+	mux.HandleFunc("GET /api/server-info", srv.requireAdmin(srv.handleServerInfo))
 	mux.HandleFunc("GET /api/network", srv.requireAdmin(srv.handleGetNetwork))
 	mux.HandleFunc("POST /api/network/preview", srv.requireAdmin(srv.handlePreviewNetworkMigration))
 	mux.HandleFunc("POST /api/network/apply", srv.requireAdmin(srv.handleApplyNetworkMigration))

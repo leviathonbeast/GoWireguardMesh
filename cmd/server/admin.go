@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"gowireguard/internal/buildinfo"
 	"gowireguard/internal/store"
 )
 
@@ -113,9 +114,13 @@ type peerJSON struct {
 	ObservedIP        string `json:"observed_ip,omitempty"`
 	PublicEndpoint    string `json:"public_endpoint,omitempty"`
 	NATType           string `json:"nat_type,omitempty"` // easy | hard | static (pinned endpoint); absent when unknown
-	CreatedAt         string `json:"created_at"`
-	LastSeenAt        string `json:"last_seen_at,omitempty"`
-	RevokedAt         string `json:"revoked_at,omitempty"`
+	// AgentVersion is the build the agent last reported — a release tag
+	// or a short commit. Absent for static peers (no agent) and for
+	// agents predating the field.
+	AgentVersion string `json:"agent_version,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	LastSeenAt   string `json:"last_seen_at,omitempty"`
+	RevokedAt    string `json:"revoked_at,omitempty"`
 }
 
 type setupKeyJSON struct {
@@ -193,6 +198,7 @@ func peerInfoJSON(p store.PeerInfo) peerJSON {
 		ObservedIP:        p.ObservedIP,
 		PublicEndpoint:    p.PublicEndpoint,
 		NATType:           p.NATType,
+		AgentVersion:      p.AgentVersion,
 		CreatedAt:         p.CreatedAt,
 		LastSeenAt:        p.LastSeenAt,
 		RevokedAt:         p.RevokedAt,
@@ -281,6 +287,20 @@ func (s *server) handleListSetupKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+// serverInfoJSON tells the UI what the control plane itself is running,
+// so it can mark agents reporting a different build as out of date.
+type serverInfoJSON struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+}
+
+func (s *server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, serverInfoJSON{
+		Version: buildinfo.VersionString(),
+		Commit:  buildinfo.Commit(),
+	})
 }
 
 func (s *server) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
