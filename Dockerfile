@@ -11,7 +11,7 @@ COPY web/ ./
 RUN npm run build
 
 # --- Go binaries ---
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 ARG GIT_COMMIT=unknown
 WORKDIR /src
 COPY go.mod go.sum ./
