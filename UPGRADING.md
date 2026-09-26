@@ -8,6 +8,16 @@ The `release` workflow copies the section matching a tag into that
 release's notes, so these steps show up next to the binaries on the
 Releases page.
 
+## v0.9.4
+
+Agent-side only; the control plane needs no change.
+
+The Windows GUI peer list now identifies peers by their control-plane
+hostname instead of overlay IP and a truncated key. Nothing to
+configure: the name comes from the sync payload a peer was enrolled
+with. Peers enrolled without a hostname keep showing their overlay IP
+and sort to the bottom of the list.
+
 ## v0.9.3
 
 Agent-side fix; the control plane needs no change.
